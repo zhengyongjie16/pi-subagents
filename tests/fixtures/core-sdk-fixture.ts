@@ -30,7 +30,7 @@ export interface CoreFixtureOptions {
 export interface CoreFixtureState extends CoreFixtureOptions {
   instances: CoreFixtureInstance[];
 }
-const key = Symbol.for("pi-codex-subagents.core-test-fixture");
+const key = Symbol.for("pi-subagents.core-test-fixture");
 const shared = globalThis as typeof globalThis & { [key]: CoreFixtureState };
 export function configureCoreFixture(options: CoreFixtureOptions = {}): CoreFixtureState {
   return shared[key] = { ...options, instances: [] };

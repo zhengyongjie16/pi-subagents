@@ -77,7 +77,7 @@ test("preserves the seven schemas, dynamic routing/skills, tool arguments, and r
     await extension(f.pi);
     assert.deepEqual([...f.tools.keys()], ${JSON.stringify(toolNames)});
     assert.deepEqual([...f.commands.keys()], ["subagents"]);
-    assert.deepEqual([...f.renderers.keys()], ["pi-codex-subagent-completion"]);
+    assert.deepEqual([...f.renderers.keys()], ["pi-subagent-completion"]);
     assert.equal(options, undefined, "factory must not initialize a session-scoped manager");
     const plain = schema => JSON.parse(JSON.stringify(schema, (key, value) => key === "description" ? undefined : value));
     const object = (properties, required = []) => ({ type: "object", properties, ...(required.length ? { required } : {}) });
@@ -92,7 +92,7 @@ test("preserves the seven schemas, dynamic routing/skills, tool arguments, and r
     }));
     for (const name of ["read_agent_response", "interrupt_agent"]) assert.deepEqual(plain(f.tools.get(name).parameters), object({ target: string }, ["target"]));
     assert.deepEqual(plain(f.tools.get("send_message").parameters), object({ target: string, message: string }, ["target", "message"]));
-    const config = path.join(f.ctx.cwd, "pi-codex-subagents", "config.json");
+    const config = path.join(f.ctx.cwd, "pi-subagents", "config.json");
     fs.mkdirSync(path.dirname(config), { recursive: true });
     fs.writeFileSync(config, JSON.stringify({ models: ["test/fake"] }));
     await f.emit("session_start");
@@ -167,7 +167,7 @@ test("prefers exact registered model IDs before legacy thinking suffixes without
     ];
     f.ctx.modelRegistry.getAvailable = () => available;
     f.ctx.scopedModels = [{ model: available[1] }, { model: available[4] }];
-    const config = path.join(f.ctx.cwd, "pi-codex-subagents", "config.json");
+    const config = path.join(f.ctx.cwd, "pi-subagents", "config.json");
     fs.mkdirSync(path.dirname(config), { recursive: true });
     fs.writeFileSync(config, JSON.stringify({
       models: ["test/fake:high", "test/only:low", "test/fake:medium", "test/accounts/team/model:high", "test/fake:unknown", "fake", "test/*:high"],
@@ -234,7 +234,7 @@ test("forwards only current same-cwd effective trust and reports errors without 
 test("warns when storage overlaps the current parent's custom native session directory", () => {
   probe(hostFixture + String.raw`
     const f = host();
-    const config = path.join(f.ctx.cwd, "pi-codex-subagents", "config.json");
+    const config = path.join(f.ctx.cwd, "pi-subagents", "config.json");
     const sessionDir = path.join(f.ctx.cwd, "custom-sessions");
     fs.mkdirSync(path.dirname(config), { recursive: true });
     fs.writeFileSync(config, JSON.stringify({ storageDir: path.join(sessionDir, "runs") }));
@@ -248,7 +248,7 @@ test("warns when storage overlaps the current parent's custom native session dir
 
 test("keeps scoped notifications, bounded full output, and widget/shortcut integration", () => {
   probe(hostFixture + String.raw`
-    const config = path.join(process.env.PI_CODING_AGENT_DIR, "pi-codex-subagents", "config.json");
+    const config = path.join(process.env.PI_CODING_AGENT_DIR, "pi-subagents", "config.json");
     fs.mkdirSync(path.dirname(config), { recursive: true });
     fs.writeFileSync(config, JSON.stringify({ shortcut: "ctrl+shift+a" }));
     const f = host();
@@ -258,7 +258,7 @@ test("keeps scoped notifications, bounded full output, and widget/shortcut integ
     options.onActivityChange({ parentSessionId: "other", agentName: "/ignored", active: true });
     options.onActivityChange({ parentSessionId: "parent", agentName: "/task", active: true });
     const [key, widget] = f.widgets.at(-1);
-    assert.equal(key, "pi-codex-subagents");
+    assert.equal(key, "pi-subagents");
     const theme = { fg: (_color, text) => text };
     assert.ok(widget({}, theme).render(80).join("\n").includes("/task running"));
     assert.ok(widget({}, theme).render(30).join("\n").includes("/subagents"));
@@ -267,7 +267,7 @@ test("keeps scoped notifications, bounded full output, and widget/shortcut integ
     const event = { parentSessionId: "parent", agentName: "/task", status: "completed", finalResponse: "answer" };
     options.onUnclaimedCompletion(event);
     assert.deepEqual(f.messages[0], { message: {
-      customType: "pi-codex-subagent-completion",
+      customType: "pi-subagent-completion",
       content: "<subagent_notification>\n" + JSON.stringify({ agent_name: "/task", status: "completed", final_response: "answer" }, null, 2) + "\n</subagent_notification>",
       display: true, details: { agent_name: "/task", status: "completed" },
     }, delivery: { deliverAs: "steer", triggerTurn: true } });
@@ -358,7 +358,7 @@ test.each(runtimes)("validates dynamic spawn schemas and enforces thinking overr
     const agentDir = process.env.PI_CODING_AGENT_DIR;
     const settings = { compaction: { enabled: false }, retry: { enabled: false }, cacheWarming: "off" };
     fs.writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify(settings));
-    const config = path.join(agentDir, "pi-codex-subagents", "config.json");
+    const config = path.join(agentDir, "pi-subagents", "config.json");
     const templates = path.join(path.dirname(config), "agents");
     fs.mkdirSync(templates, { recursive: true });
     fs.writeFileSync(path.join(templates, "routed.md"), "---\nname: routed\nprovider: template-provider\nmodel: template-model\nthinking: medium\n---\n");
@@ -499,7 +499,7 @@ test.each(runtimes)("runs seven registered tools and repeated child cleanup alon
       return { directory, extension };
     };
     const childFixture = fixture("child-provider", "child");
-    const config = path.join(agentDir, "pi-codex-subagents", "config.json");
+    const config = path.join(agentDir, "pi-subagents", "config.json");
     fs.mkdirSync(path.dirname(config));
     fs.writeFileSync(config, JSON.stringify({ retentionDays: 0, defaults: { extensions: [childFixture.extension] } }));
     const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
@@ -700,7 +700,7 @@ test.each(runtimes)("uses native parent new/resume/fork/reload/quit lifecycles t
     };
     const parent = provider("parent"), child = provider("child");
     fs.writeFileSync(path.join(parent.directory, "release-response"), "");
-    const config = path.join(agentDir, "pi-codex-subagents", "config.json");
+    const config = path.join(agentDir, "pi-subagents", "config.json");
     fs.mkdirSync(path.dirname(config));
     fs.writeFileSync(config, JSON.stringify({ retentionDays: 0, defaults: { extensions: [child.extension] } }));
     const started = [], stopped = [], errors = [];
@@ -800,7 +800,7 @@ const loaderSmoke = `
     assert.equal(schema.type, "object");
     assert.ok(typeof definition.execute === "function");
   }
-  assert.equal(fs.existsSync(path.join(agentDir, "pi-codex-subagents", "runs")), false, "file loading alone must not initialize manager resources");
+  assert.equal(fs.existsSync(path.join(agentDir, "pi-subagents", "runs")), false, "file loading alone must not initialize manager resources");
   for (const shutdown of extension.handlers.get("session_shutdown") ?? []) await shutdown({ type: "session_shutdown", reason: "quit" }, {});
 `;
 
@@ -817,6 +817,9 @@ test("packs runtime.ts without an SDK copy and loads the extracted package throu
     const unpacked = Bun.spawnSync(["tar", "-xzf", path.join(temporary, metadata.filename), "-C", temporary], { stdout: "pipe", stderr: "pipe", timeout: 10_000 });
     if (unpacked.exitCode !== 0) throw new Error(new TextDecoder().decode(unpacked.stderr));
     const manifest = JSON.parse(fs.readFileSync(path.join(temporary, "package", "package.json"), "utf8"));
+    expect(manifest.name).toBe("@zhengyongjie16/pi-subagents");
+    expect(manifest.repository).toEqual({ type: "git", url: "git+https://github.com/zhengyongjie16/pi-subagents.git" });
+    expect(manifest.author).toBe("Can Celik");
     expect(manifest.dependencies).toBeUndefined();
     expect(manifest.bundledDependencies).toBeUndefined();
     for (const name of ["pi-ai", "pi-coding-agent", "pi-tui"]) expect(manifest.peerDependencies["@earendil-works/" + name]).toBe("1.5.0");

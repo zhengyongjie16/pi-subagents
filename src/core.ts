@@ -8,7 +8,7 @@ import { CONFIG_DIR_NAME, getAgentDir, type AgentSession, type AgentSessionEvent
 import { createChildSession, promptChildSession, shutdownChildSession } from "./runtime.js";
 import { parseStreamingJson, type AssistantMessage } from "@earendil-works/pi-ai";
 
-export const PACKAGE_BASENAME = "pi-codex-subagents";
+export const PACKAGE_BASENAME = "pi-subagents";
 export const SUBAGENT_DIR = path.join(getAgentDir(), PACKAGE_BASENAME);
 const CONFIG_PATH = path.join(SUBAGENT_DIR, "config.json");
 const SYSTEM_PROMPT_PATH = path.join(SUBAGENT_DIR, "SYSTEM.md");

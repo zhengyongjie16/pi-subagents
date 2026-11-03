@@ -1,7 +1,7 @@
 {
-  "name": "@ogulcancelik/pi-codex-subagents",
-  "version": "0.3.5",
-  "description": "Codex-shaped, session-scoped subagents for Pi with templates, waits, steering, and a live overlay.",
+  "name": "@zhengyongjie16/pi-subagents",
+  "version": "0.5.0",
+  "description": "Session-scoped subagents for Pi with templates, waits, steering, and a live overlay.",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -12,18 +12,33 @@
     "coding-agent"
   ],
   "author": "Can Celik",
+  "contributors": [
+    {
+      "name": "zhengyongjie16",
+      "url": "https://github.com/zhengyongjie16"
+    }
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ogulcancelik/pi-extensions.git",
-    "directory": "packages/pi-codex-subagents"
+    "url": "git+https://github.com/zhengyongjie16/pi-subagents.git"
   },
   "bugs": {
-    "url": "https://github.com/ogulcancelik/pi-extensions/issues"
+    "url": "https://github.com/zhengyongjie16/pi-subagents/issues"
   },
-  "homepage": "https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-codex-subagents#readme",
+  "homepage": "https://github.com/zhengyongjie16/pi-subagents#readme",
   "engines": {
     "node": ">=22.19.0"
+  },
+  "scripts": {
+    "test": "bun test ./tests --timeout 60000",
+    "test:node": "node --test ./tests/runtime.test.ts"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-tui": "1.5.0",
+    "typebox": "1.3.27"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "1.5.0",

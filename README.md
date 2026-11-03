@@ -1,19 +1,21 @@
-# pi-codex-subagents
+# pi-subagents
 
-Codex-shaped, session-scoped subagents for [Pi](https://github.com/earendil-works/pi). Run fresh-context SDK sessions inside the parent Pi process, receive their final responses automatically, steer active work, and inspect sessions in the existing live overlay. No separate Pi agent engine or child TUI is started.
+Session-scoped subagents for [Pi](https://github.com/earendil-works/pi). Run fresh-context SDK sessions inside the parent Pi process, receive their final responses automatically, steer active work, and inspect sessions in the existing live overlay. No separate Pi agent engine or child TUI is started.
+
+Originally created by **[Can Celik (ogulcancelik)](https://github.com/ogulcancelik)** as [`pi-codex-subagents`](https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-codex-subagents). This standalone fork is maintained by [zhengyongjie16](https://github.com/zhengyongjie16). The original author's copyright notice and MIT license are preserved.
 
 Requires **Pi 1.5.0** and Node.js 22.19 or newer. The supported Pi version is pinned because task acceptance uses `PromptOptions.preflightResult`, an exported but **internal** SDK hook verified against 1.5.0. Later versions require contract checks before widening support. Pi supplies the SDK and UI packages; this package does not bundle another SDK copy.
 
 ## Install
 
 ```bash
-pi install npm:@ogulcancelik/pi-codex-subagents
+pi install git:github.com/zhengyongjie16/pi-subagents@main
 ```
 
 For local development:
 
 ```bash
-pi install /absolute/path/to/pi-extensions/packages/pi-codex-subagents
+pi install /absolute/path/to/pi-subagents
 ```
 
 ## Tools
@@ -35,7 +37,7 @@ Agent names are unique within their parent session. The same task name can exist
 Templates are user-defined Markdown files in:
 
 ```text
-~/.pi/agent/pi-codex-subagents/agents/*.md
+~/.pi/agent/pi-subagents/agents/*.md
 ```
 
 No templates are installed automatically. Example:
@@ -81,7 +83,7 @@ When a template loads extensions but omits `tools`, the child uses Pi's normal t
 
 New agents inherit neither the parent conversation nor its system prompt. Each child has its own `ModelRuntime`, settings, resource loader, and session history. The resource policy remains **disable default discovery, load explicit selections**:
 
-- Replace Pi's default prompt with `~/.pi/agent/pi-codex-subagents/SYSTEM.md`, passed to the loader as its original file path. The extension creates a minimal prompt when first used; edit that file directly.
+- Replace Pi's default prompt with `~/.pi/agent/pi-subagents/SYSTEM.md`, passed to the loader as its original file path. The extension creates a minimal prompt when first used; edit that file directly.
 - Do not automatically append `APPEND_SYSTEM.md` or discover global, project, or ancestor `SYSTEM.md`, `AGENTS.md`, `AGENTS.override.md`, or `CLAUDE.md` instructions.
 - Disable default/configured discovery of skills, extensions, prompt templates, and themes. Load the skills/extensions explicitly selected through templates, this extension's defaults, or the tool call. Template body text still enters the first user message.
 - Omitted template tools keep the activation rules described above. An explicit nonempty `tools` list selects those names; an empty `tools` value disables built-in tools but still permits extension tools.
@@ -97,12 +99,12 @@ If the selected model comes from an extension-registered provider, explicitly lo
 Optional configuration lives at:
 
 ```text
-~/.pi/agent/pi-codex-subagents/config.json
+~/.pi/agent/pi-subagents/config.json
 ```
 
 ```json
 {
-  "storageDir": "~/.local/state/pi-codex-subagents/runs",
+  "storageDir": "~/.local/state/pi-subagents/runs",
   "retentionDays": 7,
   "modelResponseTimeoutMs": 600000,
   "models": ["openai-codex/gpt-5.6-sol", "anthropic/claude-opus-4-6"],
@@ -114,7 +116,7 @@ Optional configuration lives at:
 }
 ```
 
-`storageDir` accepts an absolute path, `~/...`, or a path relative to the package configuration directory. By default runs are stored in `~/.pi/agent/pi-codex-subagents/runs`. `retentionDays` defaults to `7`; expired runs and oversized tool outputs are pruned when the agent manager initializes. Set it to `0` to disable automatic cleanup. Observer sockets remain in the operating system temporary directory and are removed on actual session cleanup. They retain live read-only observation across Pi hosts; they are not an agent-engine RPC channel.
+`storageDir` accepts an absolute path, `~/...`, or a path relative to the package configuration directory. By default runs are stored in `~/.pi/agent/pi-subagents/runs`. `retentionDays` defaults to `7`; expired runs and oversized tool outputs are pruned when the agent manager initializes. Set it to `0` to disable automatic cleanup. Observer sockets remain in the operating system temporary directory and are removed on actual session cleanup. They retain live read-only observation across Pi hosts; they are not an agent-engine RPC channel.
 
 JSONL history, info, and log files keep their existing per-parent storage layout. The default dedicated directory is outside Pi's native session list, so child sessions do not appear in the main `/resume` browser. **Do not overlap `storageDir` with Pi's native session directory** (normally `~/.pi/agent/sessions`, or a custom host session directory): native scans can then expose child sessions. The extension reports overlap with the normal native directory or the current parent's custom session directory; keep any other custom scan directories separate too. An explicitly supplied JSONL path can still be opened.
 
@@ -193,12 +195,17 @@ Automatic completions, wait tools, and response tools follow Pi's standard 50 KB
 
 ## Development checks
 
-The root development dependencies and lockfile pin the Pi packages to 1.5.0. The isolated SDK contract suite asserts that version to catch stale development installs. After installing them from the repository root, run from this package directory (the tarball smoke test also needs `npm` and `tar` on PATH):
+This is a standalone package; no checkout of the original monorepo is needed. Development dependencies and `bun.lock` pin the Pi packages to 1.5.0. The isolated SDK contract suite asserts that version to catch stale development installs. Pi provides these packages at runtime through `peerDependencies`; they are not bundled with the extension.
+
+Install [Bun](https://bun.sh/) and Node.js 22.19 or newer, then run from this repository root. The tarball smoke test also needs `npm` and `tar` on PATH:
 
 ```bash
-bun test ./tests/core.test.ts ./tests/runtime.test.ts ./tests/peek.test.ts ./tests/host-integration.test.ts --timeout 60000
-node --test ./tests/runtime.test.ts
+bun install --frozen-lockfile
+bun run test
+bun run test:node
 ```
+
+Commit `bun.lock` when changing dependencies. `node_modules`, local Pi resources, generated output, logs, and environment files are ignored by Git.
 
 Automated checks cover controlled SDK behavior, storage/observer contracts, native-renderer comparisons, and host integration. `host-integration.test.ts` checks the seven public schemas, dynamic trust/error forwarding, lifecycle shutdown reporting, the real Pi extension file loader, and a packed-tarball loader smoke test. On Bun and Node, a controlled provider issues a real parent tool call that invokes the seven tools through native nested-tool validation/hooks while independent parent work remains active. The test checks persisted nested-call records and repeated child session disposal, subscriptions, observed timers, sockets, and activity markers. Tests use temporary agent directories and controlled responses rather than external model requests.
 
@@ -206,4 +213,4 @@ These checks do not replace real-terminal visual/keyboard acceptance, real exten
 
 ## License
 
-MIT
+[MIT](LICENSE). Original work copyright (c) 2025 Can Celik; modifications copyright (c) 2026 zhengyongjie16.

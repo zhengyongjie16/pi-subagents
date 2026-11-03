@@ -103,8 +103,8 @@ export default async function index_ (pi: ExtensionAPI) {
     throw new Error("Native codemode renderers are unavailable.");
   }
 
-  const widgetKey = "pi-codex-subagents";
-  const completionMessageType = "pi-codex-subagent-completion";
+  const widgetKey = "pi-subagents";
+  const completionMessageType = "pi-subagent-completion";
   let cachedSkills: Array<{ name: string; description: string; filePath: string }> = [];
   let cachedSkillsSignature = "";
   let activeContext: any;
@@ -266,7 +266,7 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
       return Type.Object({
         task_name: Type.String({ description: "Task name for the new agent. Use letters, digits, underscores, dashes, and optional slash path separators." }),
         message: Type.String({ description: "Initial task for the new agent." }),
-        agent_type: Type.Optional(Type.String({ description: "Optional agent template name from ~/.pi/agent/pi-codex-subagents/agents/." })),
+        agent_type: Type.Optional(Type.String({ description: "Optional agent template name from ~/.pi/agent/pi-subagents/agents/." })),
         skills: Type.Optional(Type.Array(Type.String(), { description: "Additional skill names from the loaded parent skills listed in this tool description." })),
         ...(spawnModels.size
           ? {

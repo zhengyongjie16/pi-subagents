@@ -161,7 +161,7 @@ model: '   '
   });
 
   test("describes full pairs and model-only routes without advertising provider-only routing", () => {
-    const directory = path.join(TEST_AGENT_DIR, "pi-codex-subagents", "agents");
+    const directory = path.join(TEST_AGENT_DIR, "pi-subagents", "agents");
     const templates = {
       "description-full": 'provider: " template-provider "\nmodel: " template-model "',
       "description-model-only": 'provider: "   "\nmodel: template-model\nthinking: medium',
@@ -184,7 +184,7 @@ model: '   '
 });
 
 describe("run storage", () => {
-  const packageDir = path.join(TEST_AGENT_DIR, "pi-codex-subagents");
+  const packageDir = path.join(TEST_AGENT_DIR, "pi-subagents");
   const configFile = path.join(packageDir, "config.json");
   const fixtureDir = path.join(TEST_AGENT_DIR, "retention-fixture");
 
@@ -204,7 +204,7 @@ describe("run storage", () => {
     fs.rmSync(configFile, { force: true });
     const parentSessionId = "legacy-parent";
     const id = "11111111-1111-4111-8111-111111111111";
-    const legacyRoot = path.join(process.env.PI_SUBAGENT_TEMP_DIR!, "pi-codex-subagents", os.userInfo().username, "runs");
+    const legacyRoot = path.join(process.env.PI_SUBAGENT_TEMP_DIR!, "pi-subagents", os.userInfo().username, "runs");
     const legacyScope = path.join(legacyRoot, parentScopeKey(parentSessionId));
     fs.mkdirSync(legacyScope, { recursive: true });
     fs.writeFileSync(path.join(legacyScope, `${id}.info.json`), JSON.stringify({
@@ -264,7 +264,7 @@ describe("run storage", () => {
     const expiredInfo = path.join(scope, `${expiredId}.info.json`);
     const activeInfo = path.join(scope, `${activeId}.info.json`);
     const expiredOutput = path.join(outputs, `${oldTime.getTime()}-33333333-3333-4333-8333-333333333333.txt`);
-    const activeMarker = path.join(process.env.PI_SUBAGENT_TEMP_DIR!, "pi-codex-subagents", os.userInfo().username, "sockets", `${activeId}.peek.json`);
+    const activeMarker = path.join(process.env.PI_SUBAGENT_TEMP_DIR!, "pi-subagents", os.userInfo().username, "sockets", `${activeId}.peek.json`);
     const unrelatedAgentFile = path.join(scope, `${expiredId}.notes`);
     const staleLock = path.join(scope, `.task-${"c".repeat(24)}.lock`);
     const liveOwnerLock = path.join(scope, `.task-${"d".repeat(24)}.lock`);
@@ -362,7 +362,7 @@ function spawnParams(parentSessionId: string, task_name: string, message: string
   };
 }
 
-const configFile = path.join(TEST_AGENT_DIR, "pi-codex-subagents", "config.json");
+const configFile = path.join(TEST_AGENT_DIR, "pi-subagents", "config.json");
 function writeConfig(config: Record<string, any> = {}) {
   fs.mkdirSync(path.dirname(configFile), { recursive: true });
   fs.writeFileSync(configFile, JSON.stringify({ defaults: { extensions: [CORE_SDK_EXTENSION] }, ...config }));
@@ -380,7 +380,7 @@ function sessionMessages(info: AgentInfo): any[] {
   return fs.readFileSync(info.sessionFile, "utf8").trim().split("\n").filter(Boolean)
     .map((line) => JSON.parse(line)).filter((entry) => entry.type === "message").map((entry) => entry.message);
 }
-const markerDir = path.join(TEST_AGENT_DIR, "pi-codex-subagents", os.userInfo().username, "sockets");
+const markerDir = path.join(TEST_AGENT_DIR, "pi-subagents", os.userInfo().username, "sockets");
 const activeMarker = (id: string) => path.join(markerDir, id + ".active.json");
 const peekMarker = (id: string) => path.join(markerDir, id + ".peek.json");
 // This is the retained observer socket's framing, not a child-engine RPC decoder.
@@ -398,7 +398,7 @@ describe("spawn model and thinking resolution", () => {
   test("caller wins, then the template, then the inherited value, then the default", async () => {
     const parentSessionId = "spawn-overrides";
     fs.rmSync(path.join(getRunsDir(), parentScopeKey(parentSessionId)), { recursive: true, force: true });
-    const templateFile = path.join(TEST_AGENT_DIR, "pi-codex-subagents", "agents", "routed.md");
+    const templateFile = path.join(TEST_AGENT_DIR, "pi-subagents", "agents", "routed.md");
     fs.mkdirSync(path.dirname(templateFile), { recursive: true });
     fs.writeFileSync(templateFile, "---\nname: routed\nprovider: template-provider\nmodel: template-model\nthinking: medium\n---\nRouted template.");
     const modelOnlyFile = path.join(path.dirname(templateFile), "caller-priority.md");
@@ -438,7 +438,7 @@ describe("spawn model and thinking resolution", () => {
   ])("resolves %s without changing inherited thinking", async (name, fields, provider, modelId) => {
     const parentSessionId = `template-resolution-${name}`;
     const scope = path.join(getRunsDir(), parentScopeKey(parentSessionId));
-    const templateFile = path.join(TEST_AGENT_DIR, "pi-codex-subagents", "agents", `${name}.md`);
+    const templateFile = path.join(TEST_AGENT_DIR, "pi-subagents", "agents", `${name}.md`);
     const manager = new AgentManager();
     fs.writeFileSync(templateFile, `---\nname: ${name}\n${fields}\n---\n`);
     try {
@@ -494,7 +494,7 @@ describe("SDK model validation", () => {
 
   test("accepts a slash-containing model ID and retains the saved route/resources when templates change", async () => {
     const parent = "saved-route-" + randomUUID();
-    const template = path.join(TEST_AGENT_DIR, "pi-codex-subagents", "agents", "saved-route.md");
+    const template = path.join(TEST_AGENT_DIR, "pi-subagents", "agents", "saved-route.md");
     const id = "accounts/fireworks/models/glm-5p2";
     fs.writeFileSync(template, "---\nname: saved-route\nprovider: fireworks\nmodel: " + id + "\n---\nTemplate instructions.");
     const manager = new AgentManager();
@@ -1069,7 +1069,7 @@ describe("startup storage failures", () => {
     const parentSessionId = "lifecycle-startup-failure";
     const scope = path.join(getRunsDir(), parentScopeKey(parentSessionId));
     // Marker files live in the isolated temp directory, not the Windows named-pipe namespace.
-    const socketDir = path.join(TEST_AGENT_DIR, "pi-codex-subagents", os.userInfo().username, "sockets");
+    const socketDir = path.join(TEST_AGENT_DIR, "pi-subagents", os.userInfo().username, "sockets");
     fs.rmSync(scope, { recursive: true, force: true });
     const manager = new AgentManager();
     await manager.ready();
@@ -1144,7 +1144,7 @@ describe("startup storage failures", () => {
 
   test("rejects an empty configured system prompt instead of falling back to Pi's default", async () => {
     const parentSessionId = "empty-system-prompt";
-    const systemPromptFile = path.join(TEST_AGENT_DIR, "pi-codex-subagents", "SYSTEM.md");
+    const systemPromptFile = path.join(TEST_AGENT_DIR, "pi-subagents", "SYSTEM.md");
     fs.mkdirSync(path.dirname(systemPromptFile), { recursive: true });
     fs.writeFileSync(systemPromptFile, "\n");
     const manager = new AgentManager();
@@ -1417,7 +1417,7 @@ describe("extension completion delivery and TUI", () => {
   });
 
   test.each([undefined, "", "ctrl+shift+a"])("opens the browser with optional shortcut %s", async (shortcut) => {
-    const configFile = path.join(TEST_AGENT_DIR, "pi-codex-subagents", "config.json");
+    const configFile = path.join(TEST_AGENT_DIR, "pi-subagents", "config.json");
     fs.mkdirSync(path.dirname(configFile), { recursive: true });
     fs.writeFileSync(configFile, JSON.stringify({ shortcut }));
     const commands = new Map<string, any>();
@@ -1908,8 +1908,8 @@ describe("extension completion delivery and TUI", () => {
     };
     const scope = path.join(getRunsDir(), parentScopeKey(parentSessionId));
     fs.rmSync(scope, { recursive: true, force: true });
-    const configFile = path.join(TEST_AGENT_DIR, "pi-codex-subagents", "config.json");
-    const modelOnlyTemplateFile = path.join(TEST_AGENT_DIR, "pi-codex-subagents", "agents", "current-parent.md");
+    const configFile = path.join(TEST_AGENT_DIR, "pi-subagents", "config.json");
+    const modelOnlyTemplateFile = path.join(TEST_AGENT_DIR, "pi-subagents", "agents", "current-parent.md");
     fs.writeFileSync(modelOnlyTemplateFile, "---\nname: current-parent\nmodel: template-model\n---\n");
     // A thinking suffix on an allowlist entry is tolerated and stripped from the offered pair.
     fs.writeFileSync(configFile, JSON.stringify({ defaults: { extensions: [CORE_SDK_EXTENSION] }, models: ["test/fake:high", "typo/nope"], modelsFromEnabledModels: true }));
@@ -1934,7 +1934,7 @@ describe("extension completion delivery and TUI", () => {
       // The values live in the schema, but the description has to say the capability exists.
       expect(tools.get("spawn_agent").description).toContain("`model` takes one of the values its schema lists");
       expect([...commands.keys()]).toEqual(["subagents"]);
-      expect(renderers.has("pi-codex-subagent-completion")).toBe(true);
+      expect(renderers.has("pi-subagent-completion")).toBe(true);
 
       fs.mkdirSync(scope, { recursive: true });
       const historyCreatedAt = Date.now();
@@ -2802,7 +2802,7 @@ describe("SDK business scope, waits and resources", () => {
     const root = fs.mkdtempSync(path.join(TEST_AGENT_DIR, "resources-"));
     const cwd = path.join(root, "project", "nested");
     fs.mkdirSync(cwd, { recursive: true });
-    const ownSystem = path.join(TEST_AGENT_DIR, "pi-codex-subagents", "SYSTEM.md");
+    const ownSystem = path.join(TEST_AGENT_DIR, "pi-subagents", "SYSTEM.md");
     const literalTarget = path.join(root, "literal-target.md");
     fs.writeFileSync(literalTarget, "FORBIDDEN_SECOND_SYSTEM_READ");
     fs.writeFileSync(ownSystem, literalTarget);
@@ -2820,7 +2820,7 @@ describe("SDK business scope, waits and resources", () => {
     put(path.join(cwd, ".pi", "skills", "unselected", "SKILL.md"), "---\nname: unselected\ndescription: FORBIDDEN_AUTO_SKILL\n---\nDo not discover this.");
     const skill = path.join(root, "explicit-skill", "SKILL.md");
     put(skill, "---\nname: explicit-core-skill\ndescription: EXPLICIT_CORE_SKILL_DESCRIPTION\n---\nExplicit skill body.");
-    const template = path.join(TEST_AGENT_DIR, "pi-codex-subagents", "agents", "resource-policy.md");
+    const template = path.join(TEST_AGENT_DIR, "pi-subagents", "agents", "resource-policy.md");
     put(template, "---\nname: resource-policy\nskills: explicit-core-skill\n---\nEXPLICIT_TEMPLATE_BODY");
     const parentSession = codingAgent.SessionManager.create(cwd, root);
     parentSession.appendMessage({ role: "user", content: "FORBIDDEN_PARENT_CONVERSATION", timestamp: Date.now() });
@@ -2859,7 +2859,7 @@ describe("SDK business scope, waits and resources", () => {
   test.each([undefined, "", "read"])("retains the tool-selection three-state contract (%s)", async (tools) => {
     const parent = "tools-contract-" + randomUUID();
     const name = "tool-contract-" + randomUUID();
-    const template = path.join(TEST_AGENT_DIR, "pi-codex-subagents", "agents", name + ".md");
+    const template = path.join(TEST_AGENT_DIR, "pi-subagents", "agents", name + ".md");
     fs.writeFileSync(template, "---\nname: " + name + (tools === undefined ? "" : "\ntools: " + tools) + "\n---\n");
     const manager = new AgentManager();
     try {
