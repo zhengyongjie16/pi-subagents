@@ -1,5 +1,10 @@
 import { isAbsolute, relative, sep } from 'node:path';
-import type { ExtensionAPI, Theme, ToolRenderers } from '@earendil-works/pi-coding-agent';
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  Theme,
+  ToolRenderers,
+} from '@earendil-works/pi-coding-agent';
 import {
   createCodemodeExtension,
   DEFAULT_MAX_BYTES,
@@ -29,6 +34,8 @@ import {
   writeFullToolOutput,
 } from './core.js';
 import { SubagentPeekOverlay } from './peek.js';
+
+type ToolRenderContext = Parameters<NonNullable<ToolRenderers['renderResult']>>[3];
 
 function textResult(text: string, details?: any) {
   return { content: [{ type: 'text' as const, text }], details };
@@ -128,7 +135,10 @@ export default async function index_(pi: ExtensionAPI) {
 
   type SpawnModel = { provider: string; modelId: string };
 
-  const exactPair = (pattern: string, available: Set<string>): SpawnModel | undefined => {
+  const exactPair = (
+    pattern: string,
+    available: Map<string, SpawnModel>,
+  ): SpawnModel | undefined => {
     const colon = pattern.lastIndexOf(':');
     // A registered ID wins over the legacy model:thinking shorthand.
     const reference =
@@ -137,24 +147,27 @@ export default async function index_(pi: ExtensionAPI) {
       (THINKING_LEVELS as readonly string[]).includes(pattern.slice(colon + 1))
         ? pattern.slice(0, colon)
         : pattern;
-    const slash = reference.indexOf('/');
-    if (slash <= 0 || /[*?[\]]/.test(reference)) return undefined;
-    return { provider: reference.slice(0, slash), modelId: reference.slice(slash + 1) };
+    if (/[*?[\]]/.test(reference)) return undefined;
+    return available.get(reference);
   };
 
   let spawnModels = new Map<string, SpawnModel>();
 
-  const resolveSpawnModels = (ctx: any) => {
+  const resolveSpawnModels = (ctx: ExtensionContext) => {
     const config = loadSubagentConfig();
     const models = new Map<string, SpawnModel>();
-    const available = new Set<string>(
-      ctx.modelRegistry.getAvailable().map((model: any) => `${model.provider}/${model.id}`),
-    );
+    const available = new Map<string, SpawnModel>();
+    for (const { provider, id } of ctx.modelRegistry.getAvailable()) {
+      const reference = `${provider}/${id}`;
+      const previous = available.get(reference);
+      // Providers can contain slashes; ambiguous references follow Pi's longest-provider rule.
+      if (!previous || provider.length > previous.provider.length)
+        available.set(reference, { provider, modelId: id });
+    }
     const unavailable: string[] = [];
     for (const entry of config.models ?? []) {
       const pair = exactPair(entry, available);
-      if (pair && available.has(`${pair.provider}/${pair.modelId}`))
-        models.set(`${pair.provider}/${pair.modelId}`, pair);
+      if (pair) models.set(`${pair.provider}/${pair.modelId}`, pair);
       else unavailable.push(entry);
     }
     if (config.modelsFromEnabledModels) {
@@ -448,8 +461,8 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
         0,
       );
     },
-    renderResult(result: any, _options: any, theme: Theme) {
-      if (result.isError)
+    renderResult(result: any, _options: any, theme: Theme, context: ToolRenderContext) {
+      if (context.isError)
         return new Text(theme.fg('error', `✗ ${result.content?.[0]?.text || 'failed'}`), 0, 0);
       const model =
         result.details?.provider && result.details?.modelId
@@ -571,8 +584,8 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
         0,
       );
     },
-    renderResult(result: any, _options: any, theme: Theme) {
-      if (result.isError) return new Text(theme.fg('error', '✗ wait failed'), 0, 0);
+    renderResult(result: any, _options: any, theme: Theme, context: ToolRenderContext) {
+      if (context.isError) return new Text(theme.fg('error', '✗ wait failed'), 0, 0);
       return new Text(theme.fg('success', result.details?.message || 'done'), 0, 0);
     },
   });
@@ -620,8 +633,8 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
         0,
       );
     },
-    renderResult(result: any, _options: any, theme: Theme) {
-      if (result.isError) return new Text(theme.fg('error', '✗ wait failed'), 0, 0);
+    renderResult(result: any, _options: any, theme: Theme, context: ToolRenderContext) {
+      if (context.isError) return new Text(theme.fg('error', '✗ wait failed'), 0, 0);
       return new Text(theme.fg('success', result.details?.message || 'done'), 0, 0);
     },
   });
@@ -698,7 +711,8 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
     renderCall(_args: any, theme: Theme) {
       return new Text(theme.fg('toolTitle', theme.bold('list_agents')), 0, 0);
     },
-    renderResult(result: any, options: any, theme: Theme) {
+    renderResult(result: any, options: any, theme: Theme, context: ToolRenderContext) {
+      if (context.isError) return new Text(theme.fg('error', '✗ list failed'), 0, 0);
       const agents = result.details?.agents || [];
       const total = result.details?.total ?? agents.length;
       if (!options.expanded)
@@ -745,8 +759,8 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
         0,
       );
     },
-    renderResult(result: any, _options: any, theme: Theme) {
-      if (result.isError) return new Text(theme.fg('error', '✗ read failed'), 0, 0);
+    renderResult(result: any, _options: any, theme: Theme, context: ToolRenderContext) {
+      if (context.isError) return new Text(theme.fg('error', '✗ read failed'), 0, 0);
       return new Text(theme.fg('success', `✓ ${result.details?.agent_name || 'response'}`), 0, 0);
     },
   });
@@ -792,8 +806,8 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
         0,
       );
     },
-    renderResult(result: any, _options: any, theme: Theme) {
-      if (result.isError) return new Text(theme.fg('error', '✗ send failed'), 0, 0);
+    renderResult(result: any, _options: any, theme: Theme, context: ToolRenderContext) {
+      if (context.isError) return new Text(theme.fg('error', '✗ send failed'), 0, 0);
       return new Text(
         theme.fg('success', result.details?.delivery === 'steer' ? '✓ steered' : '✓ started'),
         0,
@@ -837,8 +851,8 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
         0,
       );
     },
-    renderResult(result: any, _options: any, theme: Theme) {
-      if (result.isError) return new Text(theme.fg('error', '✗ interrupt failed'), 0, 0);
+    renderResult(result: any, _options: any, theme: Theme, context: ToolRenderContext) {
+      if (context.isError) return new Text(theme.fg('error', '✗ interrupt failed'), 0, 0);
       return new Text(
         theme.fg('warning', `↯ previous: ${result.details?.previous_status || 'unknown'}`),
         0,
@@ -908,17 +922,16 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
     }
   }
 
-  function pickAgent(
-    ctx: any,
-  ): { task: string; parentSessionId: string; includeAll: boolean } | undefined {
+  type AgentSelection = { task: string; parentSessionId: string; includeAll: boolean };
+
+  async function pickAgent(ctx: ExtensionContext): Promise<AgentSelection | undefined> {
     const manager = ensureManager(ctx);
     const currentSessionId = parentSessionId(ctx);
-    return ctx.ui.custom((tui: any, theme: any, _keybindings: any, done: any) => {
+    return ctx.ui.custom<AgentSelection | undefined>((tui, theme, _keybindings, done) => {
       let selected = 0;
       let showAll = false;
       let displayed: ReturnType<AgentManager['listAgents']> = [];
-      let displayedSelection:
-        { task: string; parentSessionId: string; includeAll: boolean } | undefined;
+      let displayedSelection: AgentSelection | undefined;
       let cached: string[] | undefined;
       let cachedWidth: number | undefined;
       const fg = theme.fg.bind(theme);
@@ -1064,12 +1077,12 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
     });
   }
 
-  const browseAgents = async (ctx: any) => {
+  const browseAgents = async (ctx: ExtensionContext) => {
     if (ctx.mode !== 'tui') {
       ctx.ui.notify('Subagent overlays require interactive TUI mode.', 'warning');
       return;
     }
-    const selected = pickAgent(ctx);
+    const selected = await pickAgent(ctx);
     if (selected)
       await openAgentOverlay(ctx, selected.task, selected.parentSessionId, selected.includeAll);
   };

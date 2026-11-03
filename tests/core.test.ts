@@ -2742,7 +2742,12 @@ describe('extension completion delivery and TUI', () => {
 
       const spawnRendered = tools
         .get('spawn_agent')
-        .renderResult(spawnResult, {}, { fg: (_color: string, text: string) => text })
+        .renderResult(
+          spawnResult,
+          {},
+          { fg: (_color: string, text: string) => text },
+          { isError: false },
+        )
         .render(400);
       expect(spawnRendered.join('\n').trim()).toBe(
         `✓ ${spawnResult.details.task_name} · test/fake · high`,

@@ -84,6 +84,118 @@ const hostFixture = `
   }
 `;
 
+test('awaits browser selection and cancellation before opening details through commands and shortcuts', () => {
+  probe(
+    hostFixture +
+      String.raw`
+    const config = path.join(process.env.PI_CODING_AGENT_DIR, "pi-subagents", "config.json");
+    fs.mkdirSync(path.dirname(config), { recursive: true });
+    fs.writeFileSync(config, JSON.stringify({ shortcut: "ctrl+shift+a" }));
+    for (const entrypoint of ["command", "shortcut"]) {
+      for (const selected of [undefined, { task: "/worker", parentSessionId: "parent", includeAll: false }]) {
+        const f = host();
+        await extension(f.pi);
+        const queries = [];
+        AgentManager.prototype.getAgentInfo = (task, parentSessionId) => {
+          queries.push({ task, parentSessionId });
+          return { canonicalName: task, parentSessionId };
+        };
+        let select, closeDetails, overlays = 0, settled = false;
+        const selection = new Promise(resolve => { select = resolve; });
+        const details = new Promise(resolve => { closeDetails = resolve; });
+        f.ctx.ui.custom = (_create, options) => {
+          if (options?.overlay) { overlays++; return details; }
+          return selection;
+        };
+        const run = entrypoint === "command"
+          ? f.commands.get("subagents").handler("", f.ctx)
+          : f.shortcuts.get("ctrl+shift+a").handler(f.ctx);
+        run.then(() => { settled = true; });
+        try {
+          await new Promise(resolve => setImmediate(resolve));
+          assert.equal(settled, false, "browser command must wait for the user's choice");
+          assert.deepEqual(queries, [], "no task lookup before selection");
+          assert.deepEqual(f.notifications, []);
+          select(selected);
+          await new Promise(resolve => setImmediate(resolve));
+          assert.equal(overlays, selected ? 1 : 0);
+          assert.deepEqual(queries, selected ? [{ task: "/worker", parentSessionId: "parent" }] : []);
+          assert.equal(settled, !selected, "a selected detail overlay must also be awaited");
+          closeDetails(undefined);
+          await run;
+          assert.deepEqual(f.notifications, [], "cancellation is not an error");
+        } finally {
+          select(undefined);
+          closeDetails(undefined);
+          await run;
+          await f.emit("session_shutdown", { reason: "quit" });
+        }
+      }
+    }
+  `,
+  );
+});
+
+test('uses the native render context for errors without changing successful tool previews', () => {
+  probe(
+    hostFixture +
+      String.raw`
+    const { initTheme, ToolExecutionComponent } = await import(${JSON.stringify(sdkUrl)});
+    const { stripVTControlCharacters } = await import("node:util");
+    initTheme("dark", false);
+    const f = host();
+    await extension(f.pi);
+    const success = {
+      spawn_agent: "✓ /worker", wait_agent: "success-only", wait_all_agents: "success-only",
+      list_agents: "✓ 0 of 0 agents", read_agent_response: "✓ /worker",
+      send_message: "✓ steered", interrupt_agent: "↯ previous: running",
+    };
+    const failure = {
+      spawn_agent: "✗ controlled failure", wait_agent: "✗ wait failed", wait_all_agents: "✗ wait failed",
+      list_agents: "✗ list failed", read_agent_response: "✗ read failed",
+      send_message: "✗ send failed", interrupt_agent: "✗ interrupt failed",
+    };
+    const details = {
+      task_name: "/worker", provider: "test", modelId: "fake", thinking: "high",
+      agent_name: "/worker", message: "success-only", agents: [], total: 0,
+      delivery: "steer", previous_status: "running", status: "failed",
+    };
+    for (const [name, definition] of f.tools) {
+      const invocations = [];
+      const renderer = { ...definition, renderResult(...args) {
+        invocations.push(args);
+        return definition.renderResult(...args);
+      } };
+      const component = new ToolExecutionComponent(name, name + "-render", {},
+        { showImages: false, outputPad: 0 }, renderer, { requestRender() {} }, f.ctx.cwd);
+      const rendered = () => stripVTControlCharacters(component.render(120).join("\n"));
+      component.updateResult({ content: [{ type: "text", text: "successful output" }], details, isError: false });
+      assert.ok(rendered().includes(success[name]), name + " success preview changed");
+      component.updateResult({ content: [{ type: "text", text: "partial output" }], details, isError: false }, true);
+      assert.equal(invocations.at(-1)[1].isPartial, true);
+      assert.equal(invocations.at(-1)[3].isPartial, true);
+      assert.equal(invocations.at(-1)[3].isError, false);
+      for (const expanded of [false, true]) {
+        component.setExpanded(expanded);
+        for (const errorDetails of [undefined, details]) {
+          // Native ToolExecutionComponent omits isError from result and supplies it in context.
+          component.updateResult({ content: [{ type: "text", text: "controlled failure" }], details: errorDetails, isError: true });
+          const output = rendered();
+          assert.equal(Object.hasOwn(invocations.at(-1)[0], "isError"), false);
+          assert.equal(invocations.at(-1)[3].isError, true);
+          assert.ok(output.includes(failure[name]), name + " must render its failure state: " + output);
+          assert.ok(!output.includes("✓"), name + " must not show a success checkmark");
+          assert.ok(!output.includes("↯ previous:"), name + " must not show a successful interrupt");
+        }
+      }
+      component.setExpanded(false);
+      component.updateResult({ content: [{ type: "text", text: "successful output" }], details, isError: false });
+      assert.ok(rendered().includes(success[name]), name + " must recover from a previous error");
+    }
+  `,
+  );
+});
+
 test('preserves the seven schemas, dynamic routing/skills, tool arguments, and return wrappers', () => {
   probe(
     hostFixture +
@@ -182,19 +294,21 @@ test('prefers exact registered model IDs before legacy thinking suffixes without
       { provider: "test", id: "fake" }, { provider: "test", id: "fake:high" },
       { provider: "test", id: "only:low" }, { provider: "test", id: "accounts/team/model:high" },
       { provider: "other", id: "scoped:max" },
+      { provider: "audit", id: "provider/org/model" }, { provider: "audit/provider", id: "org/model" },
+      { provider: "llama.cpp/http://localhost:8080", id: "repo/model:high" },
     ];
     f.ctx.modelRegistry.getAvailable = () => available;
     f.ctx.scopedModels = [{ model: available[1] }, { model: available[4] }];
     const config = path.join(f.ctx.cwd, "pi-subagents", "config.json");
     fs.mkdirSync(path.dirname(config), { recursive: true });
     fs.writeFileSync(config, JSON.stringify({
-      models: ["test/fake:high", "test/only:low", "test/fake:medium", "test/accounts/team/model:high", "test/fake:unknown", "fake", "test/*:high"],
+      models: ["test/fake:high", "test/only:low", "test/fake:medium", "test/accounts/team/model:high", "audit/provider/org/model", "audit/provider/org/model:medium", "llama.cpp/http://localhost:8080/repo/model:high", "test/fake:unknown", "fake", "test/*:high"],
       modelsFromEnabledModels: true,
     }));
     await extension(f.pi);
     await f.emit("session_start");
     try {
-      const models = ["test/fake:high", "test/only:low", "test/fake", "test/accounts/team/model:high", "other/scoped:max"];
+      const models = ["test/fake:high", "test/only:low", "test/fake", "test/accounts/team/model:high", "audit/provider/org/model", "llama.cpp/http://localhost:8080/repo/model:high", "other/scoped:max"];
       assert.deepEqual(f.tools.get("spawn_agent").parameters.properties.model.enum, models);
       assert.deepEqual(f.notifications, [["spawn_agent models not available: test/fake:unknown, fake, test/*:high", "warning"]]);
       let spawned;
@@ -202,11 +316,19 @@ test('prefers exact registered model IDs before legacy thinking suffixes without
       AgentManager.prototype.getAgentInfo = () => ({ ...spawned.model, thinking: spawned.inheritedThinking });
       for (const model of models) {
         await f.call("spawn_agent", { task_name: "task", message: "work", model });
-        assert.equal(spawned.model.provider + "/" + spawned.model.modelId, model);
+        const expected = available.filter(entry => entry.provider + "/" + entry.id === model)
+          .sort((a, b) => b.provider.length - a.provider.length)[0];
+        assert.deepEqual(spawned.model, { provider: expected.provider, modelId: expected.id });
         assert.equal(spawned.thinking, undefined, "a model suffix must not override inherited thinking");
       }
+      assert.deepEqual(spawned.model, { provider: "other", modelId: "scoped:max" });
+      // A canonical reference can match multiple pairs: prefer the longest provider, regardless of catalog order.
+      available.reverse();
+      await f.emit("session_start");
+      await f.call("spawn_agent", { task_name: "task", message: "work", model: "audit/provider/org/model" });
+      assert.deepEqual(spawned.model, { provider: "audit/provider", modelId: "org/model" });
       // Even when there is no unsuffixed model, the full registered ID is usable.
-      available.splice(0, 1);
+      available.splice(available.findIndex(model => model.provider === "test" && model.id === "fake"), 1);
       fs.writeFileSync(config, JSON.stringify({ models: ["test/fake:high"] }));
       await f.emit("session_start");
       assert.deepEqual(f.tools.get("spawn_agent").parameters.properties.model.enum, ["test/fake:high"]);
@@ -385,7 +507,9 @@ test.each(runtimes)(
     const { configureCoreFixture } = await import(${JSON.stringify(pathToFileURL(path.join(packageDir, 'tests', 'fixtures', 'core-sdk-fixture.ts')).href)});
     const nativeThinking = [];
     const fixture = configureCoreFixture({
-      routes: [["test", "fake"], ["test", "fake:high"], ["template-provider", "template-model"]],
+      routes: [["test", "fake"], ["test", "fake:high"], ["template-provider", "template-model"],
+        ["tenant/gateway", "accounts/team/model"], ["tenant/gateway", "accounts/team/model:high"],
+        ["llama.cpp/http://localhost:8080", "repo/model:high"]],
       onStart: pi => { nativeThinking.push(pi.getThinkingLevel()); },
     });
     const agentDir = process.env.PI_CODING_AGENT_DIR;
@@ -435,11 +559,13 @@ test.each(runtimes)(
       assert.equal((await spawn("inherited")).thinking, "off");
       assert.equal((await spawn("template-inherited", { agent_type: "routed" })).thinking, "medium");
 
-      writeConfig(["test/fake", "test/fake:high"]);
+      const allowedModels = ["test/fake", "test/fake:high", "tenant/gateway/accounts/team/model",
+        "tenant/gateway/accounts/team/model:high", "llama.cpp/http://localhost:8080/repo/model:high"];
+      writeConfig([...allowedModels, "tenant/gateway/accounts/team/model:medium"]);
       await session.extensionRunner.emit({ type: "session_start", reason: "reload" });
       const schema = JSON.parse(JSON.stringify(spawnTool().parameters));
       assert.deepEqual(schema.required, ["task_name", "message"]);
-      assert.deepEqual(schema.properties.model, { type: "string", enum: ["test/fake", "test/fake:high"], description: schema.properties.model.description });
+      assert.deepEqual(schema.properties.model, { type: "string", enum: allowedModels, description: schema.properties.model.description });
       assert.deepEqual(schema.properties.thinking, { type: "string", enum: ["off", "minimal", "low", "medium", "high", "xhigh", "max"], description: schema.properties.thinking.description });
       assert.ok(!JSON.stringify(schema).includes("\"~"), "TypeBox internals must not leak into the provider-facing schema");
       assert.equal(validate({ task_name: "optional", message: "work" }).thinking, undefined);
@@ -457,6 +583,16 @@ test.each(runtimes)(
       const colon = await spawn("colon", { model: "test/fake:high" });
       assert.equal(colon.modelId, "fake:high");
       assert.equal(colon.thinking, "off", "the exact ID suffix is not a thinking override");
+      for (const [task, model, provider, modelId] of [
+        ["slash-provider", "tenant/gateway/accounts/team/model", "tenant/gateway", "accounts/team/model"],
+        ["slash-provider-colon", "tenant/gateway/accounts/team/model:high", "tenant/gateway", "accounts/team/model:high"],
+        ["url-provider", "llama.cpp/http://localhost:8080/repo/model:high", "llama.cpp/http://localhost:8080", "repo/model:high"],
+      ]) {
+        const routed = await spawn(task, { model });
+        assert.equal(routed.provider, provider);
+        assert.equal(routed.modelId, modelId);
+        assert.equal(routed.thinking, "off", "a routing suffix must not change inherited thinking");
+      }
       const overridden = await spawn("caller-priority", { agent_type: "routed", model: "test/fake:high", thinking: "high" });
       assert.equal(overridden.provider, "test");
       assert.equal(overridden.modelId, "fake:high");
