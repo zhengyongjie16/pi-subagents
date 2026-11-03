@@ -1,26 +1,39 @@
-import { expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import { pathToFileURL } from "node:url";
+import { expect, test } from 'bun:test';
+import { spawnSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
-const packageDir = path.resolve(import.meta.dir, "..");
-const entry = path.join(packageDir, "src", "index.ts");
-const sdkUrl = import.meta.resolve("@earendil-works/pi-coding-agent");
-const toolNames = ["spawn_agent", "wait_agent", "wait_all_agents", "list_agents", "read_agent_response", "send_message", "interrupt_agent"];
+const packageDir = path.resolve(import.meta.dir, '..');
+const entry = path.join(packageDir, 'src', 'index.ts');
+const sdkUrl = import.meta.resolve('@earendil-works/pi-coding-agent');
+const toolNames = [
+  'spawn_agent',
+  'wait_agent',
+  'wait_all_agents',
+  'list_agents',
+  'read_agent_response',
+  'send_message',
+  'interrupt_agent',
+];
 
 // Separate processes keep module mocks, SDK caches, and agent directories out of sibling suites.
 function probe(source: string, executable = process.execPath, extensionEntry = entry): void {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "pi-host-"));
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-host-'));
   try {
-    const script = path.join(temporary, "probe.mjs");
+    const script = path.join(temporary, 'probe.mjs');
     fs.writeFileSync(script, source);
     const result = spawnSync(executable, [script, extensionEntry], {
-      cwd: packageDir, encoding: "utf8", timeout: 40_000,
+      cwd: packageDir,
+      encoding: 'utf8',
+      timeout: 40_000,
       env: { ...process.env, PI_CODING_AGENT_DIR: temporary, PI_SUBAGENT_TEMP_DIR: temporary },
     });
-    if (result.status !== 0) throw new Error(`Host probe failed: ${result.error ?? ""}\n${result.stdout}\n${result.stderr}`);
+    if (result.status !== 0)
+      throw new Error(
+        `Host probe failed: ${result.error ?? ''}\n${result.stdout}\n${result.stderr}`,
+      );
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
   }
@@ -30,7 +43,7 @@ const hostFixture = `
   import assert from "node:assert/strict";
   import * as fs from "node:fs";
   import * as path from "node:path";
-  const { AgentManager } = await import(${JSON.stringify(pathToFileURL(path.join(packageDir, "src", "core.ts")).href)});
+  const { AgentManager } = await import(${JSON.stringify(pathToFileURL(path.join(packageDir, 'src', 'core.ts')).href)});
   const { default: extension } = await import(${JSON.stringify(pathToFileURL(entry).href)});
   let options;
   let shutdownCalls = 0;
@@ -71,8 +84,10 @@ const hostFixture = `
   }
 `;
 
-test("preserves the seven schemas, dynamic routing/skills, tool arguments, and return wrappers", () => {
-  probe(hostFixture + String.raw`
+test('preserves the seven schemas, dynamic routing/skills, tool arguments, and return wrappers', () => {
+  probe(
+    hostFixture +
+      String.raw`
     const f = host();
     await extension(f.pi);
     assert.deepEqual([...f.tools.keys()], ${JSON.stringify(toolNames)});
@@ -154,11 +169,14 @@ test("preserves the seven schemas, dynamic routing/skills, tool arguments, and r
     assert.deepEqual(scoped, ["parent", "task"]);
     assert.deepEqual(interrupt, { content: [{ type: "text", text: "Interrupt request handled." }], details: { previous_status: "running" } });
     await f.emit("session_shutdown", { reason: "quit" });
-  `);
+  `,
+  );
 });
 
-test("prefers exact registered model IDs before legacy thinking suffixes without changing the allowlist union", () => {
-  probe(hostFixture + String.raw`
+test('prefers exact registered model IDs before legacy thinking suffixes without changing the allowlist union', () => {
+  probe(
+    hostFixture +
+      String.raw`
     const f = host();
     const available = [
       { provider: "test", id: "fake" }, { provider: "test", id: "fake:high" },
@@ -193,11 +211,14 @@ test("prefers exact registered model IDs before legacy thinking suffixes without
       await f.emit("session_start");
       assert.deepEqual(f.tools.get("spawn_agent").parameters.properties.model.enum, ["test/fake:high"]);
     } finally { await f.emit("session_shutdown", { reason: "quit" }); }
-  `);
+  `,
+  );
 });
 
-test("forwards only current same-cwd effective trust and reports errors without changing control flow", () => {
-  probe(hostFixture + String.raw`
+test('forwards only current same-cwd effective trust and reports errors without changing control flow', () => {
+  probe(
+    hostFixture +
+      String.raw`
     const f = host();
     await extension(f.pi);
     await f.emit("session_start");
@@ -228,11 +249,14 @@ test("forwards only current same-cwd effective trust and reports errors without 
       await f.emit("session_shutdown", { reason: "quit" }, next);
       assert.equal(options.projectTrusted(next.cwd), undefined);
     } finally { console.error = previous; }
-  `);
+  `,
+  );
 });
 
 test("warns when storage overlaps the current parent's custom native session directory", () => {
-  probe(hostFixture + String.raw`
+  probe(
+    hostFixture +
+      String.raw`
     const f = host();
     const config = path.join(f.ctx.cwd, "pi-subagents", "config.json");
     const sessionDir = path.join(f.ctx.cwd, "custom-sessions");
@@ -243,11 +267,14 @@ test("warns when storage overlaps the current parent's custom native session dir
     await f.emit("session_start");
     assert.ok(f.notifications.some(([message, level]) => level === "error" && message.includes("overlaps the parent session directory") && message.includes("/resume")));
     await f.emit("session_shutdown", { reason: "quit" });
-  `);
+  `,
+  );
 });
 
-test("keeps scoped notifications, bounded full output, and widget/shortcut integration", () => {
-  probe(hostFixture + String.raw`
+test('keeps scoped notifications, bounded full output, and widget/shortcut integration', () => {
+  probe(
+    hostFixture +
+      String.raw`
     const config = path.join(process.env.PI_CODING_AGENT_DIR, "pi-subagents", "config.json");
     fs.mkdirSync(path.dirname(config), { recursive: true });
     fs.writeFileSync(config, JSON.stringify({ shortcut: "ctrl+shift+a" }));
@@ -281,11 +308,14 @@ test("keeps scoped notifications, bounded full output, and widget/shortcut integ
     await f.emit("session_shutdown", { reason: "quit" });
     options.onUnclaimedCompletion(event);
     assert.equal(f.messages.length, 2, "no stale delivery after shutdown");
-  `);
+  `,
+  );
 });
 
-test("reports persistence/cleanup errors on every shutdown reason even if widget cleanup fails", () => {
-  probe(hostFixture + String.raw`
+test('reports persistence/cleanup errors on every shutdown reason even if widget cleanup fails', () => {
+  probe(
+    hostFixture +
+      String.raw`
     for (const reason of ["new", "resume", "fork", "reload", "quit"]) {
       const f = host();
       await extension(f.pi);
@@ -301,12 +331,12 @@ test("reports persistence/cleanup errors on every shutdown reason even if widget
       const errors = f.notifications.map(([message]) => message).join("\n");
       for (const text of ["widget cleanup failed", "save failed", "dispose failed"]) assert.ok(errors.includes(text), errors);
     }
-  `);
+  `,
+  );
 });
 
-const runtimes: Array<[string, string]> = [["Bun", process.execPath]];
-if (Bun.which("node")) runtimes.push(["Node", Bun.which("node")!]);
-
+const runtimes: Array<[string, string]> = [['Bun', process.execPath]];
+if (Bun.which('node')) runtimes.push(['Node', Bun.which('node')!]);
 
 const crossHostObserver = String.raw`
   import assert from "node:assert/strict";
@@ -340,16 +370,19 @@ const crossHostObserver = String.raw`
   });
 `;
 
-test.each(runtimes)("validates dynamic spawn schemas and enforces thinking overrides with real SDK children (%s)", (_name, executable) => {
-  probe(String.raw`
+test.each(runtimes)(
+  'validates dynamic spawn schemas and enforces thinking overrides with real SDK children (%s)',
+  (_name, executable) => {
+    probe(
+      String.raw`
     import assert from "node:assert/strict";
     import * as fs from "node:fs";
     import * as path from "node:path";
     process.env.PI_OFFLINE = "1";
     const { createAgentSessionServices, createAgentSessionFromServices, SessionManager, SettingsManager } = await import(${JSON.stringify(sdkUrl)});
-    const { validateToolArguments } = await import(${JSON.stringify(import.meta.resolve("@earendil-works/pi-ai"))});
-    const fixturePath = ${JSON.stringify(path.join(packageDir, "tests", "fixtures", "core-sdk-fixture.ts"))};
-    const { configureCoreFixture } = await import(${JSON.stringify(pathToFileURL(path.join(packageDir, "tests", "fixtures", "core-sdk-fixture.ts")).href)});
+    const { validateToolArguments } = await import(${JSON.stringify(import.meta.resolve('@earendil-works/pi-ai'))});
+    const fixturePath = ${JSON.stringify(path.join(packageDir, 'tests', 'fixtures', 'core-sdk-fixture.ts'))};
+    const { configureCoreFixture } = await import(${JSON.stringify(pathToFileURL(path.join(packageDir, 'tests', 'fixtures', 'core-sdk-fixture.ts')).href)});
     const nativeThinking = [];
     const fixture = configureCoreFixture({
       routes: [["test", "fake"], ["test", "fake:high"], ["template-provider", "template-model"]],
@@ -443,15 +476,20 @@ test.each(runtimes)("validates dynamic spawn schemas and enforces thinking overr
       try { await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); }
       finally { session.dispose(); }
     }
-  `, executable);
-});
+  `,
+      executable,
+    );
+  },
+);
 
-test.each(runtimes)("keeps mid-run sync and Unicode deltas readable from a separate %s process", (_name, executable) => {
-  probe(String.raw`
+test.each(runtimes)(
+  'keeps mid-run sync and Unicode deltas readable from a separate %s process',
+  (_name, executable) => {
+    probe(String.raw`
     import assert from "node:assert/strict";
     import { spawn } from "node:child_process";
     import { randomUUID } from "node:crypto";
-    const { EventBroadcaster, getSocketPath, toObserverEvent } = await import(${JSON.stringify(pathToFileURL(path.join(packageDir, "src", "core.ts")).href)});
+    const { EventBroadcaster, getSocketPath, toObserverEvent } = await import(${JSON.stringify(pathToFileURL(path.join(packageDir, 'src', 'core.ts')).href)});
     const id = randomUUID(), broadcaster = new EventBroadcaster(id);
     const message = { role: "assistant", content: [], usage: {}, api: "test", provider: "test", model: "test", timestamp: Date.now(), stopReason: "pending" };
     broadcaster.start();
@@ -477,19 +515,23 @@ test.each(runtimes)("keeps mid-run sync and Unicode deltas readable from a separ
       assert.deepEqual(message.content[0].arguments, {}, "observer must never mutate the SDK message");
     } finally { observer.kill(); broadcaster.stop(); }
   `);
-});
+  },
+);
 
-test.each(runtimes)("runs seven registered tools and repeated child cleanup alongside an active SDK parent (%s)", (_name, executable) => {
-  probe(String.raw`
+test.each(runtimes)(
+  'runs seven registered tools and repeated child cleanup alongside an active SDK parent (%s)',
+  (_name, executable) => {
+    probe(
+      String.raw`
     import assert from "node:assert/strict";
     import * as fs from "node:fs";
     import * as path from "node:path";
     import { setTimeout as delay } from "node:timers/promises";
     import * as net from "node:net";
     const { AgentSession, createAgentSessionServices, createAgentSessionFromServices, SessionManager, SettingsManager } = await import(${JSON.stringify(sdkUrl)});
-    const { createAssistantMessageEventStream } = await import(${JSON.stringify(import.meta.resolve("@earendil-works/pi-ai"))});
+    const { createAssistantMessageEventStream } = await import(${JSON.stringify(import.meta.resolve('@earendil-works/pi-ai'))});
     const agentDir = process.env.PI_CODING_AGENT_DIR;
-    const fixtureSource = ${JSON.stringify(path.join(packageDir, "tests", "fixtures", "sdk-offline-extension.ts"))};
+    const fixtureSource = ${JSON.stringify(path.join(packageDir, 'tests', 'fixtures', 'sdk-offline-extension.ts'))};
     const fixture = (name, prefix) => {
       const directory = path.join(agentDir, name);
       fs.mkdirSync(directory);
@@ -678,18 +720,24 @@ test.each(runtimes)("runs seven registered tools and repeated child cleanup alon
       try { await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); }
       finally { session.dispose(); restoreCounters(); }
     }
-  `, executable);
-});
+  `,
+      executable,
+    );
+  },
+);
 
-test.each(runtimes)("uses native parent new/resume/fork/reload/quit lifecycles to clean up children (%s)", (_name, executable) => {
-  probe(String.raw`
+test.each(runtimes)(
+  'uses native parent new/resume/fork/reload/quit lifecycles to clean up children (%s)',
+  (_name, executable) => {
+    probe(
+      String.raw`
     import assert from "node:assert/strict";
     import * as fs from "node:fs";
     import * as path from "node:path";
     import { setTimeout as delay } from "node:timers/promises";
     const { createAgentSessionRuntime, createAgentSessionServices, createAgentSessionFromServices, SessionManager, SettingsManager } = await import(${JSON.stringify(sdkUrl)});
     const agentDir = process.env.PI_CODING_AGENT_DIR;
-    const fixtureSource = ${JSON.stringify(path.join(packageDir, "tests", "fixtures", "sdk-offline-extension.ts"))};
+    const fixtureSource = ${JSON.stringify(path.join(packageDir, 'tests', 'fixtures', 'sdk-offline-extension.ts'))};
     const provider = name => {
       const directory = path.join(agentDir, name);
       fs.mkdirSync(directory);
@@ -774,8 +822,11 @@ test.each(runtimes)("uses native parent new/resume/fork/reload/quit lifecycles t
       fs.writeFileSync(path.join(child.directory, "release-response"), "");
       if (!disposed) await runtime.dispose();
     }
-  `, executable);
-});
+  `,
+      executable,
+    );
+  },
+);
 
 const loaderSmoke = `
   import assert from "node:assert/strict";
@@ -804,29 +855,55 @@ const loaderSmoke = `
   for (const shutdown of extension.handlers.get("session_shutdown") ?? []) await shutdown({ type: "session_shutdown", reason: "quit" }, {});
 `;
 
-test("loads the source through Pi's real TypeScript extension loader on Bun", () => probe(loaderSmoke));
-test.skipIf(!Bun.which("node"))("loads the source through Pi's real TypeScript extension loader on Node", () => probe(loaderSmoke, Bun.which("node")!));
+test("loads the source through Pi's real TypeScript extension loader on Bun", () =>
+  probe(loaderSmoke));
+test.skipIf(!Bun.which('node'))(
+  "loads the source through Pi's real TypeScript extension loader on Node",
+  () => probe(loaderSmoke, Bun.which('node')!),
+);
 
-test("packs runtime.ts without an SDK copy and loads the extracted package through Pi", () => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "pi-pack-"));
+test('packs runtime.ts without an SDK copy and loads the extracted package through Pi', () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-pack-'));
   try {
-    const packed = Bun.spawnSync(["npm", "pack", "--offline", "--ignore-scripts", "--json", "--pack-destination", temporary], { cwd: packageDir, stdout: "pipe", stderr: "pipe", timeout: 30_000 });
+    const packed = Bun.spawnSync(
+      ['npm', 'pack', '--offline', '--ignore-scripts', '--json', '--pack-destination', temporary],
+      { cwd: packageDir, stdout: 'pipe', stderr: 'pipe', timeout: 30_000 },
+    );
     if (packed.exitCode !== 0) throw new Error(new TextDecoder().decode(packed.stderr));
     const [metadata] = JSON.parse(new TextDecoder().decode(packed.stdout));
-    expect(metadata.files.map((file: { path: string }) => file.path).sort()).toEqual(["LICENSE", "README.md", "src/core.ts", "src/index.ts", "package.json", "src/peek.ts", "src/runtime.ts"].sort());
-    const unpacked = Bun.spawnSync(["tar", "-xzf", path.join(temporary, metadata.filename), "-C", temporary], { stdout: "pipe", stderr: "pipe", timeout: 10_000 });
+    expect(metadata.files.map((file: { path: string }) => file.path).sort()).toEqual(
+      [
+        'LICENSE',
+        'README.md',
+        'src/core.ts',
+        'src/index.ts',
+        'package.json',
+        'src/peek.ts',
+        'src/runtime.ts',
+      ].sort(),
+    );
+    const unpacked = Bun.spawnSync(
+      ['tar', '-xzf', path.join(temporary, metadata.filename), '-C', temporary],
+      { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 },
+    );
     if (unpacked.exitCode !== 0) throw new Error(new TextDecoder().decode(unpacked.stderr));
-    const manifest = JSON.parse(fs.readFileSync(path.join(temporary, "package", "package.json"), "utf8"));
-    expect(manifest.name).toBe("@zhengyongjie16/pi-subagents");
-    expect(manifest.repository).toEqual({ type: "git", url: "git+https://github.com/zhengyongjie16/pi-subagents.git" });
-    expect(manifest.author).toBe("Can Celik");
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(temporary, 'package', 'package.json'), 'utf8'),
+    );
+    expect(manifest.name).toBe('@zhengyongjie16/pi-subagents');
+    expect(manifest.repository).toEqual({
+      type: 'git',
+      url: 'git+https://github.com/zhengyongjie16/pi-subagents.git',
+    });
+    expect(manifest.author).toBe('Can Celik');
     expect(manifest.dependencies).toBeUndefined();
     expect(manifest.bundledDependencies).toBeUndefined();
-    for (const name of ["pi-ai", "pi-coding-agent", "pi-tui"]) expect(manifest.peerDependencies["@earendil-works/" + name]).toBe("1.5.0");
-    expect(manifest.pi.extensions).toEqual(["./src/index.ts"]);
-    const packedEntry = path.join(temporary, "package", "src", "index.ts");
+    for (const name of ['pi-ai', 'pi-coding-agent', 'pi-tui'])
+      expect(manifest.peerDependencies['@earendil-works/' + name]).toBe('1.5.0');
+    expect(manifest.pi.extensions).toEqual(['./src/index.ts']);
+    const packedEntry = path.join(temporary, 'package', 'src', 'index.ts');
     probe(loaderSmoke, process.execPath, packedEntry);
-    if (Bun.which("node")) probe(loaderSmoke, Bun.which("node")!, packedEntry);
+    if (Bun.which('node')) probe(loaderSmoke, Bun.which('node')!, packedEntry);
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
   }

@@ -20,15 +20,15 @@ pi install /absolute/path/to/pi-subagents
 
 ## Tools
 
-| Tool | Purpose |
-|---|---|
-| `spawn_agent` | Start a fresh-context SDK session and return after task acceptance |
-| `wait_agent` | Block for one completion and return its final text |
-| `wait_all_agents` | Block until every selected agent finishes |
-| `list_agents` | List current-session agents, or explicitly include historical sessions |
-| `read_agent_response` | Read an agent's latest final raw text response |
-| `send_message` | Steer a running agent or start another turn when settled |
-| `interrupt_agent` | Request cooperative cancellation while preserving session history |
+| Tool                  | Purpose                                                                |
+| --------------------- | ---------------------------------------------------------------------- |
+| `spawn_agent`         | Start a fresh-context SDK session and return after task acceptance     |
+| `wait_agent`          | Block for one completion and return its final text                     |
+| `wait_all_agents`     | Block until every selected agent finishes                              |
+| `list_agents`         | List current-session agents, or explicitly include historical sessions |
+| `read_agent_response` | Read an agent's latest final raw text response                         |
+| `send_message`        | Steer a running agent or start another turn when settled               |
+| `interrupt_agent`     | Request cooperative cancellation while preserving session history      |
 
 Agent names are unique within their parent session. The same task name can exist safely in different Pi sessions. Read and control tools are always scoped to the current parent session; only `list_agents(include_all: true)` crosses session boundaries, and that view is read-only.
 
@@ -54,6 +54,7 @@ skills: web-investigate
 extensions: @scope/pi-extra-tools, ~/.pi/agent/extensions/local-helper.ts
 hint: Give this reviewer exact file paths and a narrow scope.
 ---
+
 You are a focused review subagent. Return concise findings with file paths.
 ```
 
@@ -64,6 +65,7 @@ A template may set `model` without `provider` to use the current parent's provid
 name: quick-reviewer
 model: gpt-5.6-sol
 ---
+
 Review the requested files concisely.
 ```
 
@@ -138,7 +140,7 @@ An allowlist in `config.json` decides whether a parent may request a `model` and
 The arguments are offered only when at least one allowed model is available, and `model` enumerates exactly those pairs:
 
 | Configuration | Allowed and available | `model` and `thinking` on the tool |
-|---|---|---|
+| --- | --- | --- |
 | neither key set | — | absent, routing belongs to templates |
 | `"modelsFromEnabledModels": true`, Pi scoping unset | — | absent |
 | `"modelsFromEnabledModels": true`, Pi scoping set | 2 models | present, `model` lists those 2 pairs |
