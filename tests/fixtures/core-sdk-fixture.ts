@@ -6,9 +6,75 @@ import type {
   InputEventResult,
 } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 
-// An explicitly selected real extension/provider. Controls live outside AgentManager:
-// production has no backend/Session injection or fixture switch.
+// The SDK caches modules and core's storage paths for the lifetime of the test process.
+// Share one isolated agent directory across module suites, and remove it when they all exit.
+let testAgentDir: string | undefined;
+export function useTestAgentDir(): string {
+  if (testAgentDir) return testAgentDir;
+  testAgentDir = fs.mkdtempSync(
+    path.join(process.platform === 'win32' ? os.tmpdir() : '/tmp', 'ps-'),
+  );
+  const previous = Object.fromEntries(
+    [
+      'PI_SUBAGENT_TEMP_DIR',
+      'PI_CODING_AGENT_DIR',
+      'PI_OFFLINE',
+      'PI_SKIP_VERSION_CHECK',
+      'PI_TELEMETRY',
+    ].map((key) => [key, process.env[key]]),
+  );
+  Object.assign(process.env, {
+    PI_SUBAGENT_TEMP_DIR: testAgentDir,
+    PI_CODING_AGENT_DIR: testAgentDir,
+    PI_OFFLINE: '1',
+    PI_SKIP_VERSION_CHECK: '1',
+    PI_TELEMETRY: '0',
+  });
+  fs.mkdirSync(path.join(testAgentDir, 'pi-subagents', 'agents'), { recursive: true });
+  fs.writeFileSync(
+    path.join(testAgentDir, 'settings.json'),
+    JSON.stringify({
+      compaction: { enabled: false },
+      retry: { enabled: false },
+      cacheWarming: 'off',
+    }),
+  );
+  const directory = testAgentDir;
+  process.once('exit', () => {
+    fs.rmSync(directory, { recursive: true, force: true });
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  return testAgentDir;
+}
+
+export async function waitUntil(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error('Timed out waiting for condition.');
+}
+
+export class ObserverJsonlDecoder {
+  private decoder = new StringDecoder('utf8');
+  private buffer = '';
+  push(chunk: Buffer): string[] {
+    const lines = (this.buffer + this.decoder.write(chunk)).split('\n');
+    this.buffer = lines.pop()!;
+    return lines.filter(Boolean);
+  }
+}
+
+// Test controls drive an explicitly loaded SDK extension/provider.
 export interface CoreFixtureInstance {
   inputs: InputEvent[];
   requests: Array<{ text: string; context: any; message: AssistantMessage }>;

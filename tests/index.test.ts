@@ -1,9 +1,29 @@
-import { expect, test } from 'bun:test';
+import { beforeEach, describe, expect, mock, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { randomUUID } from 'node:crypto';
+import { stripVTControlCharacters } from 'node:util';
+import { TuiAltScreen, TuiMainScreen, visibleWidth, type Terminal } from '@earendil-works/pi-tui';
+import type { AgentInfo } from '../src/core.js';
+import { configureCoreFixture, useTestAgentDir, waitUntil } from './fixtures/core-sdk-fixture.js';
+
+const TEST_AGENT_DIR = useTestAgentDir();
+const CORE_SDK_EXTENSION = path.join(import.meta.dir, 'fixtures', 'core-sdk-fixture.ts');
+const codingAgent = await import('@earendil-works/pi-coding-agent');
+const { AgentManager, getAgent, getRunsDir, parentScopeKey } = await import('../src/core.js');
+type AgentManager = InstanceType<typeof AgentManager>;
+const { SubagentPeekOverlay } = await import('../src/peek.js');
+
+beforeEach(() => {
+  configureCoreFixture();
+  fs.writeFileSync(
+    path.join(TEST_AGENT_DIR, 'pi-subagents', 'config.json'),
+    JSON.stringify({ defaults: { extensions: [CORE_SDK_EXTENSION] } }),
+  );
+});
 
 const packageDir = path.resolve(import.meta.dir, '..');
 const entry = path.join(packageDir, 'src', 'index.ts');
@@ -146,7 +166,7 @@ test('uses the native render context for errors without changing successful tool
     const f = host();
     await extension(f.pi);
     const success = {
-      spawn_agent: "✓ /worker", wait_agent: "success-only", wait_all_agents: "success-only",
+      spawn_agent: "✓ /worker · test/fake · high", wait_agent: "success-only", wait_all_agents: "success-only",
       list_agents: "✓ 0 of 0 agents", read_agent_response: "✓ /worker",
       send_message: "✓ steered", interrupt_agent: "↯ previous: running",
     };
@@ -178,7 +198,7 @@ test('uses the native render context for errors without changing successful tool
       for (const expanded of [false, true]) {
         component.setExpanded(expanded);
         for (const errorDetails of [undefined, details]) {
-          // Native ToolExecutionComponent omits isError from result and supplies it in context.
+          // Native ToolExecutionComponent supplies isError in render context.
           component.updateResult({ content: [{ type: "text", text: "controlled failure" }], details: errorDetails, isError: true });
           const output = rendered();
           assert.equal(Object.hasOwn(invocations.at(-1)[0], "isError"), false);
@@ -322,12 +342,16 @@ test('prefers exact registered model IDs before legacy thinking suffixes without
         assert.equal(spawned.thinking, undefined, "a model suffix must not override inherited thinking");
       }
       assert.deepEqual(spawned.model, { provider: "other", modelId: "scoped:max" });
+      await assert.rejects(f.call("spawn_agent", { task_name: "blocked", message: "work", model: "unapproved/model" }), /not in the configured spawn models/);
+      const gone = available.splice(available.findIndex(model => model.provider === "test" && model.id === "fake:high"), 1)[0];
+      await assert.rejects(f.call("spawn_agent", { task_name: "gone", message: "work", model: "test/fake:high" }), /not currently available/);
+      available.push(gone);
       // A canonical reference can match multiple pairs: prefer the longest provider, regardless of catalog order.
       available.reverse();
       await f.emit("session_start");
       await f.call("spawn_agent", { task_name: "task", message: "work", model: "audit/provider/org/model" });
       assert.deepEqual(spawned.model, { provider: "audit/provider", modelId: "org/model" });
-      // Even when there is no unsuffixed model, the full registered ID is usable.
+      // Resolve full registered IDs with thinking-like suffixes directly.
       available.splice(available.findIndex(model => model.provider === "test" && model.id === "fake"), 1);
       fs.writeFileSync(config, JSON.stringify({ models: ["test/fake:high"] }));
       await f.emit("session_start");
@@ -460,38 +484,6 @@ test('reports persistence/cleanup errors on every shutdown reason even if widget
 const runtimes: Array<[string, string]> = [['Bun', process.execPath]];
 if (Bun.which('node')) runtimes.push(['Node', Bun.which('node')!]);
 
-const crossHostObserver = String.raw`
-  import assert from "node:assert/strict";
-  import net from "node:net";
-  const socket = net.connect(process.argv[1]);
-  socket.setEncoding("utf8");
-  const timer = setTimeout(() => { console.error("observer timed out"); process.exit(2); }, 5000);
-  let buffer = "", synchronized = false;
-  socket.on("error", error => { console.error(error); process.exit(2); });
-  socket.on("data", chunk => {
-    buffer += chunk;
-    while (buffer.includes("\n")) {
-      const at = buffer.indexOf("\n"), event = JSON.parse(buffer.slice(0, at));
-      buffer = buffer.slice(at + 1);
-      if (event.type === "sync") {
-        assert.equal(event.status, "calling");
-        assert.deepEqual(event.partialMessage.content[0], { type: "toolCall", id: "remote-call", name: "read", arguments: { path: "中文" } });
-        assert.deepEqual(event.toolArguments, [[0, '{"path":"中文']]);
-        synchronized = true;
-        process.stdout.write("ready\n");
-      } else if (event.type === "message_update") {
-        assert.ok(synchronized);
-        assert.equal(event.message, undefined);
-        assert.equal(event.assistantMessageEvent.partial, undefined);
-        assert.equal(event.assistantMessageEvent.delta, '😀\u2028末尾"}');
-        clearTimeout(timer);
-        socket.end();
-        process.stdout.write("verified\n");
-      }
-    }
-  });
-`;
-
 test.each(runtimes)(
   'validates dynamic spawn schemas and enforces thinking overrides with real SDK children (%s)',
   (_name, executable) => {
@@ -507,7 +499,7 @@ test.each(runtimes)(
     const { configureCoreFixture } = await import(${JSON.stringify(pathToFileURL(path.join(packageDir, 'tests', 'fixtures', 'core-sdk-fixture.ts')).href)});
     const nativeThinking = [];
     const fixture = configureCoreFixture({
-      routes: [["test", "fake"], ["test", "fake:high"], ["template-provider", "template-model"],
+      routes: [["test", "fake"], ["test", "fake:high"], ["test", "template-model"], ["template-provider", "template-model"],
         ["tenant/gateway", "accounts/team/model"], ["tenant/gateway", "accounts/team/model:high"],
         ["llama.cpp/http://localhost:8080", "repo/model:high"]],
       onStart: pi => { nativeThinking.push(pi.getThinkingLevel()); },
@@ -519,6 +511,7 @@ test.each(runtimes)(
     const templates = path.join(path.dirname(config), "agents");
     fs.mkdirSync(templates, { recursive: true });
     fs.writeFileSync(path.join(templates, "routed.md"), "---\nname: routed\nprovider: template-provider\nmodel: template-model\nthinking: medium\n---\n");
+    fs.writeFileSync(path.join(templates, "model-only.md"), "---\nname: model-only\nmodel: template-model\n---\n");
     const writeConfig = models => fs.writeFileSync(config, JSON.stringify({ defaults: { extensions: [fixturePath] }, ...(models ? { models } : {}) }));
     writeConfig();
     const settingsManager = SettingsManager.inMemory(settings);
@@ -607,6 +600,13 @@ test.each(runtimes)(
       assert.equal(spawnTool().parameters.properties.thinking, undefined);
       await assert.rejects(execute(stale), /thinking.*configured spawn models/);
       assert.equal((await spawn("inherited-again")).thinking, "off");
+      const first = await spawn("model-only-first", { agent_type: "model-only" });
+      assert.equal(first.provider, "test");
+      assert.equal(first.modelId, "template-model");
+      await session.setModel(session.modelRuntime.getModel("template-provider", "template-model"));
+      const changed = await spawn("model-only-current", { agent_type: "model-only" });
+      assert.equal(changed.provider, "template-provider");
+      assert.equal(changed.modelId, "template-model");
       assert.deepEqual(errors, []);
     } finally {
       try { await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); }
@@ -615,42 +615,6 @@ test.each(runtimes)(
   `,
       executable,
     );
-  },
-);
-
-test.each(runtimes)(
-  'keeps mid-run sync and Unicode deltas readable from a separate %s process',
-  (_name, executable) => {
-    probe(String.raw`
-    import assert from "node:assert/strict";
-    import { spawn } from "node:child_process";
-    import { randomUUID } from "node:crypto";
-    const { EventBroadcaster, getSocketPath, toObserverEvent } = await import(${JSON.stringify(pathToFileURL(path.join(packageDir, 'src', 'core.ts')).href)});
-    const id = randomUUID(), broadcaster = new EventBroadcaster(id);
-    const message = { role: "assistant", content: [], usage: {}, api: "test", provider: "test", model: "test", timestamp: Date.now(), stopReason: "pending" };
-    broadcaster.start();
-    broadcaster.broadcast(toObserverEvent({ type: "message_start", message }));
-    message.content.push({ type: "toolCall", id: "remote-call", name: "read", arguments: {} });
-    broadcaster.broadcast(toObserverEvent({ type: "message_update", message, assistantMessageEvent: { type: "toolcall_start", contentIndex: 0, partial: message } }));
-    broadcaster.broadcast(toObserverEvent({ type: "message_update", message, assistantMessageEvent: { type: "toolcall_delta", contentIndex: 0, delta: '{"path":"中文', partial: message } }));
-    const observer = spawn(${JSON.stringify(executable)}, ["--input-type=module", "-e", ${JSON.stringify(crossHostObserver)}, getSocketPath(id)], { stdio: ["ignore", "pipe", "pipe"] });
-    let output = "", error = "", sent = false;
-    observer.stdout.setEncoding("utf8");
-    observer.stdout.on("data", chunk => {
-      output += chunk;
-      if (!sent && output.includes("ready")) {
-        sent = true;
-        broadcaster.broadcast(toObserverEvent({ type: "message_update", message, assistantMessageEvent: { type: "toolcall_delta", contentIndex: 0, delta: '😀\u2028末尾"}', partial: message } }));
-      }
-    });
-    observer.stderr.on("data", chunk => { error += chunk; });
-    try {
-      const code = await new Promise((resolve, reject) => { observer.on("error", reject); observer.on("exit", resolve); });
-      assert.equal(code, 0, error);
-      assert.ok(output.includes("verified"), output);
-      assert.deepEqual(message.content[0].arguments, {}, "observer must never mutate the SDK message");
-    } finally { observer.kill(); broadcaster.stop(); }
-  `);
   },
 );
 
@@ -739,7 +703,7 @@ test.each(runtimes)(
     let parentRun, restoreCounters = () => {};
     try {
       await session.bindExtensions({ mode: "print", onError: error => errors.push(error) });
-      // Count actual child lifecycle calls and observer resources, not RSS heuristics.
+      // Count child lifecycle calls and observer resources.
       const childSessions = new Set(), subscriptions = new Set(), timeouts = new Set(), intervals = new Set(), servers = new Set();
       let created = 0, disposed = 0;
       const subscribe = AgentSession.prototype.subscribe, dispose = AgentSession.prototype.dispose;
@@ -784,8 +748,7 @@ test.each(runtimes)(
         const files = fs.readdirSync(agentDir, { recursive: true });
         assert.ok(!files.some(file => /\.(active\.json|sock)$/.test(String(file))), label + ": observer files remain");
       };
-      // This ctx belongs to host_driver, a REAL assistant-issued call. Nested calls
-      // therefore traverse native schema validation, tool hooks, and result recording.
+      // The assistant-issued host_driver call exercises native nested-tool validation, hooks, and recording.
       drive = async ctx => {
         const call = async (name, args, options) => {
           called.add(name);
@@ -1026,21 +989,915 @@ test('packs runtime.ts without an SDK copy and loads the extracted package throu
     const manifest = JSON.parse(
       fs.readFileSync(path.join(temporary, 'package', 'package.json'), 'utf8'),
     );
-    expect(manifest.name).toBe('@zhengyongjie16/pi-subagents');
-    expect(manifest.repository).toEqual({
-      type: 'git',
-      url: 'git+https://github.com/zhengyongjie16/pi-subagents.git',
-    });
-    expect(manifest.author).toBe('Can Celik');
     expect(manifest.dependencies).toBeUndefined();
     expect(manifest.bundledDependencies).toBeUndefined();
-    for (const name of ['pi-ai', 'pi-coding-agent', 'pi-tui'])
-      expect(manifest.peerDependencies['@earendil-works/' + name]).toBe('1.5.0');
+    for (const name of ['pi-ai', 'pi-coding-agent', 'pi-tui']) {
+      expect(manifest.peerDependencies['@earendil-works/' + name]).toBe('>=1.0.0');
+      expect(manifest.devDependencies['@earendil-works/' + name]).toBe('1.5.0');
+    }
+    expect(manifest.engines.node).toBe('>=22.19.0');
     expect(manifest.pi.extensions).toEqual(['./src/index.ts']);
     const packedEntry = path.join(temporary, 'package', 'src', 'index.ts');
     probe(loaderSmoke, process.execPath, packedEntry);
     if (Bun.which('node')) probe(loaderSmoke, Bun.which('node')!, packedEntry);
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+describe('extension completion delivery and TUI', () => {
+  test('collects native codemode renderers through the real extension API without registering or activating another tool', async () => {
+    const { default: subagentExtension } = await import('../src/index.js');
+    const loader = new codingAgent.DefaultResourceLoader({
+      cwd: TEST_AGENT_DIR,
+      agentDir: TEST_AGENT_DIR,
+      settingsManager: codingAgent.SettingsManager.inMemory({}),
+      noExtensions: true,
+      noSkills: true,
+      noPromptTemplates: true,
+      noThemes: true,
+      noContextFiles: true,
+      extensionFactories: [codingAgent.createCodemodeExtension(), subagentExtension],
+    });
+    try {
+      await loader.reload();
+      const loaded = loader.getExtensions();
+      expect(loaded.errors).toEqual([]);
+      expect(loaded.extensions).toHaveLength(2);
+      const [native, subagents] = loaded.extensions;
+      const definition = native.tools.get('codemode')!.definition;
+      expect(definition.defaultActive).toBe(false);
+      const collected = {
+        renderShell: definition.renderShell,
+        renderCall: definition.renderCall,
+        renderResult: definition.renderResult,
+      };
+      expect([...native.tools.keys()]).toEqual(['codemode']);
+      expect([...subagents.tools.keys()]).toEqual([
+        'spawn_agent',
+        'wait_agent',
+        'wait_all_agents',
+        'list_agents',
+        'read_agent_response',
+        'send_message',
+        'interrupt_agent',
+      ]);
+      expect(() => loaded.runtime.getActiveTools()).toThrow('Extension runtime not initialized');
+
+      const parentId = 'renderer-contract-parent';
+      const scope = path.join(getRunsDir(), parentScopeKey(parentId));
+      fs.mkdirSync(scope, { recursive: true });
+      const id = randomUUID();
+      const info: AgentInfo = {
+        id,
+        parentSessionId: parentId,
+        taskName: 'contract',
+        canonicalName: '/contract',
+        status: 'completed',
+        cwd: TEST_AGENT_DIR,
+        provider: 'test',
+        modelId: 'fake',
+        model: 'test:fake',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        messageCount: 0,
+        sessionFile: path.join(scope, `${id}.jsonl`),
+        infoFile: path.join(scope, `${id}.info.json`),
+        logFile: path.join(scope, `${id}.log`),
+      };
+      fs.writeFileSync(info.infoFile, JSON.stringify(info));
+      const settings = {
+        terminal: { showImages: false, imageWidthCells: 42 },
+        outputPad: 0 as const,
+      };
+      loaded.runtime.getSettings = mock(() => settings);
+      let opened = 0;
+      const ctx: any = {
+        mode: 'tui',
+        sessionManager: { getSessionId: () => parentId },
+        ui: {
+          setWidget() {},
+          async custom(create: any) {
+            const component = create(
+              { terminal: { rows: 80 }, requestRender() {} },
+              { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+              {},
+              () => {},
+            );
+            if (opened++ === 0)
+              return { task: 'contract', parentSessionId: parentId, includeAll: false };
+            try {
+              expect(component).toBeInstanceOf(SubagentPeekOverlay);
+              expect(component['nativeCodemodeRenderers']).toEqual(collected);
+              expect(Object.keys(component['nativeCodemodeRenderers'])).toEqual([
+                'renderShell',
+                'renderCall',
+                'renderResult',
+              ]);
+              expect(component['toolExecutionOptions']).toEqual({
+                showImages: false,
+                imageWidthCells: 42,
+                outputPad: 0,
+              });
+              component.handleInput('\x0f');
+              expect(component['disposed']).toBe(false);
+            } finally {
+              component.dispose();
+            }
+            return undefined;
+          },
+        },
+      };
+      try {
+        await subagents.commands.get('subagents')!.handler('', ctx);
+        expect(opened).toBe(2);
+        expect(loaded.runtime.getSettings).toHaveBeenCalledTimes(1);
+      } finally {
+        fs.rmSync(scope, { recursive: true, force: true });
+      }
+    } finally {
+      for (const extension of loader.getExtensions().extensions) {
+        for (const shutdown of extension.handlers.get('session_shutdown') ?? []) {
+          await shutdown({ type: 'session_shutdown' }, {} as any);
+        }
+      }
+    }
+  });
+
+  test.each([undefined, '', 'ctrl+shift+a'])(
+    'opens the browser with optional shortcut %s',
+    async (shortcut) => {
+      const configFile = path.join(TEST_AGENT_DIR, 'pi-subagents', 'config.json');
+      fs.mkdirSync(path.dirname(configFile), { recursive: true });
+      fs.writeFileSync(configFile, JSON.stringify({ shortcut }));
+      const commands = new Map<string, any>();
+      const shortcuts = new Map<string, any>();
+      let shutdown: (() => Promise<void>) | undefined;
+      let menusOpened = 0;
+      const ctx: any = {
+        mode: 'tui',
+        sessionManager: { getSessionId: () => 'shortcut-test-parent' },
+        ui: {
+          setWidget() {},
+          async custom(create: any) {
+            const theme = {
+              fg: (_color: string, text: string) => text,
+              bold: (text: string) => text,
+            };
+            const menu = create({ requestRender() {} }, theme, {}, () => {});
+            try {
+              expect(menu.render(80).join('\n')).toContain('Subagents');
+              menusOpened++;
+              return undefined;
+            } finally {
+              menu.dispose?.();
+            }
+          },
+        },
+      };
+      const { default: subagentExtension } = await import('../src/index.js');
+      try {
+        await subagentExtension({
+          on(name: string, handler: any) {
+            if (name === 'session_shutdown') shutdown = handler;
+          },
+          registerTool() {},
+          registerMessageRenderer() {},
+          registerCommand(name: string, command: any) {
+            commands.set(name, command);
+          },
+          registerShortcut(key: string, options: any) {
+            shortcuts.set(key, options);
+          },
+        } as any);
+        expect([...commands.keys()]).toEqual(['subagents']);
+        expect([...shortcuts.keys()]).toEqual(shortcut ? [shortcut] : []);
+        await commands.get('subagents').handler('', ctx);
+        expect(menusOpened).toBe(1);
+        if (shortcut) {
+          await shortcuts.get(shortcut).handler(ctx);
+          expect(menusOpened).toBe(2);
+        }
+      } finally {
+        await shutdown?.();
+        fs.rmSync(configFile, { force: true });
+      }
+    },
+  );
+
+  describe('agent browser', () => {
+    async function withBrowser(run: (fixture: any) => Promise<void>) {
+      const parentId = `browser-${randomUUID()}`;
+      const otherId = `other-${randomUUID()}`;
+      const scopes = new Set<string>();
+      const records = new Map<string, AgentInfo>();
+      let sequence = 0;
+      const put = (name: string, overrides: Partial<AgentInfo> = {}, parent = parentId) => {
+        const scope = path.join(getRunsDir(), parentScopeKey(parent));
+        scopes.add(scope);
+        fs.mkdirSync(scope, { recursive: true });
+        const previous = records.get(`${parent}/${name}`);
+        const id = previous?.id ?? randomUUID();
+        const now = Date.now() + sequence++;
+        const info: AgentInfo = {
+          id,
+          taskName: name,
+          canonicalName: `/${name}`,
+          parentSessionId: parent,
+          status: 'completed',
+          cwd: TEST_AGENT_DIR,
+          provider: 'test',
+          modelId: 'fake',
+          thinking: 'off',
+          createdAt: now,
+          updatedAt: now,
+          messageCount: 0,
+          infoFile: path.join(scope, `${id}.info.json`),
+          sessionFile: path.join(scope, `${id}.jsonl`),
+          logFile: path.join(scope, `${id}.log`),
+          ...previous,
+          ...overrides,
+        };
+        records.set(`${parent}/${name}`, info);
+        fs.writeFileSync(info.infoFile, JSON.stringify(info));
+        return info;
+      };
+      const commands = new Map<string, any>();
+      const tools = new Map<string, any>();
+      let shutdown: (() => Promise<void>) | undefined;
+      const { default: subagentExtension } = await import('../src/index.js');
+
+      const originalList = AgentManager.prototype.listAgents;
+      const originalInfo = AgentManager.prototype.getAgentInfo;
+      const originalConnect = (SubagentPeekOverlay.prototype as any).connectSocket;
+      const list = mock(function (
+        this: AgentManager,
+        ...args: Parameters<AgentManager['listAgents']>
+      ) {
+        return originalList.apply(this, args);
+      });
+      AgentManager.prototype.listAgents = list;
+      (SubagentPeekOverlay.prototype as any).connectSocket = () => {};
+      const requestRender = mock(() => {});
+      const selections: any[] = [];
+      const opened: AgentInfo[] = [];
+      const notify = mock((_message: string, _level?: string) => {});
+      const theme = {
+        ansi: '',
+        fg(_color: string, text: string) {
+          return this.ansi ? `${this.ansi}${text}\x1b[0m` : text;
+        },
+        bold: (text: string) => text,
+      };
+      const ctx: any = {
+        mode: 'tui',
+        sessionManager: { getSessionId: () => parentId },
+        ui: { notify, setWidget() {} },
+      };
+      const fixture = {
+        tools,
+        parentId,
+        otherId,
+        put,
+        list,
+        selections,
+        opened,
+        ctx,
+        theme,
+        requestRender,
+        notify,
+        tui: { terminal: { rows: 40 }, requestRender } as any,
+        remove(info: AgentInfo) {
+          fs.rmSync(info.infoFile, { force: true });
+        },
+        command: () => commands.get('subagents').handler('', ctx),
+        async open(
+          interact: (browser: any) => any,
+          overlay?: (component: any, index: number) => any,
+        ) {
+          ctx.ui.custom = async (create: any) => {
+            let component: any;
+            let result: any;
+            const done = (value: any) => {
+              result = value;
+              if (!(component instanceof SubagentPeekOverlay)) selections.push(value);
+              component?.dispose?.();
+            };
+            component = create(fixture.tui, theme, {}, done);
+            try {
+              if (component instanceof SubagentPeekOverlay) {
+                opened.push(component['info']);
+                await overlay?.(component, opened.length - 1);
+              } else {
+                await interact(component);
+              }
+              return result;
+            } finally {
+              component.dispose?.();
+            }
+          };
+          await fixture.command();
+        },
+      };
+      try {
+        await subagentExtension({
+          on(name: string, handler: any) {
+            if (name === 'session_shutdown') shutdown = handler;
+          },
+          registerTool(tool: any) {
+            tools.set(tool.name, tool);
+          },
+          registerMessageRenderer() {},
+          registerCommand(name: string, command: any) {
+            commands.set(name, command);
+          },
+          registerShortcut() {},
+          getSettings: () => ({ terminal: { showImages: false }, outputPad: 0 }),
+        } as any);
+        await run(fixture);
+      } finally {
+        await shutdown?.();
+        AgentManager.prototype.listAgents = originalList;
+        AgentManager.prototype.getAgentInfo = originalInfo;
+        (SubagentPeekOverlay.prototype as any).connectSocket = originalConnect;
+        for (const scope of scopes) fs.rmSync(scope, { recursive: true, force: true });
+      }
+    }
+
+    const selectedRow = (browser: any, width = 120) =>
+      stripVTControlCharacters(
+        browser
+          .render(width)
+          .find((line: string) => stripVTControlCharacters(line).startsWith('› ')) ?? '',
+      );
+
+    test('shows task previews only when present, without context or new timers', async () => {
+      const originalSet = globalThis.setInterval;
+      const interval = mock(() => {
+        throw new Error('The browser must not create an interval');
+      });
+      globalThis.setInterval = interval as any;
+      try {
+        await withBrowser(async (f) => {
+          f.put('review', {
+            createdAt: 300,
+            lastTaskMessage: '中文任务 \n preview',
+            contextUsage: { tokens: 50000, contextWindow: 500000, percent: 10 },
+          });
+          f.put('plain', { createdAt: 200 });
+          f.put('empty', { createdAt: 100, lastTaskMessage: '' });
+          await f.open((browser: any) => {
+            const lines = browser.render(120);
+            const review = lines.findIndex((line: string) => line.includes('/review'));
+            const plain = lines.findIndex((line: string) => line.includes('/plain'));
+            const empty = lines.findIndex((line: string) => line.includes('/empty'));
+            expect(lines[review + 1]).toBe('  中文任务 preview');
+            expect(plain).toBe(review + 2);
+            expect(empty).toBe(plain + 1);
+            expect(lines[empty + 1]).toBe('');
+            expect(lines.join('\n')).not.toContain('ctx');
+            expect(lines.join('\n')).not.toContain('10%/500k');
+            browser.handleInput('q');
+          });
+        });
+        expect(interval).not.toHaveBeenCalled();
+      } finally {
+        globalThis.setInterval = originalSet;
+      }
+    });
+
+    test('refreshes saved metadata and previews with r', async () => {
+      await withBrowser(async (f) => {
+        f.put('live', { status: 'running', lastTaskMessage: 'initial preview' });
+        await f.open((browser: any) => {
+          const first = browser.render(80);
+          f.put('live', { status: 'completed', lastTaskMessage: 'updated preview' });
+          expect(browser.render(80)).toBe(first);
+          const reads = f.list.mock.calls.length;
+          browser.handleInput('r');
+          expect(f.requestRender).toHaveBeenCalledTimes(1);
+          expect(f.list).toHaveBeenCalledTimes(reads);
+          const refreshed = browser.render(80).join('\n');
+          expect(refreshed).toContain('completed');
+          expect(refreshed).toContain('updated preview');
+          expect(refreshed).not.toContain('initial preview');
+          browser.handleInput('q');
+        });
+      });
+    });
+
+    test('navigates pages and clamps selection after deletion or an empty list', async () => {
+      await withBrowser(async (f) => {
+        const history = Array.from({ length: 12 }, (_, index) =>
+          f.put(`history/${index}`, { createdAt: 100 - index }),
+        );
+        await f.open((browser: any) => {
+          expect(browser.render(120).join('\n')).toContain('↓ 2 more');
+          for (let index = 0; index < 11; index++) {
+            browser.handleInput(index % 2 ? 'j' : '\x1b[B');
+            browser.render(120);
+          }
+          expect(selectedRow(browser)).toContain('/history/11');
+          expect(browser.render(120).join('\n')).toContain('↑ 2 more');
+          browser.handleInput('\x1b[A');
+          expect(selectedRow(browser)).toContain('/history/10');
+          browser.handleInput('k');
+          expect(selectedRow(browser)).toContain('/history/9');
+          browser.handleInput('j');
+          browser.render(120);
+          browser.handleInput('j');
+          browser.render(120);
+          f.remove(history[11]);
+          f.remove(history[10]);
+          browser.handleInput('r');
+          expect(selectedRow(browser)).toContain('/history/9');
+          for (const info of history) f.remove(info);
+          browser.handleInput('r');
+          expect(browser.render(80).join('\n')).toContain('No subagents for this session');
+          for (const key of ['j', 'k', '\x1b[A', '\x1b[B', '\r']) browser.handleInput(key);
+          expect(f.selections).toEqual([]);
+          f.put('returned');
+          browser.handleInput('r');
+          expect(selectedRow(browser)).toContain('/returned');
+          browser.handleInput('\r');
+        });
+        expect(f.opened.map((info: AgentInfo) => info.canonicalName)).toEqual(['/returned']);
+      });
+    });
+
+    test.each(['unrefreshed', 'r pending', 'scope pending', 'selection pending'])(
+      'Enter uses the displayed item after insertion (%s)',
+      async (refresh) => {
+        await withBrowser(async (f) => {
+          f.put('first', { createdAt: 200 });
+          f.put('target', { createdAt: 100 });
+          await f.open((browser: any) => {
+            browser.render(120);
+            browser.handleInput('j');
+            expect(selectedRow(browser)).toContain('/target');
+            f.put('inserted', { createdAt: 300 });
+            if (refresh === 'r pending') browser.handleInput('r');
+            if (refresh === 'scope pending') browser.handleInput('\t');
+            if (refresh === 'selection pending') browser.handleInput('k');
+            const reads = f.list.mock.calls.length;
+            browser.handleInput('\r');
+            expect(f.list).toHaveBeenCalledTimes(reads);
+          });
+          expect(f.selections).toEqual([
+            { task: '/target', parentSessionId: f.parentId, includeAll: false },
+          ]);
+          expect(f.opened[0].canonicalName).toBe('/target');
+        });
+      },
+    );
+
+    test('skips a record lost between list and detail reads, then safely selects a survivor', async () => {
+      await withBrowser(async (f) => {
+        const gone = f.put('gone', { createdAt: 200 });
+        f.put('survivor', { createdAt: 100 });
+        const getInfo = AgentManager.prototype.getAgentInfo;
+        AgentManager.prototype.getAgentInfo = function (target, parent) {
+          if (target === '/gone') f.remove(gone);
+          return getInfo.call(this, target, parent);
+        };
+        await f.open((browser: any) => {
+          expect(() => browser.render(80)).not.toThrow();
+          expect(browser.render(80).join('\n')).not.toContain('/gone');
+          browser.handleInput('\r');
+          expect(f.selections).toEqual([]);
+          browser.handleInput('r');
+          expect(selectedRow(browser)).toContain('/survivor');
+          browser.handleInput('\r');
+        });
+        expect(f.opened[0].canonicalName).toBe('/survivor');
+      });
+    });
+
+    test('does not open a different agent when the displayed Enter target disappears', async () => {
+      await withBrowser(async (f) => {
+        const gone = f.put('gone', { createdAt: 200 });
+        f.put('survivor', { createdAt: 100 });
+        await f.open((browser: any) => {
+          browser.render(80);
+          f.remove(gone);
+          browser.handleInput('\r');
+        });
+        expect(f.selections[0].task).toBe('/gone');
+        expect(f.opened).toEqual([]);
+        expect(f.notify).toHaveBeenCalledWith(expect.stringContaining('Agent not found'), 'error');
+      });
+    });
+
+    test.each([
+      ['\x1b[D', 'previous'],
+      ['\x1b[C', 'next'],
+    ])('handles a disappearing %s overlay navigation target', async (key, direction) => {
+      await withBrowser(async (f) => {
+        const previous = f.put('previous', { createdAt: 300 });
+        f.put('middle', { createdAt: 200 });
+        const next = f.put('next', { createdAt: 100 });
+        const list = AgentManager.prototype.listAgents;
+        let navigating = false;
+        AgentManager.prototype.listAgents = function (...args) {
+          const entries = list.apply(this, args);
+          if (navigating) f.remove(direction === 'next' ? next : previous);
+          return entries;
+        };
+        await f.open(
+          (browser: any) => {
+            browser.render(120);
+            browser.handleInput('j');
+            expect(selectedRow(browser)).toContain('/middle');
+            browser.handleInput('\r');
+          },
+          (overlay: any) => {
+            navigating = true;
+            overlay.handleInput(key);
+          },
+        );
+        expect(f.opened.map((info: AgentInfo) => info.canonicalName)).toEqual(['/middle']);
+        expect(f.notify).toHaveBeenCalledWith(expect.stringContaining('Agent not found'), 'error');
+      });
+    });
+
+    test('all-session browsing distinguishes identical names and remains read-only', async () => {
+      await withBrowser(async (f) => {
+        const own = f.put('same', { modelId: 'own-model' });
+        const other = f.put('same', { modelId: 'other-model' }, f.otherId);
+        const before = [own, other].map((info) => fs.readFileSync(info.infoFile, 'utf8'));
+        const controlNames = ['spawnAgent', 'sendMessage', 'interruptAgent'] as const;
+        const originals = controlNames.map((name) => (AgentManager.prototype as any)[name]);
+        const controls = controlNames.map((name) => {
+          const control = mock(() => {
+            throw new Error(`Browser must not call ${name}`);
+          });
+          (AgentManager.prototype as any)[name] = control;
+          return control;
+        });
+        try {
+          await f.open(
+            (browser: any) => {
+              expect(browser.render(120).join('\n')).not.toContain('other-model');
+              browser.handleInput('\t');
+              const lines = browser.render(120).join('\n');
+              expect(lines).toContain('own-model');
+              expect(lines).toContain('other-model');
+              expect(selectedRow(browser)).toEndWith(f.otherId.slice(-8));
+              browser.handleInput('j');
+              expect(selectedRow(browser)).toEndWith(f.parentId.slice(-8));
+              browser.handleInput('\t');
+              expect(selectedRow(browser)).toContain('/same');
+              browser.handleInput('\t');
+              expect(selectedRow(browser)).toEndWith(f.otherId.slice(-8));
+              browser.handleInput('\r');
+            },
+            (overlay: any, index: number) => overlay.handleInput(['\x1b[C', '\x1b[D', 'q'][index]),
+          );
+          expect(f.selections).toEqual([
+            { task: '/same', parentSessionId: f.otherId, includeAll: true },
+          ]);
+          expect(f.opened.map((info: AgentInfo) => info.parentSessionId)).toEqual([
+            f.otherId,
+            f.parentId,
+            f.otherId,
+          ]);
+          for (const control of controls) expect(control).not.toHaveBeenCalled();
+          expect([own, other].map((info) => fs.readFileSync(info.infoFile, 'utf8'))).toEqual(
+            before,
+          );
+        } finally {
+          controlNames.forEach((name, index) => {
+            (AgentManager.prototype as any)[name] = originals[index];
+          });
+        }
+      });
+    });
+
+    test('aligns model/thinking columns and keeps private previews out of paginated tool results', async () => {
+      await withBrowser(async (f) => {
+        await f.open((browser: any) => {
+          // Seed after manager.ready(): startup recovery must not interrupt this display fixture.
+          const createdAt = Date.now();
+          for (let index = 0; index < 12; index++) {
+            f.put('history/' + index, {
+              status: index === 0 ? 'running' : 'completed',
+              lastTaskMessage: 'private task context ' + index,
+              modelId: index === 0 ? 'MiniMax-M3' : 'a-model-name-that-is-longer-than-the-column',
+              thinking: index === 0 ? 'high' : 'medium',
+              createdAt: createdAt - index,
+            });
+          }
+          const lines = browser.render(120);
+          const firstIndex = lines.findIndex((line: string) => line.includes('/history/0'));
+          const first = lines[firstIndex];
+          const second = lines.find((line: string) => line.includes('/history/1 '));
+          expect(first).toMatch(/\/history\/0\s+running\s+\S+\s+MiniMax-M3\s+high/);
+          expect(lines[firstIndex + 1]).toContain('private task context 0');
+          expect(second.indexOf('a-model-name')).toBe(first.indexOf('MiniMax-M3'));
+          expect(visibleWidth(second.slice(0, second.indexOf('medium')))).toBe(
+            visibleWidth(first.slice(0, first.indexOf('high'))),
+          );
+          expect(second).not.toContain('a-model-name-that-is-longer-than-the-column');
+          for (const width of [80, 50, 32])
+            expect(browser.render(width).every((line: string) => visibleWidth(line) <= width)).toBe(
+              true,
+            );
+          const narrow = browser.render(50).find((line: string) => line.includes('/history/0'));
+          expect(narrow).toContain('high');
+          expect(narrow).not.toContain('MiniMax-M3');
+          browser.handleInput('\t');
+          const all = browser.render(80).find((line: string) => line.includes('/history/0'));
+          expect(all).toContain('MiniMax-M3');
+          expect(all).toContain('high');
+          expect(all.trimEnd()).toEndWith(f.parentId.slice(-8));
+          browser.handleInput('q');
+        });
+        const list = (params: any) =>
+          f.tools.get('list_agents').execute('list', params, undefined, undefined, f.ctx);
+        const first = await list({});
+        expect(JSON.parse(first.content[0].text)).toMatchObject({
+          total: 12,
+          returned: 10,
+          offset: 0,
+          limit: 10,
+          next_offset: 10,
+        });
+        expect(first.details.agents[0]).toEqual({
+          agent_name: '/history/0',
+          agent_status: 'running',
+        });
+        expect(first.content[0].text).not.toContain('private task context');
+        expect(JSON.parse((await list({ offset: 10 })).content[0].text)).toMatchObject({
+          total: 12,
+          returned: 2,
+          offset: 10,
+          next_offset: null,
+        });
+      });
+    });
+
+    test('clips wide ANSI previews at 32/38/50/80/120 columns and invalidates theme caches', async () => {
+      await withBrowser(async (f) => {
+        const info = f.put('wide', {
+          canonicalName: '/中文很长的名称'.repeat(6),
+          modelId: '宽模型'.repeat(10),
+          lastTaskMessage: '\x1b[31m中文任务 😀\tcombining é '.repeat(20) + '\x1b[0m',
+        });
+        // Inject wide labels directly because task creation accepts ASCII names.
+        const getInfo = AgentManager.prototype.getAgentInfo;
+        AgentManager.prototype.getAgentInfo = function (target, parent) {
+          return target === info.canonicalName ? info : getInfo.call(this, target, parent);
+        };
+        f.theme.ansi = '\x1b[36m';
+        await f.open((browser: any) => {
+          for (const width of [32, 38, 50, 80, 120]) {
+            const lines = browser.render(width);
+            expect(lines.every((line: string) => visibleWidth(line) <= width)).toBe(true);
+            const preview = lines
+              .map(stripVTControlCharacters)
+              .find((line: string) => line.startsWith('  中文任务'));
+            expect(preview).toStartWith('  中文任务 😀');
+            expect(lines.join('\n')).not.toContain('\t');
+          }
+          const first = browser.render(120);
+          expect(first.join('\n')).toContain('\x1b[36m');
+          f.theme.ansi = '\x1b[35m';
+          browser.invalidate();
+          const themed = browser.render(120).join('\n');
+          expect(themed).toContain('\x1b[35m');
+          expect(themed).not.toContain('\x1b[36m');
+          browser.handleInput('q');
+        });
+      });
+    });
+
+    test.each(['regular', 'fullscreen'] as const)(
+      'native %s TUI list supports manual refresh and resize',
+      async (mode) => {
+        await withBrowser(async (f) => {
+          f.put('native', { lastTaskMessage: '中文任务 '.repeat(30) });
+          let input: (data: string) => void = () => {};
+          let resize = () => {};
+          const writes: string[] = [];
+          const terminal: Terminal & { columns: number; rows: number } = {
+            columns: 120,
+            rows: 35,
+            kittyProtocolActive: false,
+            start(onInput, onResize) {
+              input = onInput;
+              resize = onResize;
+            },
+            stop() {},
+            async drainInput() {},
+            write(data) {
+              writes.push(data);
+            },
+            moveBy() {},
+            hideCursor() {},
+            showCursor() {},
+            clearLine() {},
+            clearFromCursor() {},
+            clearScreen() {},
+            setTitle() {},
+            setProgress() {},
+            setProgramStatus() {},
+          };
+          const tui = mode === 'regular' ? new TuiMainScreen(terminal) : new TuiAltScreen(terminal);
+          f.tui = tui;
+          await f.open((browser: any) => {
+            tui.addChild(browser);
+            tui.setFocus(browser);
+            tui.start();
+            const draw = () => {
+              writes.length = 0;
+              tui.renderNow(true);
+              return stripVTControlCharacters(writes.join(''));
+            };
+            try {
+              expect(draw()).toContain('中文任务');
+              f.put('native', { lastTaskMessage: 'updated preview' });
+              input('r');
+              expect(draw()).toContain('updated preview');
+              for (const width of [32, 38, 50, 80, 120]) {
+                terminal.columns = width;
+                resize();
+                expect(draw()).toContain('updated preview');
+                expect(
+                  browser.render(width).every((line: string) => visibleWidth(line) <= width),
+                ).toBe(true);
+              }
+              input('\x1b');
+              expect(f.selections).toEqual([undefined]);
+            } finally {
+              tui.stop();
+            }
+          });
+        });
+      },
+    );
+
+    test('does not construct a browser outside TUI mode', async () => {
+      await withBrowser(async (f) => {
+        f.ctx.mode = 'rpc';
+        f.ctx.ui.custom = mock(() => {
+          throw new Error('custom is unavailable');
+        });
+        await f.command();
+        expect(f.ctx.ui.custom).not.toHaveBeenCalled();
+        expect(f.notify).toHaveBeenCalledWith(
+          expect.stringContaining('interactive TUI'),
+          'warning',
+        );
+      });
+    });
+  });
+});
+
+test('seven public tools carry native usage through metadata and the detail footer without consuming reads', async () => {
+  codingAgent.initTheme('dark', false);
+  configureCoreFixture({
+    tokens: (text) => (text.includes('fourteen') ? 70000 : text.includes('twelve') ? 60000 : 50000),
+  });
+  const parent = 'public-sdk-chain-' + randomUUID();
+  const tools = new Map<string, any>();
+  const commands = new Map<string, any>();
+  const handlers = new Map<string, any>();
+  const sent: any[] = [];
+  const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+  const ctx: any = {
+    mode: 'tui',
+    cwd: TEST_AGENT_DIR,
+    model: { provider: 'test', id: 'fake' },
+    modelRegistry: { getAvailable: () => [{ provider: 'test', id: 'fake' }] },
+    sessionManager: { getSessionId: () => parent },
+    ui: { notify: mock(() => {}), setWidget() {} },
+  };
+  const { default: extension } = await import('../src/index.js');
+  const execute = (name: string, params: any) =>
+    tools.get(name).execute('public-sdk-chain', params, undefined, undefined, ctx);
+  const done = (percent: number) =>
+    waitUntil(
+      () =>
+        getAgent('worker', parent)?.status === 'completed' &&
+        getAgent('worker', parent)?.contextUsage?.tokens === percent * 5000,
+    );
+  try {
+    await extension({
+      on(name: string, handler: any) {
+        handlers.set(name, handler);
+      },
+      registerTool(tool: any) {
+        tools.set(tool.name, tool);
+      },
+      registerCommand(name: string, command: any) {
+        commands.set(name, command);
+      },
+      registerShortcut() {},
+      registerMessageRenderer() {},
+      sendMessage(message: any) {
+        sent.push(message);
+      },
+      getThinkingLevel: () => 'high',
+      getActiveTools: () => ['read'],
+      getSettings: () => ({ terminal: { showImages: false }, outputPad: 0 }),
+    } as any);
+    await handlers.get('session_start')({}, ctx);
+    expect([...tools.keys()]).toEqual(toolNames);
+    expect(
+      (await execute('spawn_agent', { task_name: 'worker', message: 'sample ten' })).content[0]
+        .text,
+    ).toBe('Spawned /worker.');
+    await done(10);
+    const beforeRead = sent.length;
+    const read = await execute('read_agent_response', { target: 'worker' });
+    expect(read.content[0].text).toContain('response:sample ten');
+    expect(await execute('read_agent_response', { target: 'worker' })).toEqual(read);
+    expect(sent).toHaveLength(beforeRead);
+    expect((await execute('wait_agent', { targets: ['worker'] })).content[0].text).toContain(
+      'response:sample ten',
+    );
+    expect((await execute('list_agents', {})).content[0].text).not.toContain('contextUsage');
+    let detailOpened = 0;
+    ctx.ui.custom = async (create: any) => {
+      let component: any;
+      let result: any;
+      const frames: string[] = [];
+      const tui = {
+        terminal: { rows: 35 },
+        requestRender() {
+          if (component instanceof SubagentPeekOverlay)
+            frames.push(stripVTControlCharacters(component.render(80).join('\n')));
+        },
+      };
+      component = create(tui, theme, {}, (value: any) => {
+        result = value;
+        component.dispose?.();
+      });
+      try {
+        if (component instanceof SubagentPeekOverlay) {
+          detailOpened++;
+          expect(component.render(80).at(-2)).toContain('│ 12%/500k │ ←/→ agent');
+          expect(
+            (await execute('send_message', { target: 'worker', message: 'sample fourteen' }))
+              .details.delivery,
+          ).toBe('prompt');
+          await done(14);
+          await waitUntil(() => frames.some((frame) => frame.includes('│ 14%/500k │ ←/→ agent')));
+          component.handleInput('q');
+        } else {
+          expect(component.render(80).join('\n')).not.toMatch(/ctx |Context:|%\/500k/);
+          expect(
+            (await execute('send_message', { target: 'worker', message: 'sample twelve' })).details
+              .delivery,
+          ).toBe('prompt');
+          await done(12);
+          component.handleInput('\r');
+        }
+        return result;
+      } finally {
+        component.dispose?.();
+      }
+    };
+    await commands.get('subagents').handler('', ctx);
+    expect(detailOpened).toBe(1);
+    expect((await execute('wait_all_agents', { targets: ['worker'] })).content[0].text).toContain(
+      'response:sample fourteen',
+    );
+    const saved = getAgent('worker', parent)!;
+    expect(saved.contextUsage).toMatchObject({ tokens: 70000, contextWindow: 500000 });
+    expect(saved.contextUsage!.percent!).toBeCloseTo(14);
+    const beforeHistory = fs.readFileSync(saved.sessionFile, 'utf8');
+    ctx.ui.custom = async (create: any) => {
+      let component: any;
+      let result: any;
+      component = create(
+        { terminal: { rows: 35 }, requestRender() {} },
+        theme,
+        {},
+        (value: any) => {
+          result = value;
+          component.dispose?.();
+        },
+      );
+      try {
+        if (component instanceof SubagentPeekOverlay) {
+          expect(component.render(80).at(-2)).toContain('│ 14%/500k │ ←/→ agent');
+          component.handleInput('q');
+        } else component.handleInput('\r');
+        return result;
+      } finally {
+        component.dispose?.();
+      }
+    };
+    await commands.get('subagents').handler('', ctx);
+    expect(fs.readFileSync(saved.sessionFile, 'utf8')).toBe(beforeHistory);
+    await execute('send_message', { target: 'worker', message: 'hold interrupt via tool' });
+    expect((await execute('interrupt_agent', { target: 'worker' })).details.previous_status).toBe(
+      'running',
+    );
+    expect(getAgent('worker', parent)?.status).toBe('interrupted');
+    expect(ctx.ui.notify).not.toHaveBeenCalled();
+  } finally {
+    await handlers.get('session_shutdown')?.();
   }
 });

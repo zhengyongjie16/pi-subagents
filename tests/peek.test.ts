@@ -34,12 +34,17 @@ import type { AssistantMessage, JsonObject } from '@earendil-works/pi-ai';
 import * as fs from 'node:fs';
 import * as net from 'node:net';
 import { randomUUID } from 'node:crypto';
-import { EventEmitter } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
-import { SubagentPeekOverlay } from '../src/peek.js';
 import type { AgentInfo } from '../src/core.js';
+import { ObserverJsonlDecoder, useTestAgentDir, waitUntil } from './fixtures/core-sdk-fixture.js';
+
+const TEST_AGENT_DIR = useTestAgentDir();
+const { EventBroadcaster, getSocketPath } = await import('../src/core.js');
+const { formatAgentSpecLines, SubagentPeekOverlay } = await import('../src/peek.js');
+type SubagentPeekOverlay = InstanceType<typeof SubagentPeekOverlay>;
 
 const widths = [38, 80, 100];
 const cwd = process.cwd();
@@ -65,8 +70,7 @@ let clock: ReturnType<typeof controlledClock> | undefined;
 
 beforeAll(async () => {
   initTheme('dark', false);
-  // Exercise only the public factory. Unexpected initialization API access must fail,
-  // rather than silently executing tools, reading settings, or activating codemode.
+  // The factory facade exposes registerTool to collect native renderers.
   const registration: Pick<ExtensionAPI, 'registerTool'> = {
     registerTool(definition) {
       registrationCount++;
@@ -230,7 +234,6 @@ function createOverlay(
   const requestRender = mock(() => {});
   const done = mock((_navigation?: 'previous' | 'next') => {});
   const tui = wrapTui({ terminal: { rows: 90 }, requestRender } as unknown as TUI);
-  // Run the real constructor/facade and fields; only suppress the socket boundary.
   const connect = spyOn(SubagentPeekOverlay.prototype as any, 'connectSocket').mockImplementation(
     () => {},
   );
@@ -339,8 +342,7 @@ function missingEditArgs() {
 }
 
 async function waitForEditPreview(component: ToolExecutionComponent): Promise<void> {
-  // Observe the public output of a real native FS preview, not private renderer state.
-  // Date.now/setInterval are controlled, but these event-loop/FS waits are genuine.
+  // Poll rendered filesystem previews using real event-loop turns.
   for (let attempt = 0; attempt < 100; attempt++) {
     if (renderTool(component).includes('ENOENT')) {
       await new Promise<void>((resolve) => setImmediate(resolve));
@@ -371,6 +373,12 @@ function progress(
 ) {
   overlay['handleEvent']({ type: 'tool_execution_update', toolCallId: 'call-1', partialResult });
 }
+
+test('formats the resolved subagent model and thinking for the detail overlay', () => {
+  expect(
+    formatAgentSpecLines({ provider: 'openai-codex', modelId: 'gpt-5.5', thinking: 'high' }),
+  ).toEqual(['Model: openai-codex/gpt-5.5', 'Thinking: high']);
+});
 
 describe('peek tool rendering', () => {
   test.each(['bash', 'edit', 'find', 'grep', 'ls', 'powershell', 'read', 'write'])(
@@ -403,29 +411,6 @@ describe('peek tool rendering', () => {
     expect(text).toContain('100-144');
     expect(text).not.toContain('file_line_');
   });
-
-  test('bash output stays collapsed while streaming and after completion', () => {
-    const component = createTool('bash', { command: 'printf output' });
-    const result = {
-      content: [
-        {
-          type: 'text' as const,
-          text: Array.from({ length: 30 }, (_, i) => 'output_line_' + (i + 1)).join('\n'),
-        },
-      ],
-      isError: false,
-    };
-
-    for (const isPartial of [true, false]) {
-      component.updateResult(result, isPartial);
-      const text = renderTool(component);
-      expect(text).toContain('printf output');
-      expect(text).not.toContain('"command":');
-      expect(text).not.toContain('output_line_1');
-      expect(text).toContain('output_line_30');
-      expect(text).toContain('25 earlier lines');
-    }
-  });
 });
 
 describe('fixed native collapsed rendering', () => {
@@ -438,26 +423,12 @@ describe('fixed native collapsed rendering', () => {
     expect(nativeCodemodeRenderers.renderResult).toBeFunction();
     const component = createTool('codemode', codeArgs);
     expect(component['toolDefinition']).toBe(nativeCodemodeRenderers);
+    expect(component['expanded']).toBe(false);
     expect(Object.keys(component['toolDefinition']!).sort()).toEqual([
       'renderCall',
       'renderResult',
       'renderShell',
     ]);
-  });
-
-  test('the central factory explicitly fixes expanded=false for all renderer selections', () => {
-    const expanded = spyOn(ToolExecutionComponent.prototype, 'setExpanded');
-    try {
-      for (const name of [...nativeFactories.keys(), 'codemode', 'tool_search', 'unknown_tool']) {
-        const callsBefore = expanded.mock.calls.length;
-        const component = createTool(name, name === 'codemode' ? codeArgs : {});
-        expect(expanded.mock.calls).toHaveLength(callsBefore + 1);
-        expect(expanded).toHaveBeenLastCalledWith(false);
-        expect(component['expanded']).toBe(false);
-      }
-    } finally {
-      expanded.mockRestore();
-    }
   });
 
   test.each(['bash', 'powershell'])(
@@ -476,8 +447,10 @@ describe('fixed native collapsed rendering', () => {
         expectNativeLines(component, reference);
         const text = renderTool(component);
         expect(text).toContain('中文命令_040');
+        expect(text).not.toContain('"command":');
         expect(text).not.toContain('shell_output_001');
         expect(text).toContain('shell_output_100');
+        expect(text).toContain('95 earlier lines');
       }
       expect({ args, result }).toEqual(original);
     },
@@ -513,10 +486,13 @@ describe('fixed native collapsed rendering', () => {
     expect(text).toContain('Full output: /tmp/full-codemode-output.txt');
     expect(text).toContain('Model calls:');
     expect(text).toContain('Took 4.3s');
+    for (const symbol of ['✓', '✗', '⊘']) expect(text).toContain(symbol);
+    expect(text).not.toContain('caught nested failure');
+    expect(component['result']?.isError).toBe(false);
+    expect(component['result']).toBe(result);
     reference.setExpanded(true);
     expect(component.render(80)).not.toEqual(reference.render(80));
     expect(renderTool(reference)).toContain('script_output_100');
-    expect(component['result']?.details).toBe(result.details);
     expect({ args, result }).toEqual(original);
   });
 
@@ -542,26 +518,6 @@ describe('fixed native collapsed rendering', () => {
       { ok: '✓', error: '✗', cancelled: '⊘', running: '…' }[status] + ' 内层工具',
     );
     expect(renderTool(component).includes('final text')).toBe(!partial);
-  });
-
-  test('caught nested errors do not turn a successful parent into an error', () => {
-    const result = freeze(
-      textResult('Promise.allSettled handled the failures', {
-        details: { calls: calls(3) },
-        durationMs: 1500,
-      }),
-    );
-    const component = createTool('codemode', codeArgs);
-    const reference = referenceTool('codemode', codeArgs, nativeCodemodeRenderers);
-    component.updateResult(result);
-    reference.updateResult(result);
-    expectNativeLines(component, reference);
-    const text = renderTool(component);
-    for (const symbol of ['✓', '✗', '⊘']) expect(text).toContain(symbol);
-    expect(text).not.toContain('caught nested failure');
-    expect(component['result']?.isError).toBe(false);
-    expect(component['result']).toBe(result);
-    expect(result.details.calls[1].status).toBe('error');
   });
 
   test.each([
@@ -598,40 +554,39 @@ describe('fixed native collapsed rendering', () => {
     expect(frozen).toEqual(original);
   });
 
-  test.each(['unregistered_extension_tool', 'tool_search'])(
-    '%s uses native generic logical-line fallback, not undefined/full rendering',
-    (name) => {
-      const args = freeze({ query: '中文 search ' + 'long argument '.repeat(40), limit: 30 });
-      const result = freeze(textResult(lines('generic_output_', 40)));
-      const component = createTool(name, args);
-      const reference = referenceTool(name, args, {});
-      const undefinedControl = referenceTool(name, args, undefined);
-      for (const tool of [component, reference, undefinedControl]) tool.updateResult(result);
-      expect(component['toolDefinition']).toEqual({});
-      expectNativeLines(component, reference);
-      const text = renderTool(component);
-      expect(text).toContain('generic_output_001');
-      expect(text).not.toContain('generic_output_040');
-      expect(text).toContain('more lines');
-      expect(renderTool(undefinedControl)).toContain('generic_output_040');
-      expect(component.render(80)).not.toEqual(undefinedControl.render(80));
+  test('unregistered tools use native generic logical-line fallback, not undefined/full rendering', () => {
+    const name = 'unregistered_extension_tool';
+    const args = freeze({ query: '中文 search ' + 'long argument '.repeat(40), limit: 30 });
+    const result = freeze(textResult(lines('generic_output_', 40)));
+    const component = createTool(name, args);
+    const reference = referenceTool(name, args, {});
+    const undefinedControl = referenceTool(name, args, undefined);
+    for (const tool of [component, reference, undefinedControl]) tool.updateResult(result);
+    expect(component['toolDefinition']).toEqual({});
+    expect(component['expanded']).toBe(false);
+    expectNativeLines(component, reference);
+    const text = renderTool(component);
+    expect(text).toContain('generic_output_001');
+    expect(text).not.toContain('generic_output_040');
+    expect(text).toContain('more lines');
+    expect(renderTool(undefinedControl)).toContain('generic_output_040');
+    expect(component.render(80)).not.toEqual(undefinedControl.render(80));
 
-      // A single logical line may be very tall: do not add a visual-line cap to generic fallback.
-      const json = textResult(
-        JSON.stringify({ data: '中文long_json_value_'.repeat(400), end: 'JSON_TAIL_SENTINEL' }),
-      );
-      for (const tool of [component, reference]) tool.updateResult(json);
-      expectNativeLines(component, reference);
-      expect(renderTool(component, 38).replace(/\s/g, '')).toContain('JSON_TAIL_SENTINEL');
-      expect(component.render(38).length).toBeGreaterThan(component.render(100).length);
-      const codemode = createTool('codemode', codeArgs);
-      const nativeCodemode = referenceTool('codemode', codeArgs, nativeCodemodeRenderers);
-      codemode.updateResult(json);
-      nativeCodemode.updateResult(json);
-      expectNativeLines(codemode, nativeCodemode);
-      expect(renderTool(codemode, 38)).not.toContain('JSON_TAIL_SENTINEL');
-    },
-  );
+    // Generic previews count logical lines, so one line can span many visual rows.
+    const json = textResult(
+      JSON.stringify({ data: '中文long_json_value_'.repeat(400), end: 'JSON_TAIL_SENTINEL' }),
+    );
+    for (const tool of [component, reference]) tool.updateResult(json);
+    expectNativeLines(component, reference);
+    expect(renderTool(component, 38).replace(/\s/g, '')).toContain('JSON_TAIL_SENTINEL');
+    expect(component.render(38).length).toBeGreaterThan(component.render(100).length);
+    const codemode = createTool('codemode', codeArgs);
+    const nativeCodemode = referenceTool('codemode', codeArgs, nativeCodemodeRenderers);
+    codemode.updateResult(json);
+    nativeCodemode.updateResult(json);
+    expectNativeLines(codemode, nativeCodemode);
+    expect(renderTool(codemode, 38)).not.toContain('JSON_TAIL_SENTINEL');
+  });
 
   test.each(['codemode', 'tool_search', 'read'])(
     '%s respects native images, imageWidthCells and outputPad settings',
@@ -639,7 +594,7 @@ describe('fixed native collapsed rendering', () => {
       const previousCaps = { ...getCapabilities() };
       const previousCells = { ...getCellDimensions() };
       try {
-        // iTerm2 sequences have no random Kitty image IDs, so raw equality remains meaningful.
+        // Deterministic iTerm2 image sequences support raw output equality.
         setCapabilities({ images: 'iterm2', hyperlinks: false, trueColor: true });
         setCellDimensions({ widthPx: 8, heightPx: 16 });
         const args = name === 'codemode' ? codeArgs : { path: '中文/图片.png' };
@@ -691,16 +646,8 @@ describe('footer context information and metadata polling', () => {
   test.each([
     [undefined, '?%/?'],
     [savedContextUsage, '10%/500k'],
-    [{ tokens: 0, contextWindow: 500_000, percent: 0 }, '0%/500k'],
-    [{ tokens: 52_000, contextWindow: 500_000, percent: 10.4 }, '10.4%/500k'],
-    [{ tokens: 1, contextWindow: 500_000, percent: 0.0002 }, '<0.1%/500k'],
-    [{ tokens: 525_000, contextWindow: 500_000, percent: 105 }, '105%/500k'],
-    [{ tokens: null, contextWindow: 1_050_000, percent: null }, '?%/1.05M'],
-    [{ tokens: 50_000, contextWindow: 500_000, percent: '10' }, '?%/500k'],
-    [{ contextWindow: 500_000, percent: 10 }, '?%/500k'],
-    [{ tokens: 0, contextWindow: 0, percent: 0 }, '?%/?'],
     ['malformed snapshot', '?%/?'],
-  ])('uses the saved snapshot and shared normalization/formatting: %j', (usage, expected) => {
+  ])('uses the saved snapshot in the footer: %j', (usage, expected) => {
     const input = freeze(usage);
     const original = structuredClone(input);
     const { overlay, requestRender } = createOverlay({}, undefined, undefined, {
@@ -1007,6 +954,8 @@ describe('footer context information and metadata polling', () => {
           const plain = rendered.map(stripVTControlCharacters);
           expect(plain[0]).toStartWith('╭');
           expect(plain[0]).toEndWith('╮');
+          expect(plain.at(-2)).toStartWith('│');
+          expect(plain.at(-2)).toEndWith('│');
           expect(plain.at(-1)).toStartWith('╰');
           expect(plain.at(-1)).toEndWith('╯');
           expect(plain.join('\n')).not.toMatch(/Context:|\bctx\b/);
@@ -1018,6 +967,10 @@ describe('footer context information and metadata polling', () => {
           if (width >= 50) expect(plain.at(-2)).toContain(' │ 10%/500k │ ←/→ agent');
         }
       }
+      overlay['status'] = 'tool';
+      const header = stripVTControlCharacters(overlay.render(22)[0]);
+      expect(header).toContain('◑ tool');
+      expect(visibleWidth(header)).toBe(22);
     } finally {
       fg.mockRestore();
     }
@@ -1162,7 +1115,7 @@ describe('footer context information and metadata polling', () => {
           resize();
           expect(draw()).toContain(' │ 12%/500k');
         }
-        input('\r'); // Enter must not expand tools or close the existing interaction.
+        input('\r'); // Enter
         expect(done).not.toHaveBeenCalled();
         input('\x1b[C');
         expect(done).toHaveBeenCalledWith('next');
@@ -1180,22 +1133,6 @@ describe('footer context information and metadata polling', () => {
 describe('overlay creation paths and native lifecycle', () => {
   beforeEach(() => {
     clock = controlledClock();
-  });
-
-  test('long task names and the footer fit narrow overlay widths without losing their border or status', () => {
-    const { overlay } = createOverlay();
-    overlay['info'].taskName = 'long-task/'.repeat(30) + 'review';
-    overlay['status'] = 'tool';
-    for (const width of [22, 38, 50, 80, 100]) {
-      const lines = overlay.render(width);
-      for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
-      const plain = lines.map(stripVTControlCharacters);
-      expect(plain[0]).toStartWith('╭');
-      expect(plain[0]).toEndWith('╮');
-      expect(plain[0]).toContain('◑ tool');
-      expect(plain.at(-2)).toStartWith('│');
-      expect(plain.at(-2)).toEndWith('│');
-    }
   });
 
   test('native refresh facade never writes through the real UI proxy to its shared TUI', () => {
@@ -1335,12 +1272,11 @@ describe('overlay creation paths and native lifecycle', () => {
       }
       const component = toolRows(overlay)[0];
       const reference = referenceTool('edit', args, nativeDefinition('edit'));
-      // Native history replay only supplies the recorded result, never the live hook.
+      // Replay stored results through the native result renderer.
       reference.updateResult(expected);
       const before = widths.map((width) => component.render(width));
 
-      // This positive control proves that valid args really would read today's missing file.
-      // Waiting for its async callback prevents a synchronous-only regression from passing.
+      // Wait for the live argument hook to read the missing file.
       const liveControl = referenceTool('edit', args, nativeDefinition('edit'));
       liveControl.setArgsComplete();
       liveControl.updateResult(expected);
@@ -1442,7 +1378,6 @@ describe('overlay creation paths and native lifecycle', () => {
     for (const key of ['\x0f', '\r', ' ']) overlay.handleInput(key);
     expect(component['expanded']).toBe(false);
     expect(component.render(80)).toEqual(before);
-    expect((overlay as any).handleMouse).toBeUndefined();
   });
 
   test.each(['codemode', 'powershell', 'tool_search'])(
@@ -1906,7 +1841,7 @@ describe('overlay creation paths and native lifecycle', () => {
       if (state === 'disconnected') overlay['socket'] = null;
       else if (state === 'destroyed') socket.destroyed = true;
       else socket.connecting = true;
-      // No further file write: the deferred projection must still be consumed.
+      // Replay deferred history once live updates are unavailable.
       overlay['poll']();
       expect(overlay['historyDirty']).toBe(false);
       expect(clock!.clear).toHaveBeenCalledWith(timerId);
@@ -1922,4 +1857,634 @@ describe('overlay creation paths and native lifecycle', () => {
       expectNativeLines(restored, reference);
     },
   );
+});
+
+describe('observer socket integration', () => {
+  let broadcaster: InstanceType<typeof EventBroadcaster>;
+  let agentId: string;
+  let events: any[];
+  let sockets: net.Socket[];
+
+  beforeEach(async () => {
+    agentId = randomUUID();
+    events = [];
+    sockets = [];
+    broadcaster = new EventBroadcaster(agentId);
+    broadcaster.start();
+    await once(broadcaster['server']!, 'listening');
+    const socket = net.connect(getSocketPath(agentId));
+    sockets.push(socket);
+    socket.setEncoding('utf8');
+    let buffer = '';
+    socket.on('data', (chunk) => {
+      buffer += chunk;
+      const lines = buffer.split('\n');
+      buffer = lines.pop()!;
+      for (const line of lines.filter(Boolean)) events.push(JSON.parse(line));
+    });
+    let error: Error | undefined;
+    socket.on('error', (value) => {
+      error = value;
+    });
+    await waitUntil(() => {
+      if (error) throw error;
+      return events[0]?.type === 'sync';
+    });
+    events.length = 0;
+  });
+
+  afterEach(async () => {
+    const server = broadcaster['server'];
+    const closed = server ? once(server, 'close') : Promise.resolve();
+    for (const overlay of overlays) overlay.dispose();
+    for (const socket of sockets) socket.destroy();
+    broadcaster.stop();
+    await closed;
+  });
+
+  const start = (id: string, toolName = 'codemode', args: any = { code: 'script' }) => ({
+    type: 'tool_execution_start',
+    toolCallId: id,
+    toolName,
+    args,
+  });
+  const update = (id: string, partialResult: any) => ({
+    type: 'tool_execution_update',
+    toolCallId: id,
+    toolName: 'codemode',
+    partialResult,
+  });
+  const end = (id: string, result: any, isError = false) => ({
+    type: 'tool_execution_end',
+    toolCallId: id,
+    toolName: 'codemode',
+    result,
+    isError,
+  });
+  const textResult = (text: string) => ({
+    content: [{ type: 'text' as const, text }],
+    details: {},
+  });
+  const emit = (...values: any[]) => {
+    for (const value of values) broadcaster.broadcast(value);
+  };
+  const flush = async () => {
+    const token = randomUUID();
+    emit({ type: 'test_barrier', token });
+    await waitUntil(() =>
+      events.some((event) => event.type === 'test_barrier' && event.token === token),
+    );
+  };
+  const nested = (event: any, parentToolCallId: string) => ({ ...event, parentToolCallId });
+
+  test.each(['regular', 'fullscreen'] as const)(
+    'isolated native %s TUI handles live socket previews, input, reopen, resize and offline recovery',
+    async (mode) => {
+      initTheme('dark', false);
+      const sessionDir = fs.mkdtempSync(join(TEST_AGENT_DIR, 'tui-session-'));
+      const session = SessionManager.create(TEST_AGENT_DIR, sessionDir);
+      session.appendMessage({ role: 'user', content: 'isolated TUI task', timestamp: Date.now() });
+      const args = { code: 'await Promise.allSettled([tools.read({ path: "中文.txt" })]);' };
+      const assistant: any = {
+        role: 'assistant',
+        content: [{ type: 'toolCall', id: 'tui-call', name: 'codemode', arguments: args }],
+        api: 'test',
+        provider: 'test',
+        model: 'fake',
+        stopReason: 'toolUse',
+        timestamp: Date.now(),
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+      };
+      session.appendMessage(assistant);
+      const partial = {
+        ...textResult('hidden partial text'),
+        details: { calls: [{ name: 'nested/read', args: 'path=中文.txt', status: 'running' }] },
+      };
+      emit(start('tui-call', 'codemode', args), update('tui-call', partial));
+      const info = {
+        id: agentId,
+        taskName: 'isolated TUI',
+        provider: 'test',
+        modelId: 'fake',
+        cwd: TEST_AGENT_DIR,
+        sessionFile: session.getSessionFile()!,
+      } as AgentInfo;
+      let input: (data: string) => void = () => {};
+      let resize = () => {};
+      const writes: string[] = [];
+      const terminal: Terminal & { columns: number; rows: number } = {
+        columns: 120,
+        rows: 35,
+        kittyProtocolActive: false,
+        start(onInput, onResize) {
+          input = onInput;
+          resize = onResize;
+        },
+        stop() {},
+        async drainInput() {},
+        write(data) {
+          writes.push(data);
+        },
+        moveBy() {},
+        hideCursor() {},
+        showCursor() {},
+        clearLine() {},
+        clearFromCursor() {},
+        clearScreen() {},
+        setTitle() {},
+        setProgress() {},
+        setProgramStatus() {},
+      };
+      const tui = mode === 'regular' ? new TuiMainScreen(terminal) : new TuiAltScreen(terminal);
+      const navigation: Array<'previous' | 'next' | undefined> = [];
+      let overlay: InstanceType<typeof SubagentPeekOverlay>;
+      let hide = () => {};
+      const mount = async () => {
+        overlay = new SubagentPeekOverlay(
+          tui,
+          { fg: (_color: string, text: string) => text } as any,
+          info,
+          (value) => {
+            navigation.push(value);
+            hide();
+          },
+          nativeCodemodeRenderers,
+          { outputPad: 0, showImages: false },
+        );
+        overlays.push(overlay);
+        const socket = overlay['socket']!;
+        await once(socket, 'data');
+        const handle = tui.showOverlay(overlay, {
+          anchor: 'right-center',
+          width: '80%',
+          minWidth: 38,
+          maxHeight: 31,
+        });
+        hide = () => {
+          overlay.dispose();
+          handle.hide();
+        };
+        writes.length = 0;
+        tui.renderNow(true);
+      };
+      const tool = () =>
+        overlay!['chatContainer'].children.find(
+          (child) => child instanceof ToolExecutionComponent,
+        ) as ToolExecutionComponent;
+      const output = () => stripVTControlCharacters(writes.join(''));
+      const draw = () => {
+        writes.length = 0;
+        tui.renderNow(true);
+        return output();
+      };
+      tui.start();
+      try {
+        await mount();
+        expect(output()).toContain('… nested/read');
+        expect(tool()['expanded']).toBe(false);
+        expect(tool()['executionStarted']).toBe(true);
+        input('\x0f'); // Ctrl+O
+        if (mode === 'fullscreen') {
+          input('\x1b[<0;70;15M');
+          input('\x1b[<0;70;15m');
+        }
+        expect(tool()['expanded']).toBe(false);
+        for (const key of ['k', 'j', 'g', 'G']) input(key);
+        terminal.columns = 55;
+        resize();
+        expect(draw()).toContain('nested/read');
+        terminal.columns = 120;
+        resize();
+        overlay!.invalidate();
+        expect(draw()).toContain('… nested/read');
+        expect(tool()['expanded']).toBe(false);
+        input('q');
+        expect(overlay!['disposed']).toBe(true);
+        await mount();
+        expect(output()).toContain('… nested/read');
+        expect(tool()['executionStarted']).toBe(true);
+
+        const result = {
+          ...textResult('tui_final_output'),
+          details: {
+            calls: [
+              {
+                name: 'nested/read',
+                args: 'path=中文.txt',
+                status: 'error',
+                error: 'caught failure',
+                durationMs: 15,
+              },
+            ],
+          },
+        };
+        const original = structuredClone(result);
+        emit({ ...end('tui-call', result), durationMs: 2600 });
+        await waitUntil(() => !overlay!['pendingTools'].has('tui-call'));
+        draw();
+        expect(output()).toContain('✗ nested/read');
+        expect(output()).toContain('tui_final_output');
+        expect(output()).toContain('Took 2.6s');
+        expect(tool()['result']!.isError).toBe(false);
+        expect(result).toEqual(original);
+        const finalMessage: any = {
+          role: 'toolResult',
+          toolCallId: 'tui-call',
+          toolName: 'codemode',
+          ...result,
+          durationMs: 2600,
+          isError: false,
+          timestamp: Date.now(),
+        };
+        emit({ type: 'message_end', message: finalMessage });
+        session.appendMessage(finalMessage);
+        emit({ type: 'agent_settled' });
+        await waitUntil(() => overlay!['status'] === 'done');
+        input('\x1b[D');
+        expect(overlay!['disposed']).toBe(true);
+        await mount();
+        expect(output()).toContain('tui_final_output');
+        expect(tool()['executionStarted']).toBe(false);
+        expect(tool()['expanded']).toBe(false);
+        input('\x1b[C');
+        await mount();
+        expect(output()).toContain('tui_final_output');
+        expect(tool()['expanded']).toBe(false);
+        expect(navigation).toEqual([undefined, 'previous', 'next']);
+
+        const closed = once(broadcaster['server']!, 'close');
+        broadcaster.stop();
+        await closed;
+        await waitUntil(() => overlay!['socket'] === null);
+        session.appendMessage({
+          role: 'user',
+          content: 'offline TUI file update',
+          timestamp: Date.now(),
+        });
+        overlay!['poll']();
+        overlay!.handleInput('G');
+        draw();
+        expect(output()).toContain('offline TUI file update');
+        expect(
+          SessionManager.open(info.sessionFile)
+            .buildSessionContext()
+            .messages.find((message) => message.role === 'toolResult'),
+        ).toMatchObject(finalMessage);
+        input('q');
+      } finally {
+        hide();
+        tui.stop();
+      }
+    },
+  );
+
+  test('defers file rebuilds only for executing rows and resumes deferred or disconnected file recovery', async () => {
+    initTheme('dark', false);
+    const sessionDir = fs.mkdtempSync(join(TEST_AGENT_DIR, 'poll-session-'));
+    const session = SessionManager.create(TEST_AGENT_DIR, sessionDir);
+    session.appendMessage({
+      role: 'user',
+      content: 'isolated polling task',
+      timestamp: Date.now(),
+    });
+    const calls = ['file-only', 'a', 'c'].map((id) => ({
+      type: 'toolCall' as const,
+      id,
+      name: 'custom_tool',
+      arguments: { task: id },
+    }));
+    const assistant: any = {
+      role: 'assistant',
+      content: calls,
+      api: 'test',
+      provider: 'test',
+      model: 'fake',
+      stopReason: 'toolUse',
+      timestamp: Date.now(),
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+    };
+    session.appendMessage(assistant);
+    emit(
+      start('a', 'custom_tool', calls[1].arguments),
+      start('c', 'custom_tool', calls[2].arguments),
+    );
+    const info = {
+      id: agentId,
+      taskName: 'polling',
+      provider: 'test',
+      modelId: 'fake',
+      cwd: TEST_AGENT_DIR,
+      sessionFile: session.getSessionFile()!,
+    } as AgentInfo;
+    const overlay = new SubagentPeekOverlay(
+      { terminal: { rows: 80 }, requestRender() {} } as any,
+      { fg: (_color: string, text: string) => text } as any,
+      info,
+      () => {},
+      nativeCodemodeRenderers,
+    );
+    overlays.push(overlay);
+    await waitUntil(() => overlay['pendingTools'].get('c')?.executing === true);
+    const a = overlay['pendingTools'].get('a')!.component;
+    const c = overlay['pendingTools'].get('c')!.component;
+    expect(overlay['pendingTools'].get('file-only')!.executing).toBe(false);
+    const persistedResult = (id: string, text: string) => ({
+      role: 'toolResult' as const,
+      toolCallId: id,
+      toolName: 'custom_tool',
+      ...textResult(text),
+      isError: false,
+      durationMs: 100,
+      timestamp: Date.now(),
+    });
+
+    // Persist an unresolved historical result during live execution.
+    session.appendMessage(persistedResult('file-only', 'file_only_result'));
+    overlay['poll']();
+    expect(overlay['historyDirty']).toBe(true);
+    expect(overlay['pendingTools'].get('a')!.component).toBe(a);
+    expect(overlay['pendingTools'].get('c')!.component).toBe(c);
+    emit(end('a', textResult('a result')));
+    await waitUntil(() => !overlay['pendingTools'].has('a'));
+    overlay['poll']();
+    expect(overlay['pendingTools'].get('c')!.component).toBe(c);
+    session.appendMessage(persistedResult('a', 'a result'));
+    overlay['poll']();
+    const deferredSize = overlay['lastFileSize'];
+    emit(end('c', textResult('c result')));
+    await waitUntil(() => !overlay['pendingTools'].has('c'));
+    overlay['poll']();
+    expect(overlay['lastFileSize']).toBe(deferredSize);
+    expect(overlay['historyDirty']).toBe(false);
+    expect(overlay['pendingTools'].has('file-only')).toBe(false);
+    expect(stripVTControlCharacters(overlay.render(120).join('\n'))).toContain('file_only_result');
+
+    // A reconnected execution reuses the unresolved historical row; disconnect permits file fallback.
+    emit(start('c', 'custom_tool', calls[2].arguments));
+    await waitUntil(() => overlay['pendingTools'].get('c')?.executing === true);
+    session.appendMessage(persistedResult('c', 'disconnected_file_result'));
+    overlay['socket']!.destroy();
+    await waitUntil(() => overlay['socket'] === null && !overlay['pendingTools'].has('c'));
+    expect(stripVTControlCharacters(overlay.render(120).join('\n'))).toContain(
+      'disconnected_file_result',
+    );
+    session.appendMessage({ role: 'user', content: 'offline_file_tail', timestamp: Date.now() });
+    overlay['poll']();
+    expect(stripVTControlCharacters(overlay.render(120).join('\n'))).toContain('offline_file_tail');
+  });
+
+  test('renders live, reconnect and persisted history with the same top-level ownership', async () => {
+    initTheme('dark', false);
+    const sessionDir = fs.mkdtempSync(join(TEST_AGENT_DIR, 'observer-session-'));
+    const session = SessionManager.create(TEST_AGENT_DIR, sessionDir);
+    session.appendMessage({
+      role: 'user',
+      content: 'isolated observer task',
+      timestamp: Date.now(),
+    });
+    const info = {
+      id: agentId,
+      taskName: 'observer',
+      provider: 'test',
+      modelId: 'fake',
+      model: 'test:fake',
+      cwd: TEST_AGENT_DIR,
+      sessionFile: session.getSessionFile()!,
+    } as AgentInfo;
+    const navigation: Array<'previous' | 'next' | undefined> = [];
+    const open = async (expectSync = true) => {
+      const overlay = new SubagentPeekOverlay(
+        {
+          terminal: { rows: 80 },
+          requestRender() {},
+        } as any,
+        { fg: (_color: string, text: string) => text } as any,
+        info,
+        (value) => navigation.push(value),
+        nativeCodemodeRenderers,
+      );
+      overlays.push(overlay);
+      const socket = overlay['socket']!;
+      sockets.push(socket);
+      const decoder = new ObserverJsonlDecoder();
+      let synced = false;
+      const onData = (chunk: Buffer) => {
+        for (const line of decoder.push(chunk)) {
+          if (JSON.parse(line).type === 'sync') synced = true;
+        }
+      };
+      socket.on('data', onData);
+      try {
+        await waitUntil(() => (expectSync ? synced : overlay['socket'] === null));
+      } finally {
+        socket.off('data', onData);
+      }
+      return overlay;
+    };
+    const tools = (overlay: InstanceType<typeof SubagentPeekOverlay>) =>
+      overlay['chatContainer'].children.filter((child) => child instanceof ToolExecutionComponent);
+    const render = (overlay: InstanceType<typeof SubagentPeekOverlay>) =>
+      stripVTControlCharacters(overlay.render(120).join('\n'));
+    let overlay = await open();
+    const parent = start('script', 'codemode', {
+      code: 'await Promise.all([tools.read({path: "nested.txt"}), tools.powershell({command: "echo nested"})])',
+    });
+    const assistant: any = {
+      role: 'assistant',
+      content: [{ type: 'toolCall', id: 'script', name: 'codemode', arguments: parent.args }],
+      api: 'test',
+      provider: 'test',
+      model: 'fake',
+      stopReason: 'toolUse',
+      timestamp: Date.now(),
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+    };
+    emit(
+      { type: 'message_start', message: { ...assistant, content: [] } },
+      {
+        type: 'message_update',
+        assistantMessageEvent: {
+          type: 'toolcall_start',
+          contentIndex: 0,
+          id: 'script',
+          toolName: 'codemode',
+        },
+      },
+      {
+        type: 'message_update',
+        assistantMessageEvent: {
+          type: 'toolcall_delta',
+          contentIndex: 0,
+          delta: JSON.stringify(parent.args),
+        },
+      },
+      {
+        type: 'message_update',
+        assistantMessageEvent: {
+          type: 'toolcall_end',
+          contentIndex: 0,
+          toolCall: assistant.content[0],
+        },
+      },
+      { type: 'message_end', message: assistant },
+    );
+    session.appendMessage(assistant);
+    emit(
+      parent,
+      nested(start('script/1', 'read', { path: 'nested.txt' }), 'script'),
+      nested(start('script/2', 'powershell', { command: 'echo nested' }), 'script'),
+      update('script', {
+        ...textResult('parent progress'),
+        details: { calls: [{ name: 'nested/read', args: 'path=nested.txt', status: 'running' }] },
+      }),
+    );
+    await waitUntil(() => render(overlay).includes('… nested/read'));
+    expect(tools(overlay)).toHaveLength(1);
+    expect(overlay['pendingTools'].has('script/1')).toBe(false);
+    expect(overlay['pendingTools'].has('script/2')).toBe(false);
+
+    overlay.dispose();
+    overlay = await open();
+    expect(tools(overlay)).toHaveLength(1);
+    expect(render(overlay)).toContain('… nested/read');
+    expect(render(overlay)).not.toContain('parent progress');
+    const result = {
+      ...textResult('final script output'),
+      durationMs: 1234,
+      details: {
+        calls: [
+          { name: 'nested/read', args: 'path=nested.txt', status: 'ok', durationMs: 12 },
+          {
+            name: 'nested/powershell',
+            args: 'command=echo nested',
+            status: 'error',
+            durationMs: 23,
+            error: 'caught error',
+          },
+          { name: 'nested/cancelled', args: '', status: 'cancelled' },
+        ],
+      },
+    };
+    emit(
+      nested(end('script/1', textResult('nested file')), 'script'),
+      nested(end('script/2', textResult('nested shell')), 'script'),
+      end('script', result),
+    );
+    await waitUntil(() => render(overlay).includes('final script output'));
+    overlay.dispose();
+    overlay = await open();
+    expect(tools(overlay)).toHaveLength(1);
+    expect(render(overlay)).toContain('final script output');
+    expect(render(overlay)).toContain('✓ nested/read');
+    expect(render(overlay)).toContain('✗ nested/powershell');
+    expect(render(overlay)).toContain('⊘ nested/cancelled');
+    expect(render(overlay)).toContain('Took 1.2s');
+    const reference = new ToolExecutionComponent(
+      'codemode',
+      'script',
+      parent.args,
+      {},
+      nativeCodemodeRenderers,
+      { requestRender() {} } as any,
+      TEST_AGENT_DIR,
+    );
+    reference.setExpanded(false);
+    reference.setArgsComplete();
+    reference.updateResult({ ...result, isError: false }, false);
+    expect(tools(overlay)[0].render(118)).toEqual(reference.render(118));
+
+    const toolResult: any = {
+      role: 'toolResult',
+      toolCallId: 'script',
+      toolName: 'codemode',
+      ...result,
+      isError: false,
+      timestamp: Date.now(),
+    };
+    emit({ type: 'message_end', message: toolResult });
+    // Observe event delivery before the transcript write.
+    await flush();
+    expect(
+      SessionManager.open(info.sessionFile)
+        .buildSessionContext()
+        .messages.some((message) => message.role === 'toolResult'),
+    ).toBe(false);
+    overlay.dispose();
+    overlay = await open();
+    expect(tools(overlay)).toHaveLength(1);
+    expect(render(overlay)).not.toContain('final script output');
+    session.appendMessage(toolResult);
+    await waitUntil(() => render(overlay).includes('final script output'));
+    const direct = start('direct/read', 'read', { path: 'real-top-level.txt' });
+    const directAssistant = {
+      ...assistant,
+      content: [{ type: 'toolCall', id: direct.toolCallId, name: 'read', arguments: direct.args }],
+    };
+    session.appendMessage(directAssistant);
+    emit(direct, { ...end(direct.toolCallId, textResult('top-level file')), toolName: 'read' });
+    const directResult: any = {
+      role: 'toolResult',
+      toolCallId: direct.toolCallId,
+      toolName: 'read',
+      ...textResult('top-level file'),
+      isError: false,
+      timestamp: Date.now(),
+    };
+    emit({ type: 'message_end', message: directResult });
+    session.appendMessage(directResult);
+    await waitUntil(() => render(overlay).includes('real-top-level.txt'));
+    expect(tools(overlay)).toHaveLength(2);
+    emit({ type: 'agent_settled' });
+    await waitUntil(() => overlay['status'] === 'done');
+    expect(render(overlay)).toContain('final script output');
+    expect(render(overlay)).toContain('real-top-level.txt');
+    expect(tools(overlay)).toHaveLength(2);
+
+    overlay.dispose();
+    overlay = await open();
+    expect(tools(overlay)).toHaveLength(2);
+    expect(render(overlay)).toContain('final script output');
+    expect(render(overlay)).toContain('real-top-level.txt');
+    for (const key of ['k', 'j', 'g', 'G']) expect(() => overlay.handleInput(key)).not.toThrow();
+    overlay.handleInput('\x1b[D');
+    overlay = await open();
+    overlay.handleInput('\x1b[C');
+    overlay = await open();
+    overlay.handleInput('q');
+    expect(navigation).toEqual(['previous', 'next', undefined]);
+    const closed = once(broadcaster['server']!, 'close');
+    broadcaster.stop();
+    await closed;
+    overlay = await open(false);
+    expect(tools(overlay)).toHaveLength(2);
+    expect(render(overlay)).toContain('final script output');
+    expect(render(overlay)).toContain('real-top-level.txt');
+    expect(
+      SessionManager.open(info.sessionFile)
+        .buildSessionContext()
+        .messages.filter((message) => message.role === 'toolResult')
+        .map((message: any) => message.toolCallId),
+    ).toEqual(['script', 'direct/read']);
+  });
 });

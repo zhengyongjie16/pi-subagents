@@ -560,7 +560,6 @@ export function readInfoFile(file: string): AgentInfo | undefined {
           : 'interrupted';
       delete info.closedAt;
     }
-    // Legacy RPC ownership is not SDK ownership and must never be acted on.
     delete (info as any).childProcess;
     return info as AgentInfo;
   } catch {
@@ -1004,7 +1003,7 @@ export class RpcAssistantStreamState {
   }
 }
 
-/** Preserve the existing observation protocol without sharing its mutable delta cache with SDK. */
+/** Build observer deltas independently of the SDK's mutable partial-message cache. */
 export function toObserverEvent(event: AgentSessionEvent): any {
   if (event.type === 'message_start' && event.message.role === 'assistant') {
     return { ...event, message: structuredClone(event.message) };
@@ -1256,7 +1255,7 @@ export class AgentManager {
     ensureBaseDirs();
     pruneExpiredRuns();
     this.reconciliation = this.reconcileInactiveRuns();
-    // A caller may not invoke ready() until a later event.
+    // Callers may await ready() after reconciliation has already settled.
     void this.reconciliation.catch(() => {});
     const nativeSessions = path.join(getAgentDir(), 'sessions');
     const storage = getRunsDir();
@@ -1485,7 +1484,7 @@ export class AgentManager {
         onCreated: (session) => {
           live.session = session;
           live.unsubscribe = session.subscribe((event) => {
-            // SDK persists message_end AFTER public listeners. Never throw back into it.
+            // Keep listener failures local so the SDK can persist messages after dispatch.
             try {
               this.handleSessionEvent(live, event);
             } catch (error) {
@@ -1520,8 +1519,7 @@ export class AgentManager {
     } catch (error) {
       if (error === timeout) this.requestCancellation(live, timeout);
       try {
-        // Only a rejected, unaccepted resume can restore the previous result. Cancellation,
-        // timeout and an accepted run own their terminal result, even before input returns.
+        // Restore a terminal result only when a resume is rejected before acceptance or cancellation.
         if (
           live.promptFinished &&
           !live.accepted &&
@@ -1542,8 +1540,7 @@ export class AgentManager {
             delete live.suspendedCompletion;
             if (completion) this.pushMailbox(completion, false);
             else {
-              // A targeted wait can reread a terminal snapshot. That is not a new mailbox
-              // event and must not satisfy an unscoped next-completion wait.
+              // A restored snapshot satisfies only waits targeting this agent.
               for (const waiter of this.waiters.filter(
                 (waiter) =>
                   waiter.parentSessionId === previous.parentSessionId &&
@@ -1619,7 +1616,7 @@ export class AgentManager {
       live.accepted = true;
       resolveAccepted();
     });
-    // Track the ORIGINAL operation, not the completion/cleanup wrapper (which would deadlock).
+    // Track the submitted prompt so cleanup can await it independently.
     live.promptFinished = promptFinished;
     const finished = promptFinished.then(() => session.waitForIdle());
     void finished.then(
@@ -1634,8 +1631,7 @@ export class AgentManager {
       },
     );
     await accepted;
-    // abort() during input/preflight can return idle before this operation starts. Request it
-    // again after a late acceptance, without ever reviving a finalized/very fast completed run.
+    // Reapply cancellation after late acceptance; finalized runs retain their terminal state.
     if (live.cancellation.signal.aborted || this.shutdownController.signal.aborted) {
       this.requestAbort(live);
       throw abortError(
@@ -1681,8 +1677,7 @@ export class AgentManager {
       Object.assign(live.info, candidate);
       if (!contextUsage) delete live.info.contextUsage;
     } catch (error) {
-      // Context sampling is best-effort; persistence failures remain visible, but must not
-      // prevent result delivery or release of the session.
+      // Report sampling failures while continuing result delivery and cleanup.
       this.reportError(live, error);
     }
   }
@@ -1727,8 +1722,7 @@ export class AgentManager {
     )
       this.requestAbort(live);
     if (live.finalizedRun || (live.awaitingPrompt && !live.promptFinished)) return;
-    // These are persisted boundaries. message_end is deliberately NOT one: SDK appends the
-    // message after this callback and a synchronous sample there would lag by one message.
+    // Sample after persistence; message_end is dispatched before its message is appended.
     if (
       event.type === 'turn_end' ||
       (event.type === 'compaction_end' && event.result) ||
@@ -1791,7 +1785,7 @@ export class AgentManager {
     error?: string,
   ): void {
     if (this.live.get(live.info.id) !== live || live.finalizedRun) return;
-    // Close the admission boundary BEFORE persistence, callbacks and completion publication.
+    // Close admission before persistence, callbacks, and completion publication.
     live.closing = true;
     live.finalizedRun = true;
     delete live.suspendedCompletion;
@@ -1806,7 +1800,7 @@ export class AgentManager {
     try {
       saveInfo(live.info);
     } finally {
-      // A failed status save must remain visible, but cannot strand registered waiters.
+      // Publish status and resolve waits even when persistence fails.
       this.notifyStatusChange(live.info);
       if (status === 'interrupted')
         this.finishWaitTarget(live.info.parentSessionId, live.info.canonicalName);
@@ -2055,7 +2049,7 @@ export class AgentManager {
     } finally {
       this.waitAllClaims.delete(claim);
       for (const eventId of claim.suppressedEventIds) {
-        // Tentative input hides the old event from waits, not from claim cancellation.
+        // Claim cancellation also releases completions suspended by tentative input.
         const event =
           this.mailbox.find((candidate) => candidate.id === eventId) ??
           [...this.live.values()].find((live) => live.suspendedCompletion?.id === eventId)
@@ -2101,14 +2095,12 @@ export class AgentManager {
     if (current.finalizedRun || !session.isStreaming)
       throw new Error(`Agent ${info.canonicalName} is finishing. Retry after cleanup.`);
     const steer = session.steer(message, undefined, { source: 'rpc' });
-    // An asynchronous input hook can outlive the model run. This is operation tracking, not
-    // a message queue: closing rejects new inputs and cleanup waits for the original ones.
+    // Track submitted input until it exits so cleanup retains session ownership.
     current.pendingSteers.add(steer);
     void steer.then(
       () => {
         if (this.live.get(info.id) === current && current.cancellation.signal.aborted) {
-          // abort() does not retract an input that queues after cancellation. Discard only
-          // still-pending native messages; never rewrite messages already in the transcript.
+          // Clear late-queued input after cancellation, preserving persisted messages.
           try {
             session.clearQueue();
           } catch (error) {
@@ -2126,8 +2118,7 @@ export class AgentManager {
     try {
       await boundedWait(steer, DEFAULT_STARTUP_TIMEOUT_MS, timeout, this.shutdownController.signal);
     } catch (error) {
-      // A timed-out input is still owned by the SDK. Cancel this run and keep its JSONL
-      // locked until pendingSteers exits; ordinary input rejection must not abort the run.
+      // A steering timeout cancels the run and retains JSONL ownership until input exits.
       if (error === timeout && this.live.get(info.id) === current && !current.finalizedRun) {
         this.requestCancellation(current, timeout);
         try {
@@ -2221,7 +2212,7 @@ export class AgentManager {
 
   private requestAbort(live: LiveAgent): void {
     if (!live.session || this.live.get(live.info.id) !== live) return;
-    // Never await an SDK run from inside one of its callbacks.
+    // Let SDK callbacks return while cancellation finishes.
     try {
       void live.session.abort().catch((error) => this.reportError(live, error));
     } catch (error) {
@@ -2248,8 +2239,7 @@ export class AgentManager {
     // abort listeners can synchronously request shutdown. Publish the shared promise first.
     live.termination = Promise.resolve().then(async () => {
       this.requestAbort(live);
-      // abort()'s idle excludes input/preflight and initialization. Do not dispose, clear the
-      // active marker or allow the JSONL to reopen until those ORIGINAL operations return.
+      // Wait for initialization and submitted input before releasing session ownership.
       await live.initialization?.catch(() => {});
       await live.promptFinished?.catch(() => {});
       await Promise.allSettled(live.pendingSteers);
@@ -2270,8 +2260,7 @@ export class AgentManager {
           }
         }
       } finally {
-        // shutdownChildSession disposes even when its bounded shutdown hook fails.
-        // This block is only reached after initialization and submitted input have exited.
+        // SDK shutdown disposes the session even when its hook fails.
         try {
           live.unsubscribe?.();
         } catch (error) {
@@ -2311,7 +2300,7 @@ export class AgentManager {
       } catch (error) {
         errors.push(error);
       }
-      // One failed save must not skip this child or any sibling's cleanup.
+      // Continue cleanup for every child when saving status fails.
       return this.waitForTermination(live);
     });
     const results = await Promise.allSettled([this.reconciliation, ...terminations]);

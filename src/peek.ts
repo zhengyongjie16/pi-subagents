@@ -83,7 +83,7 @@ export class SubagentPeekOverlay {
   private readonly assistantStream = new RpcAssistantStreamState();
   private streamingComponent: AssistantMessageComponent | null = null;
   private streamingMessage: AssistantMessage | null = null;
-  // An unmatched historical call is pending, but is not evidence of live execution.
+  // Pending calls acquire execution state from live events.
   private readonly pendingTools = new Map<
     string,
     { component: ToolExecutionComponent; executing: boolean }
@@ -103,7 +103,7 @@ export class SubagentPeekOverlay {
     private readonly nativeCodemodeRenderers: ToolRenderers,
     private readonly toolExecutionOptions: ToolExecutionOptions = {},
   ) {
-    // Define an own property: assigning through Pi’s TUI proxy prototype would mutate the shared TUI.
+    // An own requestRender property preserves the shared TUI proxy.
     this.toolRenderUi = Object.create(tui, {
       requestRender: {
         value: () => {
@@ -165,7 +165,7 @@ export class SubagentPeekOverlay {
         for (const content of message.content) {
           if (content.type !== 'toolCall') continue;
           const component = this.createToolComponent(content.name, content.id, content.arguments);
-          // Replay like the native transcript: args-complete is a live hook (edit previews read today’s files).
+          // Replay recorded results; live argument hooks read the current filesystem.
           this.chatContainer.addChild(component);
           if (message.stopReason === 'aborted' || message.stopReason === 'error') {
             component.updateResult({

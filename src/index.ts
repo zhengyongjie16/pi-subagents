@@ -109,7 +109,7 @@ function runtimeLabel(info: AgentInfo): string {
 
 export default async function index_(pi: ExtensionAPI) {
   let nativeCodemodeRenderers: ToolRenderers = {};
-  // Collect only presentation hooks; never register or execute another codemode tool.
+  // Collect native codemode presentation hooks.
   await createCodemodeExtension()({
     ...pi,
     registerTool(definition) {
@@ -140,7 +140,7 @@ export default async function index_(pi: ExtensionAPI) {
     available: Map<string, SpawnModel>,
   ): SpawnModel | undefined => {
     const colon = pattern.lastIndexOf(':');
-    // A registered ID wins over the legacy model:thinking shorthand.
+    // Exact registered IDs take precedence over thinking-suffix parsing.
     const reference =
       !available.has(pattern) &&
       colon > 0 &&
@@ -252,7 +252,7 @@ export default async function index_(pi: ExtensionAPI) {
         ctx.ui.notify(message, 'error');
         return;
       }
-    } catch {} // A stale or failing UI must not interrupt cleanup.
+    } catch {} // Fall back to stderr if UI reporting fails.
     try {
       console.error(message);
     } catch {}
@@ -263,7 +263,7 @@ export default async function index_(pi: ExtensionAPI) {
     activeContext = ctx;
     if (manager) return manager;
     manager = new AgentManager({
-      // Read the effective decision again on every creation/resume; never persist trust.
+      // Read the parent's effective trust decision for each creation/resume.
       projectTrusted: (cwd) => {
         if (typeof activeContext?.cwd !== 'string' || relative(cwd, activeContext.cwd) !== '')
           return undefined;
@@ -279,7 +279,7 @@ export default async function index_(pi: ExtensionAPI) {
       },
       onUnclaimedCompletion: deliverCompletion,
     });
-    // Also cover a parent using a custom native session directory.
+    // Check storage overlap with the parent's custom session directory.
     const sessionDir = ctx.sessionManager.getSessionDir?.();
     if (typeof sessionDir === 'string') {
       const storage = getRunsDir();
@@ -353,7 +353,7 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
         ),
         ...(spawnModels.size
           ? {
-              // Pi 1.5 returns plain enum schemas; Unsafe keeps TypeBox Optional metadata non-enumerable.
+              // Wrap enum schemas so TypeBox keeps Optional metadata non-enumerable.
               model: Type.Optional(
                 Type.Unsafe<string>(
                   StringEnum([...spawnModels.keys()], {
@@ -1067,7 +1067,7 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
             refresh();
             return;
           }
-          // Do not query a newer list and apply the index from the last displayed frame.
+          // Open the selection from the last displayed frame.
           if (matchesKey(data, 'return') && displayedSelection) done(displayedSelection);
         },
         invalidate() {

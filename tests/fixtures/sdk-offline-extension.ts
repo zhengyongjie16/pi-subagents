@@ -32,7 +32,7 @@ export interface OfflineFixtureConfig {
   resources?: { skillPaths?: string[]; promptPaths?: string[]; themePaths?: string[] };
 }
 
-// Intentionally module-scoped: a fresh Session does NOT promise module reevaluation.
+// Module-scoped state records factory reuse across sessions.
 const MODULE_VERSION = 'fixture-v1';
 let factoryInvocations = 0;
 
@@ -147,7 +147,7 @@ export default async function (pi: ExtensionAPI) {
   };
   pi.registerProvider(provider);
   if (config.badRegistration) {
-    // Invalid overlay must not be hidden by the same-name provider's valid catalog.
+    // Exercise invalid registration over an available same-name provider.
     pi.registerProvider(providerId, { streamSimple });
   }
   pi.registerTool({
@@ -171,9 +171,7 @@ export default async function (pi: ExtensionAPI) {
     if (config.badRegistrationAtStart) pi.registerProvider(providerId, { streamSimple });
     if (config.filterAtStart) pi.registerProvider({ ...provider, filterModels: () => [] });
     if (config.changeModelAtStart) {
-      // pi.setModel uses the auth snapshot, unlike provider-specific getAvailable().
-      // Refresh through the public registry API before requesting a model change.
-      // ModelRegistry.getAvailable() is a synchronous snapshot, not ModelRuntime.getAvailable().
+      // Refresh the auth snapshot used by pi.setModel before changing models.
       await ctx.modelRegistry.refresh({ allowNetwork: false });
       const changed = await pi.setModel(models[1]!);
       record('model_changed', { changed, selectedModel: ctx.model?.id });

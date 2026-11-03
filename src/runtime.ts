@@ -25,13 +25,13 @@ export interface ChildSessionOptions {
     extensionPaths?: string[];
   };
   systemPromptPath: string;
-  /** Only pass a parent's effective decision when its cwd is the child's cwd. */
+  /** Parent's effective trust decision for a matching working directory. */
   projectTrusted?: boolean;
   /** Transfers cleanup ownership, including when binding subsequently fails. */
   onCreated: (session: AgentSession) => void;
   checkCanceled: () => void;
   onError: (error: unknown) => void;
-  /** Must synchronously register the parent's cancellation/closing request. */
+  /** Synchronously registers the parent's cancellation/closing request. */
   onShutdown: () => void;
   log: (text: string) => void;
 }
@@ -80,17 +80,16 @@ export async function createChildSession(options: ChildSessionOptions): Promise<
   checkCanceled();
   const cwd = resolve(info.cwd);
   const systemPromptPath = resolve(options.systemPromptPath);
-  // Validate the file, but give the loader its ORIGINAL path, not its text-or-path contents.
+  // Pass the validated file path to preserve the loader's file semantics.
   const systemPrompt = await readFile(systemPromptPath, 'utf8');
   checkCanceled();
   if (!systemPrompt.replace(/^\uFEFF/, '').trim())
     throw new Error(`System prompt is empty: ${systemPromptPath}`);
 
   const agentDir = getAgentDir();
-  // SDK 1.5.0 defaults projectTrusted to true. Start closed before reading project settings.
+  // Gate project settings until the effective trust decision is resolved.
   const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
-  // Public native trust-store/settings primitives implement Pi's headless fallback without
-  // importing its private CLI resolver, prompting, or persisting a new trust decision.
+  // Resolve headless trust from the parent's decision, native store, and default policy.
   const projectTrusted =
     options.projectTrusted ??
     new ProjectTrustStore(agentDir).get(cwd) ??
@@ -138,11 +137,10 @@ export async function createChildSession(options: ChildSessionOptions): Promise<
     thinkingLevel: info.thinking,
     ...(tools === undefined ? {} : tools.length ? { tools } : { noTools: 'builtin' as const }),
   });
-  // Do not check cancellation or await binding before the parent can track this object.
+  // Transfer cleanup ownership before cancellation checks and extension binding.
   options.onCreated(session);
   checkCanceled();
-  // Native binding reports hook/provider errors via onError instead of rejecting. Do not
-  // silently accept a surviving same-name model after a failed startup registration.
+  // Binding forwards hook/provider failures through onError; collect them for startup validation.
   const bindingErrors: string[] = [];
   let binding = true;
   try {
@@ -182,10 +180,7 @@ export async function createChildSession(options: ChildSessionOptions): Promise<
   return session;
 }
 
-/**
- * Pi 1.5.0's RPC acceptance hook is exported but marked internal. Keep the version-sensitive
- * call here; the caller tracks this ORIGINAL promise and chains waitForIdle() for completion.
- */
+/** Return the submitted prompt promise; the caller also waits for native idle to track completion. */
 export function promptChildSession(
   session: AgentSession,
   message: string,
@@ -195,8 +190,8 @@ export function promptChildSession(
 }
 
 /**
- * Call once, only after initialization and submitted input/runs have exited and native idle
- * has been reached. This bounds extension shutdown, not cooperative abort or preflight.
+ * Call once after initialization, submitted input, and native work have exited.
+ * The timeout bounds extension shutdown.
  */
 export async function shutdownChildSession(
   session: AgentSession,

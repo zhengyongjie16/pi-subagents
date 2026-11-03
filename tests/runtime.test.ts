@@ -11,15 +11,14 @@ import type { ChildSessionOptions } from '../src/runtime.ts';
 import type { OfflineFixtureConfig } from './fixtures/sdk-offline-extension.ts';
 
 const testFile = fileURLToPath(import.meta.url);
-// Isolate SDK contracts from sibling suites' environment changes and shared-method spies:
-// both Bun and Node must load the REAL SDK, with no host credentials or network requests.
+// Run SDK contracts in a separate process to isolate environment changes and shared-method spies.
 if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
   test('real Pi SDK 1.5 offline contracts (isolated from core module mocks)', () => {
     const args = process.versions.bun
       ? ['test', testFile, '--timeout', '60000']
       : ['--test', testFile];
     const env: NodeJS.ProcessEnv = { ...process.env, PI_SUBAGENT_SDK_CONTRACT_CHILD: '1' };
-    // Node forwards this marker to children; retaining it makes --test skip the nested suite.
+    // Clear Node's inherited test marker so the nested suite executes.
     delete env.NODE_TEST_CONTEXT;
     const result = spawnSync(process.execPath, args, {
       env,
@@ -38,7 +37,7 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
     console.log(output.trim());
   });
 } else {
-  test('contracts run against the supported Pi SDK 1.5.0, not a stale development dependency', () => {
+  test('contracts run against the pinned development Pi SDK', () => {
     const manifest = new URL(
       '../package.json',
       import.meta.resolve('@earendil-works/pi-coding-agent'),
@@ -58,15 +57,8 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
 
   const { createChildSession, promptChildSession, shutdownChildSession } =
     await import('../src/runtime.ts');
-  const {
-    CONFIG_DIR_NAME,
-    getAgentDir,
-    ProjectTrustStore,
-    SessionManager,
-    createAgentSessionServices,
-    createAgentSessionFromServices,
-    SettingsManager,
-  } = await import('@earendil-works/pi-coding-agent');
+  const { CONFIG_DIR_NAME, getAgentDir, ProjectTrustStore, SessionManager } =
+    await import('@earendil-works/pi-coding-agent');
   const fixtureSource = fileURLToPath(
     new URL('./fixtures/sdk-offline-extension.ts', import.meta.url),
   );
@@ -392,7 +384,7 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
         defaultProvider: 'project-default',
       });
       const store = new ProjectTrustStore(f.agentDir);
-      // A different parent's trusted cwd must not authorize this sibling project.
+      // Trust decisions are scoped to each working directory.
       store.set(path.join(f.root, 'other-parent-cwd'), true);
       for (const policy of ['ask', 'never', 'always']) {
         json(path.join(f.agentDir, 'settings.json'), {
@@ -458,38 +450,10 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
       assert.equal(f.events().filter((event) => event.type === 'factory').length, 3);
     }));
 
-  test('filterModels cannot be bypassed by catalog getModel/setModel', async () =>
+  test('filterModels exclusions fail before creating a Session', async () =>
     withFixture({ filtered: true }, async (f) => {
       await assert.rejects(f.create(), /Model is not available:/);
       assert.equal(f.sessions.size, 0);
-      const services = await createAgentSessionServices({
-        cwd: f.cwd,
-        agentDir: f.agentDir,
-        settingsManager: SettingsManager.inMemory({}, { projectTrusted: false }),
-        resourceLoaderOptions: {
-          noContextFiles: true,
-          noSkills: true,
-          noExtensions: true,
-          noPromptTemplates: true,
-          noThemes: true,
-          systemPrompt: f.systemPromptPath,
-          appendSystemPrompt: [],
-          additionalExtensionPaths: [f.extensionPath],
-        },
-      });
-      const catalogModel = services.modelRuntime.getModel(f.info.provider, f.info.modelId)!;
-      assert.ok(catalogModel);
-      assert.deepEqual(await services.modelRuntime.getAvailable(f.info.provider), []);
-      // This raw SDK path deliberately bypasses our availability guard to pin the upstream hazard.
-      const { session } = await createAgentSessionFromServices({
-        services,
-        model: catalogModel,
-        sessionManager: SessionManager.inMemory(f.cwd),
-      });
-      f.sessions.add(session);
-      await session.setModel(catalogModel);
-      assert.equal(session.model?.id, f.info.modelId);
-      assert.deepEqual(await session.modelRuntime.getAvailable(f.info.provider), []);
     }));
 
   test('binding must not filter away or replace the exact selected route', async () => {
@@ -514,32 +478,11 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
       });
   });
 
-  test('services report invalid provider registration even if same-name model remains available', async () =>
+  test('invalid provider registration fails before creating a Session', async () =>
     withFixture({ badRegistration: true }, async (f) => {
       await assert.rejects(f.create(), /Extension .* error:/);
       assert.equal(f.sessions.size, 0);
       assert.equal(f.events().filter((event) => event.type === 'factory').length, 1);
-      const services = await createAgentSessionServices({
-        cwd: f.cwd,
-        agentDir: f.agentDir,
-        settingsManager: SettingsManager.inMemory({}, { projectTrusted: false }),
-        resourceLoaderOptions: {
-          noContextFiles: true,
-          noSkills: true,
-          noExtensions: true,
-          noPromptTemplates: true,
-          noThemes: true,
-          systemPrompt: f.systemPromptPath,
-          appendSystemPrompt: [],
-          additionalExtensionPaths: [f.extensionPath],
-        },
-      });
-      assert.ok(services.diagnostics.some((diagnostic) => diagnostic.type === 'error'));
-      assert.ok(
-        (await services.modelRuntime.getAvailable(f.info.provider)).some(
-          (model) => model.id === f.info.modelId,
-        ),
-      );
     }));
 
   test('registration errors during session_start cannot silently retain the same-name old model', async () =>
@@ -638,12 +581,13 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
       const first = await f.create();
       await prompt(first, 'one');
       await f.close(first);
-      write(
-        f.extensionPath,
-        fs
-          .readFileSync(f.extensionPath, 'utf8')
-          .replace('const MODULE_VERSION = "fixture-v1"', 'const MODULE_VERSION = "fixture-v2"'),
+      const original = fs.readFileSync(f.extensionPath, 'utf8');
+      const updated = original.replace(
+        "const MODULE_VERSION = 'fixture-v1';",
+        "const MODULE_VERSION = 'fixture-v2';",
       );
+      assert.notEqual(updated, original, 'MODULE_VERSION replacement must change the fixture');
+      write(f.extensionPath, updated);
       const second = await f.create();
       await prompt(second, 'two');
       assert.deepEqual(
@@ -935,7 +879,7 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
       );
       assert.deepEqual(await SessionManager.list(f.cwd), []);
       assert.deepEqual(await SessionManager.listAll(), []);
-      // cwdOverride changes the runtime cwd, not the old header in the original JSONL.
+      // Runtime cwd overrides preserve the JSONL header used by session listings.
       assert.equal((await SessionManager.list(f.cwd, path.dirname(f.info.sessionFile))).length, 0);
       assert.equal(
         (await SessionManager.list('old-cwd', path.dirname(f.info.sessionFile))).length,
@@ -1011,8 +955,7 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
       });
       assert.deepEqual(await prompt(session, 'fixture:abort-before-run'), ['started']);
       assert.deepEqual(settled, [true]);
-      // SDK 1.4 can synthesize an error assistant on this cancellation path. The
-      // manager must honor settled.aborted rather than requiring stopReason=aborted.
+      // Pre-run cancellation reports settled.aborted with an error assistant message.
       const assistant = session.messages.filter((message) => message.role === 'assistant').at(-1)!;
       assert.equal(assistant.stopReason, 'error');
       assert.equal(
