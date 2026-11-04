@@ -567,15 +567,19 @@ export function readInfoFile(file: string): AgentInfo | undefined {
   }
 }
 
-function readInfos(directory: string): AgentInfo[] {
+function readInfoFiles(directory: string): string[] {
   if (!fs.existsSync(directory)) return [];
   return fs
     .readdirSync(directory)
     .filter((name) => name.endsWith('.info.json'))
-    .flatMap((name) => {
-      const info = readInfoFile(path.join(directory, name));
-      return info ? [info] : [];
-    });
+    .map((name) => path.join(directory, name));
+}
+
+function readInfos(directory: string): AgentInfo[] {
+  return readInfoFiles(directory).flatMap((file) => {
+    const info = readInfoFile(file);
+    return info ? [info] : [];
+  });
 }
 
 function sortInfos(infos: AgentInfo[]): AgentInfo[] {
@@ -2010,27 +2014,32 @@ export class AgentManager {
     const explicitTargets = targets?.length ? new Set(targets.map(canonicalAgentName)) : undefined;
     const defaultTargets = this.defaultWaitAllTargets.get(parentSessionId) ?? new Set<string>();
     const targetSet = explicitTargets ?? new Set(defaultTargets);
+    const files = targetSet.size ? scopeDirs(parentSessionId).flatMap(readInfoFiles) : [];
+    // Snapshot target paths; legacy infoFile metadata may be missing or stale.
+    const targetFiles: string[] = [];
+    // Retry unreadable candidates until their task names can be resolved.
+    const unresolvedFiles = new Set<string>();
+    let infos = sortInfos(
+      files.flatMap((file) => {
+        const info = readInfoFile(file);
+        if (!info) {
+          unresolvedFiles.add(file);
+          return [];
+        }
+        if (!targetSet.has(info.canonicalName)) return [];
+        targetFiles.push(file);
+        return [info];
+      }),
+    );
     if (explicitTargets) {
-      const infos = readScopeInfos(parentSessionId);
       const missing = [...explicitTargets].filter(
         (target) => !infos.some((info) => target === info.canonicalName),
       );
       if (missing.length)
         throw new Error(`Agent not found in this parent session: ${missing.join(', ')}`);
     }
-    const matchingInfos = () =>
-      readScopeInfos(parentSessionId)
-        .filter((info) => targetSet.has(info.canonicalName))
-        .map((info) => this.waitTargetInfo(info));
-    const pendingNames = () =>
-      matchingInfos()
-        .filter((info) => {
-          this.checkWaitTarget(info);
-          return !FINAL_STATUSES.has(info.status);
-        })
-        .map((info) => info.canonicalName);
-    const finalize = () => {
-      const responses = matchingInfos()
+    const finalize = (infos: AgentInfo[]) => {
+      const responses = infos
         .filter((info) => FINAL_STATUSES.has(info.status))
         .map((info) => this.agentResponse(info));
       for (const response of responses) this.finishWaitTarget(parentSessionId, response.agent_name);
@@ -2049,8 +2058,23 @@ export class AgentManager {
     try {
       while (true) {
         throwIfAborted(waitSignal);
-        if (!pendingNames().length) return finalize();
+        const currentInfos = infos.map((info) => this.waitTargetInfo(info));
+        const pending = currentInfos.filter((info) => {
+          this.checkWaitTarget(info);
+          return !FINAL_STATUSES.has(info.status);
+        });
+        if (!pending.length) return finalize(currentInfos);
         await delay(250, undefined, { signal: waitSignal });
+        throwIfAborted(waitSignal);
+        infos = sortInfos(
+          [...targetFiles, ...unresolvedFiles].flatMap((file) => {
+            const info = readInfoFile(file);
+            if (!info) return [];
+            const isTarget = targetSet.has(info.canonicalName);
+            if (unresolvedFiles.delete(file) && isTarget) targetFiles.push(file);
+            return isTarget ? [info] : [];
+          }),
+        );
       }
     } finally {
       this.waitAllClaims.delete(claim);

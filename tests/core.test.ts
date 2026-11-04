@@ -1682,6 +1682,329 @@ describe('completion delivery', () => {
   });
 });
 
+describe('wait-all targeted polling', () => {
+  function storeInfo(
+    parent: string,
+    taskName: string,
+    overrides: Partial<AgentInfo> = {},
+    root = getRunsDir(),
+  ): AgentInfo {
+    const id = overrides.id ?? randomUUID();
+    const directory = path.join(root, parentScopeKey(parent));
+    fs.mkdirSync(directory, { recursive: true });
+    const info: AgentInfo = {
+      id,
+      taskName,
+      canonicalName: '/' + taskName,
+      parentSessionId: parent,
+      provider: 'test',
+      modelId: 'fake',
+      model: 'test:fake',
+      cwd: TEST_AGENT_DIR,
+      sessionFile: path.join(directory, id + '.jsonl'),
+      infoFile: path.join(directory, id + '.info.json'),
+      logFile: path.join(directory, id + '.log'),
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      messageCount: 1,
+      status: 'completed',
+      finalResponse: taskName,
+      ...overrides,
+    };
+    fs.writeFileSync(path.join(directory, id + '.info.json'), JSON.stringify(info));
+    return info;
+  }
+
+  function markRunning(info: AgentInfo): void {
+    fs.writeFileSync(
+      activeMarker(info.id),
+      JSON.stringify({ pid: process.pid, startedAt: Date.now(), token: 'wait-all-test' }),
+    );
+  }
+
+  test('scans the scope once and only rereads target files across polling cycles', async () => {
+    const parent = 'wait-all-read-budget-' + randomUUID();
+    const manager = new AgentManager();
+    await manager.ready();
+    const target = storeInfo(parent, 'worker', { status: 'running' });
+    markRunning(target);
+    const history = Array.from({ length: 32 }, (_, index) => storeInfo(parent, 'history-' + index));
+    const scope = path.dirname(target.infoFile);
+    const reads = spyOn(fs, 'readFileSync');
+    const scans = spyOn(fs, 'readdirSync');
+    const checks = spyOn(manager as any, 'checkWaitTarget');
+    const controller = new AbortController();
+    let waiting: ReturnType<typeof manager.waitAllAgents> | undefined;
+    try {
+      waiting = manager.waitAllAgents(parent, ['worker'], controller.signal);
+      await waitUntil(() => checks.mock.calls.length >= 3);
+      expect(
+        reads.mock.calls.filter(([file]) => String(file) === target.infoFile).length,
+      ).toBeGreaterThanOrEqual(3);
+
+      fs.writeFileSync(
+        target.infoFile,
+        JSON.stringify({ ...target, status: 'completed', finalResponse: 'updated on disk' }),
+      );
+      expect((await waiting).responses).toEqual([
+        expect.objectContaining({ agent_name: '/worker', finalResponse: 'updated on disk' }),
+      ]);
+      const files = reads.mock.calls.map(([file]) => String(file));
+      for (const info of history)
+        expect(files.filter((file) => file === info.infoFile)).toHaveLength(1);
+      expect(scans.mock.calls.filter(([directory]) => String(directory) === scope)).toHaveLength(1);
+      expect(manager['waitAllClaims'].size).toBe(0);
+    } finally {
+      controller.abort();
+      await waiting?.catch(() => {});
+      reads.mockRestore();
+      scans.mockRestore();
+      checks.mockRestore();
+      fs.rmSync(activeMarker(target.id), { force: true });
+      await manager.shutdown();
+      fs.rmSync(scope, { recursive: true, force: true });
+    }
+  });
+
+  test.each(['read error', 'invalid JSON'])(
+    'retries initially unreadable candidates after %s without rereading resolved history',
+    async (failure) => {
+      const parent = 'wait-all-initial-read-retry-' + randomUUID();
+      const manager = new AgentManager();
+      await manager.ready();
+      const first = storeInfo(parent, 'first', { createdAt: 1, status: 'running' });
+      const second = storeInfo(parent, 'second', { createdAt: 2, status: 'running' });
+      const unrelated = storeInfo(parent, 'unrelated');
+      markRunning(first);
+      markRunning(second);
+      manager['defaultWaitAllTargets'].set(parent, new Set(['/first', '/second']));
+      const unreadable = new Set([first.infoFile, unrelated.infoFile]);
+      const read = fs.readFileSync;
+      const reads = spyOn(fs, 'readFileSync').mockImplementation((file, options) => {
+        if (failure === 'read error' && unreadable.delete(String(file)))
+          throw Object.assign(new Error('temporary read failure'), { code: 'EACCES' });
+        return read(file, options as any);
+      });
+      if (failure === 'invalid JSON') {
+        fs.writeFileSync(first.infoFile, '{');
+        fs.writeFileSync(unrelated.infoFile, '{');
+      }
+      const controller = new AbortController();
+      let waiting: ReturnType<typeof manager.waitAllAgents> | undefined;
+      let settled = false;
+      try {
+        waiting = manager.waitAllAgents(parent, undefined, controller.signal);
+        void waiting.then(
+          () => {
+            settled = true;
+          },
+          () => {},
+        );
+        fs.writeFileSync(first.infoFile, JSON.stringify(first));
+        fs.writeFileSync(unrelated.infoFile, JSON.stringify(unrelated));
+        fs.writeFileSync(second.infoFile, JSON.stringify({ ...second, status: 'completed' }));
+        const firstReads = () =>
+          reads.mock.calls.filter(([file]) => String(file) === first.infoFile).length;
+        await waitUntil(() => firstReads() >= 2 || settled);
+        expect(settled).toBe(false);
+        await waitUntil(() => firstReads() >= 3);
+        fs.writeFileSync(
+          first.infoFile,
+          JSON.stringify({ ...first, status: 'completed', finalResponse: 'recovered result' }),
+        );
+        expect((await waiting).responses).toEqual([
+          expect.objectContaining({ agent_name: '/second', status: 'completed' }),
+          expect.objectContaining({ agent_name: '/first', finalResponse: 'recovered result' }),
+        ]);
+        expect(reads.mock.calls.filter(([file]) => String(file) === unrelated.infoFile)).toHaveLength(2);
+        expect(manager['waitAllClaims'].size).toBe(0);
+      } finally {
+        controller.abort();
+        await waiting?.catch(() => {});
+        reads.mockRestore();
+        fs.rmSync(activeMarker(first.id), { force: true });
+        fs.rmSync(activeMarker(second.id), { force: true });
+        await manager.shutdown();
+        fs.rmSync(path.dirname(first.infoFile), { recursive: true, force: true });
+      }
+    },
+  );
+
+  test('validates all explicit names and rereads actual current and legacy paths in creation order', async () => {
+    const parent = 'wait-all-legacy-paths-' + randomUUID();
+    const manager = new AgentManager();
+    await manager.ready();
+    const legacyRoot = path.join(TEST_AGENT_DIR, 'pi-subagents', os.userInfo().username, 'runs');
+    const older = storeInfo(parent, 'duplicate', { createdAt: 1 });
+    const newer = storeInfo(parent, 'duplicate', { id: older.id, createdAt: 3 }, legacyRoot);
+    const target = storeInfo(parent, 'worker', { createdAt: 2, status: 'running' });
+    markRunning(target);
+    // Historical records can omit infoFile or retain a path from a previous location.
+    const { infoFile: _omitted, ...withoutPath } = older;
+    fs.writeFileSync(older.infoFile, JSON.stringify(withoutPath));
+    fs.writeFileSync(newer.infoFile, JSON.stringify({ ...newer, infoFile: older.infoFile }));
+    const controller = new AbortController();
+    let waiting: ReturnType<typeof manager.waitAllAgents> | undefined;
+    try {
+      await expect(manager.waitAllAgents(parent, ['worker', 'missing'])).rejects.toThrow(
+        'Agent not found in this parent session: /missing',
+      );
+      expect(manager['waitAllClaims'].size).toBe(0);
+      waiting = manager.waitAllAgents(parent, ['duplicate', 'worker'], controller.signal);
+      fs.writeFileSync(
+        newer.infoFile,
+        JSON.stringify({ ...newer, infoFile: older.infoFile, finalResponse: 'latest legacy result' }),
+      );
+      fs.writeFileSync(
+        target.infoFile,
+        JSON.stringify({ ...target, status: 'completed', finalResponse: 'worker result' }),
+      );
+      expect(
+        (await waiting).responses.map(({ agent_name, finalResponse }) => [agent_name, finalResponse]),
+      ).toEqual([
+        ['/duplicate', 'latest legacy result'],
+        ['/worker', 'worker result'],
+        ['/duplicate', 'duplicate'],
+      ]);
+    } finally {
+      controller.abort();
+      await waiting?.catch(() => {});
+      fs.rmSync(activeMarker(target.id), { force: true });
+      await manager.shutdown();
+      fs.rmSync(path.dirname(older.infoFile), { recursive: true, force: true });
+      fs.rmSync(path.dirname(newer.infoFile), { recursive: true, force: true });
+    }
+  });
+
+  test.each(['missing', 'invalid JSON'])(
+    'keeps ignoring a target file that becomes %s during a wait',
+    async (change) => {
+      const parent = 'wait-all-unreadable-' + randomUUID();
+      const manager = new AgentManager();
+      await manager.ready();
+      const target = storeInfo(parent, 'worker', { status: 'running' });
+      markRunning(target);
+      const controller = new AbortController();
+      let waiting: ReturnType<typeof manager.waitAllAgents> | undefined;
+      try {
+        waiting = manager.waitAllAgents(parent, ['worker'], controller.signal);
+        if (change === 'missing') fs.rmSync(target.infoFile);
+        else fs.writeFileSync(target.infoFile, '{');
+        expect((await waiting).responses).toEqual([]);
+      } finally {
+        controller.abort();
+        await waiting?.catch(() => {});
+        fs.rmSync(activeMarker(target.id), { force: true });
+        await manager.shutdown();
+        fs.rmSync(path.dirname(target.infoFile), { recursive: true, force: true });
+      }
+    },
+  );
+
+  test('empty defaults skip history reads and [] keeps a parent-scoped target snapshot', async () => {
+    const parent = 'wait-all-default-snapshot-' + randomUUID();
+    const manager = new AgentManager();
+    await manager.ready();
+    const target = storeInfo(parent, 'worker', { status: 'running' });
+    const late = storeInfo(parent, 'late', { status: 'running' });
+    const foreign = storeInfo(parent + '-other', 'worker');
+    markRunning(target);
+    markRunning(late);
+    const controller = new AbortController();
+    let waiting: ReturnType<typeof manager.waitAllAgents> | undefined;
+    const reads = spyOn(fs, 'readFileSync');
+    try {
+      expect((await manager.waitAllAgents(parent)).responses).toEqual([]);
+      expect(reads.mock.calls.filter(([file]) => String(file).endsWith('.info.json'))).toEqual([]);
+      reads.mockRestore();
+
+      const defaults = new Set(['/worker']);
+      manager['defaultWaitAllTargets'].set(parent, defaults);
+      waiting = manager.waitAllAgents(parent, [], controller.signal);
+      defaults.add('/late');
+      fs.writeFileSync(target.infoFile, JSON.stringify({ ...target, status: 'completed' }));
+      expect((await waiting).responses.map((info) => info.agent_name)).toEqual(['/worker']);
+      expect([...defaults]).toEqual(['/late']);
+    } finally {
+      controller.abort();
+      await waiting?.catch(() => {});
+      reads.mockRestore();
+      fs.rmSync(activeMarker(target.id), { force: true });
+      fs.rmSync(activeMarker(late.id), { force: true });
+      await manager.shutdown();
+      fs.rmSync(path.dirname(target.infoFile), { recursive: true, force: true });
+      fs.rmSync(path.dirname(foreign.infoFile), { recursive: true, force: true });
+    }
+  });
+
+  test('refreshes a previously completed target when it resumes while a sibling is pending', async () => {
+    const parent = 'wait-all-resumed-target-' + randomUUID();
+    const manager = new AgentManager();
+    await manager.ready();
+    const first = storeInfo(parent, 'first', { createdAt: 1 });
+    const second = storeInfo(parent, 'second', { createdAt: 2, status: 'running' });
+    markRunning(first);
+    markRunning(second);
+    const controller = new AbortController();
+    const checks = spyOn(manager as any, 'checkWaitTarget');
+    let waiting: ReturnType<typeof manager.waitAllAgents> | undefined;
+    let settled = false;
+    try {
+      waiting = manager.waitAllAgents(parent, ['first', 'second'], controller.signal);
+      void waiting.then(
+        () => {
+          settled = true;
+        },
+        () => {},
+      );
+      fs.writeFileSync(first.infoFile, JSON.stringify({ ...first, status: 'running' }));
+      fs.writeFileSync(second.infoFile, JSON.stringify({ ...second, status: 'completed' }));
+      await waitUntil(() => checks.mock.calls.length >= 4);
+      expect(settled).toBe(false);
+      fs.writeFileSync(first.infoFile, JSON.stringify({ ...first, finalResponse: 'resumed result' }));
+      expect(
+        (await waiting).responses.map(({ agent_name, finalResponse }) => [agent_name, finalResponse]),
+      ).toEqual([
+        ['/second', 'second'],
+        ['/first', 'resumed result'],
+      ]);
+    } finally {
+      controller.abort();
+      await waiting?.catch(() => {});
+      checks.mockRestore();
+      fs.rmSync(activeMarker(first.id), { force: true });
+      fs.rmSync(activeMarker(second.id), { force: true });
+      await manager.shutdown();
+      fs.rmSync(path.dirname(first.infoFile), { recursive: true, force: true });
+    }
+  });
+
+  test('observes completion written by an external manager', async () => {
+    const gate = deferred();
+    fixture = configureCoreFixture({ responseGate: gate.promise });
+    const parent = 'wait-all-external-' + randomUUID();
+    const owner = new AgentManager();
+    const observer = new AgentManager();
+    const controller = new AbortController();
+    let waiting: ReturnType<typeof observer.waitAllAgents> | undefined;
+    try {
+      await owner.spawnAgent(spawnParams(parent, 'worker', 'hold external'));
+      const target = owner.getAgentInfo('worker', parent);
+      waiting = observer.waitAllAgents(parent, ['worker'], controller.signal);
+      gate.resolve();
+      await released(owner, target);
+      expect((await waiting).responses).toEqual([
+        expect.objectContaining({ status: 'completed', finalResponse: 'response:hold external' }),
+      ]);
+    } finally {
+      controller.abort();
+      gate.resolve();
+      await waiting?.catch(() => {});
+      await Promise.all([owner.shutdown(), observer.shutdown()]);
+    }
+  });
+});
+
 describe('completion mailbox', () => {
   test('waits until explicitly cancelled when no completion exists', async () => {
     const manager = new AgentManager();
@@ -3079,6 +3402,57 @@ describe('reviewed SDK lifecycle regressions', () => {
         );
       return { entered: entered.promise, resuming, state };
     }
+
+    test('an active wait-all follows live.info replacement after an unaccepted resume rolls back', async () => {
+      const parent = 'wait-all-active-rollback-' + randomUUID();
+      const manager = new AgentManager();
+      const controller = new AbortController();
+      const response = deferred();
+      const input = deferred();
+      const checks = spyOn(manager as any, 'checkWaitTarget');
+      let waiting: ReturnType<typeof manager.waitAllAgents> | undefined;
+      let resuming: Promise<unknown> | undefined;
+      let settled = false;
+      try {
+        await manager.spawnAgent(spawnParams(parent, 'first', 'original answer'));
+        const first = manager.getAgentInfo('first', parent);
+        await released(manager, first);
+        fixture = configureCoreFixture({ responseGate: response.promise });
+        await manager.spawnAgent(spawnParams(parent, 'second', 'hold sibling'));
+        const second = manager.getAgentInfo('second', parent);
+        waiting = manager.waitAllAgents(parent, ['first', 'second'], controller.signal);
+        void waiting.then(
+          () => {
+            settled = true;
+          },
+          () => {},
+        );
+        const rejected = rejectAfterInput(manager, first, input);
+        resuming = rejected.resuming;
+        await rejected.entered;
+        const beforePoll = checks.mock.calls.length;
+        response.resolve();
+        await released(manager, second);
+        await waitUntil(() => checks.mock.calls.length > beforePoll);
+        expect(settled).toBe(false);
+        input.resolve();
+        expect(await resuming).toBeInstanceOf(Error);
+        expect((await waiting).responses).toEqual([
+          expect.objectContaining({ agent_name: '/second', finalResponse: 'response:hold sibling' }),
+          expect.objectContaining({ agent_name: '/first', finalResponse: 'response:original answer' }),
+        ]);
+        expect(manager['waitAllClaims'].size).toBe(0);
+        await released(manager, first);
+      } finally {
+        controller.abort();
+        response.resolve();
+        input.resolve();
+        await resuming;
+        await waiting?.catch(() => {});
+        checks.mockRestore();
+        await manager.shutdown();
+      }
+    });
 
     test.each(['wait_agent', 'wait_all_agents'])(
       'commits rollback before an activity callback consumes it with %s',
