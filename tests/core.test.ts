@@ -485,6 +485,185 @@ describe('run storage', () => {
     }
   });
 
+  test('checks directory entries linearly when pruning many runs', async () => {
+    fs.mkdirSync(packageDir, { recursive: true });
+    fs.writeFileSync(configFile, JSON.stringify({ storageDir: fixtureDir, retentionDays: 3 }));
+    const scope = path.join(fixtureDir, 'b'.repeat(24));
+    fs.mkdirSync(scope, { recursive: true });
+    const count = 32;
+    for (let index = 0; index < count; index++) {
+      const id = randomUUID();
+      fs.writeFileSync(
+        path.join(scope, `${id}.info.json`),
+        JSON.stringify({ id, status: 'completed', createdAt: Date.now() }),
+      );
+      fs.writeFileSync(path.join(scope, `${id}.jsonl`), '');
+      fs.writeFileSync(path.join(scope, `${id}.log`), '');
+    }
+    let checked = 0;
+    let observed = 0;
+    const readdir = fs.readdirSync;
+    const scan = spyOn(fs, 'readdirSync').mockImplementation(((directory, options) => {
+      const entries = readdir(directory, options);
+      if (String(directory) === scope && options?.withFileTypes) {
+        for (const entry of entries as fs.Dirent[]) {
+          observed++;
+          const isFile = entry.isFile.bind(entry);
+          entry.isFile = () => {
+            checked++;
+            return isFile();
+          };
+        }
+      }
+      return entries;
+    }) as typeof fs.readdirSync);
+    let manager: InstanceType<typeof AgentManager> | undefined;
+    try {
+      manager = new AgentManager();
+      await manager.ready();
+      expect(observed).toBe(count * 3);
+      expect(checked).toBeGreaterThan(0);
+      expect(checked).toBeLessThanOrEqual(observed * 4);
+    } finally {
+      scan.mockRestore();
+      await manager?.shutdown();
+      fs.rmSync(fixtureDir, { recursive: true, force: true });
+      fs.rmSync(configFile, { force: true });
+    }
+  });
+
+  test('preserves artifact ownership and recent activity while pruning grouped runs', async () => {
+    fs.mkdirSync(packageDir, { recursive: true });
+    fs.writeFileSync(configFile, JSON.stringify({ storageDir: fixtureDir, retentionDays: 3 }));
+    const scope = path.join(fixtureDir, 'b'.repeat(24));
+    fs.mkdirSync(scope, { recursive: true });
+    const now = Date.now();
+    const oldTime = new Date(now - 4 * 24 * 60 * 60 * 1000);
+    const cases = [
+      { id: randomUUID(), keep: false },
+      { id: randomUUID(), keep: true, recentFile: '.log' },
+      { id: randomUUID(), keep: true, recentFile: '.info.json.123.tmp' },
+      { id: randomUUID(), keep: true, recentMetadata: 'lastActivity' },
+      { id: randomUUID(), keep: true, recentMetadata: 'updatedAt' },
+      { id: randomUUID(), keep: true, recentMetadata: 'createdAt' },
+      { id: randomUUID(), keep: false, corrupt: true },
+      { id: randomUUID(), keep: true, corrupt: true, recentFile: '.jsonl' },
+    ];
+    const suffixes = ['.info.json', '.jsonl', '.log', '.info.json.123.tmp'];
+    const uppercaseId = 'ABCDEFAB-1234-4234-8234-ABCDEFABCDEF';
+    const orphanId = randomUUID();
+    const preserved = [
+      cases[0].id + '.notes',
+      cases[0].id + '.info.json.bad.tmp',
+      'not-an-agent.info.json',
+      orphanId + '.jsonl',
+      orphanId + '.log',
+      orphanId + '.info.json.123.tmp',
+      uppercaseId.toLowerCase() + '.log',
+    ];
+    const artifactDirectory = path.join(scope, cases[0].id + '.info.json.456.tmp');
+    let manager: InstanceType<typeof AgentManager> | undefined;
+    try {
+      for (const record of cases) {
+        for (const suffix of suffixes) {
+          const file = path.join(scope, record.id + suffix);
+          fs.writeFileSync(
+            file,
+            suffix !== '.info.json'
+              ? 'artifact'
+              : record.corrupt
+                ? '{'
+                : JSON.stringify({
+                    id: record.id,
+                    status: 'completed',
+                    createdAt: oldTime.getTime(),
+                    updatedAt: oldTime.getTime(),
+                    lastActivity: oldTime.getTime(),
+                    ...(record.recentMetadata ? { [record.recentMetadata]: now } : {}),
+                  }),
+          );
+          const modified = suffix === record.recentFile ? new Date(now) : oldTime;
+          fs.utimesSync(file, modified, modified);
+        }
+      }
+      for (const [index, name] of preserved.entries()) {
+        const file = path.join(scope, name);
+        fs.writeFileSync(file, 'keep');
+        const modified = index < 2 ? new Date(now) : oldTime;
+        fs.utimesSync(file, modified, modified);
+      }
+      fs.mkdirSync(artifactDirectory);
+      const uppercaseInfo = path.join(scope, uppercaseId + '.info.json');
+      fs.writeFileSync(uppercaseInfo, JSON.stringify({ status: 'completed' }));
+      fs.utimesSync(uppercaseInfo, oldTime, oldTime);
+      const lowercaseLog = path.join(scope, uppercaseId.toLowerCase() + '.log');
+      fs.utimesSync(lowercaseLog, new Date(now), new Date(now));
+
+      manager = new AgentManager();
+      await manager.ready();
+      for (const record of cases)
+        for (const suffix of suffixes)
+          expect(fs.existsSync(path.join(scope, record.id + suffix))).toBe(record.keep);
+      for (const name of preserved) expect(fs.existsSync(path.join(scope, name))).toBe(true);
+      expect(fs.statSync(artifactDirectory).isDirectory()).toBe(true);
+      expect(fs.existsSync(uppercaseInfo)).toBe(false);
+    } finally {
+      await manager?.shutdown();
+      fs.rmSync(fixtureDir, { recursive: true, force: true });
+      fs.rmSync(configFile, { force: true });
+    }
+  });
+
+  test.each([false, true])(
+    'deletes metadata last and retains it on artifact deletion failure (fail=%s)',
+    async (fail) => {
+      fs.mkdirSync(packageDir, { recursive: true });
+      fs.writeFileSync(configFile, JSON.stringify({ storageDir: fixtureDir, retentionDays: 3 }));
+      const scope = path.join(fixtureDir, 'b'.repeat(24));
+      fs.mkdirSync(scope, { recursive: true });
+      const id = randomUUID();
+      const oldTime = new Date(Date.now() - 4 * 24 * 60 * 60 * 1000);
+      const info = path.join(scope, id + '.info.json');
+      const artifacts = ['.jsonl', '.log', '.info.json.123.tmp'].map((suffix) =>
+        path.join(scope, id + suffix),
+      );
+      for (const file of [info, ...artifacts]) {
+        fs.writeFileSync(file, file === info ? JSON.stringify({ status: 'completed' }) : 'artifact');
+        fs.utimesSync(file, oldTime, oldTime);
+      }
+      const attempts: string[] = [];
+      let failedArtifact: string | undefined;
+      const remove = fs.rmSync;
+      const deletion = spyOn(fs, 'rmSync').mockImplementation((file, options) => {
+        if (path.dirname(String(file)) === scope) {
+          attempts.push(String(file));
+          if (fail && attempts.length === 1) {
+            failedArtifact = String(file);
+            throw new Error('simulated deletion failure');
+          }
+        }
+        return remove(file, options);
+      });
+      let manager: InstanceType<typeof AgentManager> | undefined;
+      try {
+        manager = new AgentManager();
+        await manager.ready();
+        expect(attempts.filter((file) => file !== info).sort()).toEqual([...artifacts].sort());
+        expect(fs.existsSync(info)).toBe(fail);
+        for (const file of artifacts) expect(fs.existsSync(file)).toBe(file === failedArtifact);
+        if (fail) {
+          expect(failedArtifact).toBeDefined();
+          expect(attempts).not.toContain(info);
+        } else expect(attempts.at(-1)).toBe(info);
+      } finally {
+        deletion.mockRestore();
+        await manager?.shutdown();
+        fs.rmSync(fixtureDir, { recursive: true, force: true });
+        fs.rmSync(configFile, { force: true });
+      }
+    },
+  );
+
   test('removes expired runs and outputs using configurable retention', () => {
     fs.mkdirSync(packageDir, { recursive: true });
     fs.rmSync(fixtureDir, { recursive: true, force: true });

@@ -372,14 +372,24 @@ function isAgentArtifact(name: string, agentId: string): boolean {
 
 function pruneScope(directory: string, cutoff: number): void {
   const entries = fs.readdirSync(directory, { withFileTypes: true });
+  // Group once instead of scanning the whole directory for every run.
+  const entriesByAgent = new Map<string, fs.Dirent[]>();
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const agentId = entry.name.split('.', 1)[0];
+    if (!AGENT_ID_PATTERN.test(agentId)) continue;
+    const group = entriesByAgent.get(agentId);
+    if (group) group.push(entry);
+    else entriesByAgent.set(agentId, [entry]);
+  }
 
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith('.info.json')) continue;
     const agentId = entry.name.slice(0, -'.info.json'.length);
     if (!AGENT_ID_PATTERN.test(agentId)) continue;
     const info = readInfoFile(path.join(directory, entry.name));
-    const agentEntries = entries.filter(
-      (candidate) => candidate.isFile() && isAgentArtifact(candidate.name, agentId),
+    const agentEntries = (entriesByAgent.get(agentId) ?? []).filter((candidate) =>
+      isAgentArtifact(candidate.name, agentId),
     );
     let latest = Math.max(info?.lastActivity ?? 0, info?.updatedAt ?? 0, info?.createdAt ?? 0);
     for (const candidate of agentEntries) {
