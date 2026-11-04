@@ -1843,9 +1843,11 @@ describe('startup storage failures', () => {
       expect(failed.status).toBe('failed');
       expect(failed.error).toBe(returnedError);
       expect(manager['live'].has(failed.id)).toBe(false);
-      expect((await manager.waitAllAgents(parentSessionId, ['worker'])).responses).toEqual([
-        expect.objectContaining({ agent_name: '/worker', status: 'failed', error: failed.error }),
-      ]);
+      expect((await manager.waitAgent(parentSessionId, ['worker'])).event).toMatchObject({
+        agentName: '/worker',
+        status: 'failed',
+        error: failed.error,
+      });
 
       fs.rmSync(socketDir, { force: true });
       fs.mkdirSync(socketDir, { recursive: true });
@@ -1956,7 +1958,7 @@ describe('completion delivery', () => {
     }
   });
 
-  test('suppresses automatic delivery while wait tools claim completions', async () => {
+  test('suppresses automatic delivery while wait_agent claims a completion', async () => {
     const parentSessionId = 'completion-waits';
     const scope = path.join(getRunsDir(), parentScopeKey(parentSessionId));
     fs.rmSync(scope, { recursive: true, force: true });
@@ -1969,38 +1971,6 @@ describe('completion delivery', () => {
       const waited = await manager.waitAgent(parentSessionId, ['one']);
       expect(waited.event).toMatchObject({ agentName: '/one', status: 'completed' });
       expect(completions).toEqual([]);
-
-      await manager.spawnAgent(spawnParams(parentSessionId, 'two', 'second'));
-      const all = await manager.waitAllAgents(parentSessionId, ['two']);
-      expect(all.responses).toEqual([
-        expect.objectContaining({ agent_name: '/two', status: 'completed' }),
-      ]);
-      expect(completions).toEqual([]);
-    } finally {
-      await manager.shutdown();
-      fs.rmSync(scope, { recursive: true, force: true });
-    }
-  });
-
-  test('releases suppressed completions when wait_all_agents is cancelled', async () => {
-    const parentSessionId = 'completion-wait-cancel';
-    const scope = path.join(getRunsDir(), parentScopeKey(parentSessionId));
-    fs.rmSync(scope, { recursive: true, force: true });
-    const completions: any[] = [];
-    const manager = new AgentManager({
-      onUnclaimedCompletion: (event: any) => completions.push(event),
-    });
-    const controller = new AbortController();
-    try {
-      await manager.spawnAgent(spawnParams(parentSessionId, 'slow', 'hold slow'));
-      await manager.spawnAgent(spawnParams(parentSessionId, 'fast', 'fast'));
-      const wait = manager.waitAllAgents(parentSessionId, ['slow', 'fast'], controller.signal);
-      await waitUntil(() => manager.getAgentInfo('fast', parentSessionId).status === 'completed');
-      expect(completions).toEqual([]);
-      controller.abort(new Error('cancelled'));
-      await expect(wait).rejects.toThrow('aborted');
-      await waitUntil(() => completions.some((event) => event.agentName === '/fast'));
-      expect(completions.filter((event) => event.agentName === '/fast')).toHaveLength(1);
     } finally {
       await manager.shutdown();
       fs.rmSync(scope, { recursive: true, force: true });
@@ -2052,329 +2022,6 @@ describe('completion delivery', () => {
     } finally {
       await manager.shutdown();
       fs.rmSync(scope, { recursive: true, force: true });
-    }
-  });
-});
-
-describe('wait-all targeted polling', () => {
-  function storeInfo(
-    parent: string,
-    taskName: string,
-    overrides: Partial<AgentInfo> = {},
-    root = getRunsDir(),
-  ): AgentInfo {
-    const id = overrides.id ?? randomUUID();
-    const directory = path.join(root, parentScopeKey(parent));
-    fs.mkdirSync(directory, { recursive: true });
-    const info: AgentInfo = {
-      id,
-      taskName,
-      canonicalName: '/' + taskName,
-      parentSessionId: parent,
-      provider: 'test',
-      modelId: 'fake',
-      model: 'test:fake',
-      cwd: TEST_AGENT_DIR,
-      sessionFile: path.join(directory, id + '.jsonl'),
-      infoFile: path.join(directory, id + '.info.json'),
-      logFile: path.join(directory, id + '.log'),
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      messageCount: 1,
-      status: 'completed',
-      finalResponse: taskName,
-      ...overrides,
-    };
-    fs.writeFileSync(path.join(directory, id + '.info.json'), JSON.stringify(info));
-    return info;
-  }
-
-  function markRunning(info: AgentInfo): void {
-    fs.writeFileSync(
-      activeMarker(info.id),
-      JSON.stringify({ pid: process.pid, startedAt: Date.now(), token: 'wait-all-test' }),
-    );
-  }
-
-  test('scans the scope once and only rereads target files across polling cycles', async () => {
-    const parent = 'wait-all-read-budget-' + randomUUID();
-    const manager = new AgentManager();
-    await manager.ready();
-    const target = storeInfo(parent, 'worker', { status: 'running' });
-    markRunning(target);
-    const history = Array.from({ length: 32 }, (_, index) => storeInfo(parent, 'history-' + index));
-    const scope = path.dirname(target.infoFile);
-    const reads = spyOn(fs, 'readFileSync');
-    const scans = spyOn(fs, 'readdirSync');
-    const checks = spyOn(manager as any, 'checkWaitTarget');
-    const controller = new AbortController();
-    let waiting: ReturnType<typeof manager.waitAllAgents> | undefined;
-    try {
-      waiting = manager.waitAllAgents(parent, ['worker'], controller.signal);
-      await waitUntil(() => checks.mock.calls.length >= 3);
-      expect(
-        reads.mock.calls.filter(([file]) => String(file) === target.infoFile).length,
-      ).toBeGreaterThanOrEqual(3);
-
-      fs.writeFileSync(
-        target.infoFile,
-        JSON.stringify({ ...target, status: 'completed', finalResponse: 'updated on disk' }),
-      );
-      expect((await waiting).responses).toEqual([
-        expect.objectContaining({ agent_name: '/worker', finalResponse: 'updated on disk' }),
-      ]);
-      const files = reads.mock.calls.map(([file]) => String(file));
-      for (const info of history)
-        expect(files.filter((file) => file === info.infoFile)).toHaveLength(1);
-      expect(scans.mock.calls.filter(([directory]) => String(directory) === scope)).toHaveLength(1);
-      expect(manager['waitAllClaims'].size).toBe(0);
-    } finally {
-      controller.abort();
-      await waiting?.catch(() => {});
-      reads.mockRestore();
-      scans.mockRestore();
-      checks.mockRestore();
-      fs.rmSync(activeMarker(target.id), { force: true });
-      await manager.shutdown();
-      fs.rmSync(scope, { recursive: true, force: true });
-    }
-  });
-
-  test.each(['read error', 'invalid JSON'])(
-    'retries initially unreadable candidates after %s without rereading resolved history',
-    async (failure) => {
-      const parent = 'wait-all-initial-read-retry-' + randomUUID();
-      const manager = new AgentManager();
-      await manager.ready();
-      const first = storeInfo(parent, 'first', { createdAt: 1, status: 'running' });
-      const second = storeInfo(parent, 'second', { createdAt: 2, status: 'running' });
-      const unrelated = storeInfo(parent, 'unrelated');
-      markRunning(first);
-      markRunning(second);
-      manager['defaultWaitAllTargets'].set(parent, new Set(['/first', '/second']));
-      const unreadable = new Set([first.infoFile, unrelated.infoFile]);
-      const read = fs.readFileSync;
-      const reads = spyOn(fs, 'readFileSync').mockImplementation((file, options) => {
-        if (failure === 'read error' && unreadable.delete(String(file)))
-          throw Object.assign(new Error('temporary read failure'), { code: 'EACCES' });
-        return read(file, options as any);
-      });
-      if (failure === 'invalid JSON') {
-        fs.writeFileSync(first.infoFile, '{');
-        fs.writeFileSync(unrelated.infoFile, '{');
-      }
-      const controller = new AbortController();
-      let waiting: ReturnType<typeof manager.waitAllAgents> | undefined;
-      let settled = false;
-      try {
-        waiting = manager.waitAllAgents(parent, undefined, controller.signal);
-        void waiting.then(
-          () => {
-            settled = true;
-          },
-          () => {},
-        );
-        fs.writeFileSync(first.infoFile, JSON.stringify(first));
-        fs.writeFileSync(unrelated.infoFile, JSON.stringify(unrelated));
-        fs.writeFileSync(second.infoFile, JSON.stringify({ ...second, status: 'completed' }));
-        const firstReads = () =>
-          reads.mock.calls.filter(([file]) => String(file) === first.infoFile).length;
-        await waitUntil(() => firstReads() >= 2 || settled);
-        expect(settled).toBe(false);
-        await waitUntil(() => firstReads() >= 3);
-        fs.writeFileSync(
-          first.infoFile,
-          JSON.stringify({ ...first, status: 'completed', finalResponse: 'recovered result' }),
-        );
-        expect((await waiting).responses).toEqual([
-          expect.objectContaining({ agent_name: '/second', status: 'completed' }),
-          expect.objectContaining({ agent_name: '/first', finalResponse: 'recovered result' }),
-        ]);
-        expect(reads.mock.calls.filter(([file]) => String(file) === unrelated.infoFile)).toHaveLength(2);
-        expect(manager['waitAllClaims'].size).toBe(0);
-      } finally {
-        controller.abort();
-        await waiting?.catch(() => {});
-        reads.mockRestore();
-        fs.rmSync(activeMarker(first.id), { force: true });
-        fs.rmSync(activeMarker(second.id), { force: true });
-        await manager.shutdown();
-        fs.rmSync(path.dirname(first.infoFile), { recursive: true, force: true });
-      }
-    },
-  );
-
-  test('validates all explicit names and rereads actual current and legacy paths in creation order', async () => {
-    const parent = 'wait-all-legacy-paths-' + randomUUID();
-    const manager = new AgentManager();
-    await manager.ready();
-    const legacyRoot = path.join(TEST_AGENT_DIR, 'pi-subagents', os.userInfo().username, 'runs');
-    const older = storeInfo(parent, 'duplicate', { createdAt: 1 });
-    const newer = storeInfo(parent, 'duplicate', { id: older.id, createdAt: 3 }, legacyRoot);
-    const target = storeInfo(parent, 'worker', { createdAt: 2, status: 'running' });
-    markRunning(target);
-    // Historical records can omit infoFile or retain a path from a previous location.
-    const { infoFile: _omitted, ...withoutPath } = older;
-    fs.writeFileSync(older.infoFile, JSON.stringify(withoutPath));
-    fs.writeFileSync(newer.infoFile, JSON.stringify({ ...newer, infoFile: older.infoFile }));
-    const controller = new AbortController();
-    let waiting: ReturnType<typeof manager.waitAllAgents> | undefined;
-    try {
-      await expect(manager.waitAllAgents(parent, ['worker', 'missing'])).rejects.toThrow(
-        'Agent not found in this parent session: /missing',
-      );
-      expect(manager['waitAllClaims'].size).toBe(0);
-      waiting = manager.waitAllAgents(parent, ['duplicate', 'worker'], controller.signal);
-      fs.writeFileSync(
-        newer.infoFile,
-        JSON.stringify({ ...newer, infoFile: older.infoFile, finalResponse: 'latest legacy result' }),
-      );
-      fs.writeFileSync(
-        target.infoFile,
-        JSON.stringify({ ...target, status: 'completed', finalResponse: 'worker result' }),
-      );
-      expect(
-        (await waiting).responses.map(({ agent_name, finalResponse }) => [agent_name, finalResponse]),
-      ).toEqual([
-        ['/duplicate', 'latest legacy result'],
-        ['/worker', 'worker result'],
-        ['/duplicate', 'duplicate'],
-      ]);
-    } finally {
-      controller.abort();
-      await waiting?.catch(() => {});
-      fs.rmSync(activeMarker(target.id), { force: true });
-      await manager.shutdown();
-      fs.rmSync(path.dirname(older.infoFile), { recursive: true, force: true });
-      fs.rmSync(path.dirname(newer.infoFile), { recursive: true, force: true });
-    }
-  });
-
-  test.each(['missing', 'invalid JSON'])(
-    'keeps ignoring a target file that becomes %s during a wait',
-    async (change) => {
-      const parent = 'wait-all-unreadable-' + randomUUID();
-      const manager = new AgentManager();
-      await manager.ready();
-      const target = storeInfo(parent, 'worker', { status: 'running' });
-      markRunning(target);
-      const controller = new AbortController();
-      let waiting: ReturnType<typeof manager.waitAllAgents> | undefined;
-      try {
-        waiting = manager.waitAllAgents(parent, ['worker'], controller.signal);
-        if (change === 'missing') fs.rmSync(target.infoFile);
-        else fs.writeFileSync(target.infoFile, '{');
-        expect((await waiting).responses).toEqual([]);
-      } finally {
-        controller.abort();
-        await waiting?.catch(() => {});
-        fs.rmSync(activeMarker(target.id), { force: true });
-        await manager.shutdown();
-        fs.rmSync(path.dirname(target.infoFile), { recursive: true, force: true });
-      }
-    },
-  );
-
-  test('empty defaults skip history reads and [] keeps a parent-scoped target snapshot', async () => {
-    const parent = 'wait-all-default-snapshot-' + randomUUID();
-    const manager = new AgentManager();
-    await manager.ready();
-    const target = storeInfo(parent, 'worker', { status: 'running' });
-    const late = storeInfo(parent, 'late', { status: 'running' });
-    const foreign = storeInfo(parent + '-other', 'worker');
-    markRunning(target);
-    markRunning(late);
-    const controller = new AbortController();
-    let waiting: ReturnType<typeof manager.waitAllAgents> | undefined;
-    const reads = spyOn(fs, 'readFileSync');
-    try {
-      expect((await manager.waitAllAgents(parent)).responses).toEqual([]);
-      expect(reads.mock.calls.filter(([file]) => String(file).endsWith('.info.json'))).toEqual([]);
-      reads.mockRestore();
-
-      const defaults = new Set(['/worker']);
-      manager['defaultWaitAllTargets'].set(parent, defaults);
-      waiting = manager.waitAllAgents(parent, [], controller.signal);
-      defaults.add('/late');
-      fs.writeFileSync(target.infoFile, JSON.stringify({ ...target, status: 'completed' }));
-      expect((await waiting).responses.map((info) => info.agent_name)).toEqual(['/worker']);
-      expect([...defaults]).toEqual(['/late']);
-    } finally {
-      controller.abort();
-      await waiting?.catch(() => {});
-      reads.mockRestore();
-      fs.rmSync(activeMarker(target.id), { force: true });
-      fs.rmSync(activeMarker(late.id), { force: true });
-      await manager.shutdown();
-      fs.rmSync(path.dirname(target.infoFile), { recursive: true, force: true });
-      fs.rmSync(path.dirname(foreign.infoFile), { recursive: true, force: true });
-    }
-  });
-
-  test('refreshes a previously completed target when it resumes while a sibling is pending', async () => {
-    const parent = 'wait-all-resumed-target-' + randomUUID();
-    const manager = new AgentManager();
-    await manager.ready();
-    const first = storeInfo(parent, 'first', { createdAt: 1 });
-    const second = storeInfo(parent, 'second', { createdAt: 2, status: 'running' });
-    markRunning(first);
-    markRunning(second);
-    const controller = new AbortController();
-    const checks = spyOn(manager as any, 'checkWaitTarget');
-    let waiting: ReturnType<typeof manager.waitAllAgents> | undefined;
-    let settled = false;
-    try {
-      waiting = manager.waitAllAgents(parent, ['first', 'second'], controller.signal);
-      void waiting.then(
-        () => {
-          settled = true;
-        },
-        () => {},
-      );
-      fs.writeFileSync(first.infoFile, JSON.stringify({ ...first, status: 'running' }));
-      fs.writeFileSync(second.infoFile, JSON.stringify({ ...second, status: 'completed' }));
-      await waitUntil(() => checks.mock.calls.length >= 4);
-      expect(settled).toBe(false);
-      fs.writeFileSync(first.infoFile, JSON.stringify({ ...first, finalResponse: 'resumed result' }));
-      expect(
-        (await waiting).responses.map(({ agent_name, finalResponse }) => [agent_name, finalResponse]),
-      ).toEqual([
-        ['/second', 'second'],
-        ['/first', 'resumed result'],
-      ]);
-    } finally {
-      controller.abort();
-      await waiting?.catch(() => {});
-      checks.mockRestore();
-      fs.rmSync(activeMarker(first.id), { force: true });
-      fs.rmSync(activeMarker(second.id), { force: true });
-      await manager.shutdown();
-      fs.rmSync(path.dirname(first.infoFile), { recursive: true, force: true });
-    }
-  });
-
-  test('observes completion written by an external manager', async () => {
-    const gate = deferred();
-    fixture = configureCoreFixture({ responseGate: gate.promise });
-    const parent = 'wait-all-external-' + randomUUID();
-    const owner = new AgentManager();
-    const observer = new AgentManager();
-    const controller = new AbortController();
-    let waiting: ReturnType<typeof observer.waitAllAgents> | undefined;
-    try {
-      await owner.spawnAgent(spawnParams(parent, 'worker', 'hold external'));
-      const target = owner.getAgentInfo('worker', parent);
-      waiting = observer.waitAllAgents(parent, ['worker'], controller.signal);
-      gate.resolve();
-      await released(owner, target);
-      expect((await waiting).responses).toEqual([
-        expect.objectContaining({ status: 'completed', finalResponse: 'response:hold external' }),
-      ]);
-    } finally {
-      controller.abort();
-      gate.resolve();
-      await waiting?.catch(() => {});
-      await Promise.all([owner.shutdown(), observer.shutdown()]);
     }
   });
 });
@@ -2968,7 +2615,7 @@ describe('SDK business scope, waits and resources', () => {
     }
   });
 
-  test('read is non-consuming, wait cancellation leaves work alive, and default wait-all targets do not cross parents', async () => {
+  test('read is non-consuming and wait cancellation leaves work alive across parent sessions', async () => {
     const parent = 'wait-contract-' + randomUUID();
     const other = 'wait-other-' + randomUUID();
     const completions: any[] = [];
@@ -2991,11 +2638,10 @@ describe('SDK business scope, waits and resources', () => {
       expect(manager.getAgentInfo('two', parent).status).toBe('running');
       expect(manager.getAgentInfo('foreign', other).status).toBe('running');
       await manager.interruptAgent(parent, 'two');
-      const all = await manager.waitAllAgents(parent);
-      expect(all.responses).toEqual([]); // Interrupt removes its name from implicit wait-all targets.
-      expect((await manager.waitAllAgents(parent, ['two'])).responses).toEqual([
-        expect.objectContaining({ agent_name: '/two', status: 'interrupted' }),
-      ]);
+      expect((await manager.waitAgent(parent, ['two'])).event).toMatchObject({
+        agentName: '/two',
+        status: 'interrupted',
+      });
       expect(manager.getAgentInfo('foreign', other).status).toBe('running');
       expect(completions).toHaveLength(1);
     } finally {
@@ -3547,9 +3193,9 @@ describe('SDK acceptance and observer edge cases', () => {
       expect(manager.readAgentResponse('worker', parent).finalResponse).toBe(
         'response:hold nested',
       );
-      expect((await manager.waitAllAgents(parent, ['worker'])).responses).toEqual([
-        expect.objectContaining({ status: 'completed' }),
-      ]);
+      expect((await manager.waitAgent(parent, ['worker'])).event).toMatchObject({
+        status: 'completed',
+      });
     } finally {
       gate.resolve();
       await manager.shutdown();
@@ -3631,57 +3277,10 @@ describe('reviewed SDK lifecycle regressions', () => {
       expect(manager.getAgentInfo('worker', parent).status).toBe('running');
       expect(manager['live'].size).toBe(0);
       expect(fs.existsSync(activeMarker(info.id))).toBe(false);
-      await expect(manager.waitAllAgents(parent, ['worker'], controller.signal)).rejects.toThrow(
+      await expect(manager.waitAgent(parent, ['worker'], controller.signal)).rejects.toThrow(
         /persisted status|saved status|inconsistent/i,
       );
       expect(fixture.instances[0].shutdowns).toBe(1);
-    } finally {
-      clearTimeout(deadline);
-      controller.abort();
-      save?.mockRestore();
-      gate.resolve();
-      await manager.shutdown();
-    }
-  });
-
-  test('wait_all_agents uses an existing terminal mailbox event ahead of a stale running disk record', async () => {
-    const gate = deferred();
-    fixture = configureCoreFixture({ responseGate: gate.promise });
-    const parent = 'failed-final-save-all-' + randomUUID();
-    const notifications: any[] = [];
-    const manager = new AgentManager({
-      onError() {},
-      onUnclaimedCompletion: (event) => notifications.push(event),
-    });
-    const controller = new AbortController();
-    const deadline = setTimeout(() => controller.abort(), 2000);
-    let save: ReturnType<typeof spyOn> | undefined;
-    try {
-      await manager.spawnAgent(spawnParams(parent, 'worker', 'hold mailbox final'));
-      await waitUntil(() => fixture.instances[0].activeStreams === 1);
-      const info = manager.getAgentInfo('worker', parent);
-      const rename = fs.renameSync;
-      save = spyOn(fs, 'renameSync').mockImplementation((from, to) => {
-        if (
-          String(to) === info.infoFile &&
-          JSON.parse(fs.readFileSync(String(from), 'utf8')).status === 'completed'
-        )
-          throw new Error('final status fixture save failure');
-        return rename(from, to);
-      });
-      const waiting = manager.waitAllAgents(parent, ['worker'], controller.signal);
-      gate.resolve();
-      expect((await waiting).responses).toEqual([
-        expect.objectContaining({
-          agent_name: '/worker',
-          status: 'completed',
-          finalResponse: 'response:hold mailbox final',
-        }),
-      ]);
-      await released(manager, info);
-      expect(notifications).toEqual([]);
-      expect(manager.getAgentInfo('worker', parent).status).toBe('running');
-      expect(manager['mailbox'].filter((event) => event.parentSessionId === parent)).toEqual([]);
     } finally {
       clearTimeout(deadline);
       controller.abort();
@@ -3777,165 +3376,96 @@ describe('reviewed SDK lifecycle regressions', () => {
       return { entered: entered.promise, resuming, state };
     }
 
-    test('an active wait-all follows live.info replacement after an unaccepted resume rolls back', async () => {
-      const parent = 'wait-all-active-rollback-' + randomUUID();
-      const manager = new AgentManager();
-      const controller = new AbortController();
-      const response = deferred();
-      const input = deferred();
-      const checks = spyOn(manager as any, 'checkWaitTarget');
-      let waiting: ReturnType<typeof manager.waitAllAgents> | undefined;
+    test('commits rollback before an activity callback consumes it', async () => {
+      const gate = deferred();
+      const parent = 'rollback-activity-consumer-' + randomUUID();
+      const notifications: any[] = [];
+      let observeRollback = false;
+      let callbackWait: Promise<any> | undefined;
+      const manager = new AgentManager({
+        onUnclaimedCompletion: (event) => notifications.push(event),
+        onActivityChange(event) {
+          if (!observeRollback || event.parentSessionId !== parent || event.active) return;
+          callbackWait = manager.waitAgent(parent, ['worker']);
+        },
+      });
       let resuming: Promise<unknown> | undefined;
-      let settled = false;
       try {
-        await manager.spawnAgent(spawnParams(parent, 'first', 'original answer'));
-        const first = manager.getAgentInfo('first', parent);
-        await released(manager, first);
-        fixture = configureCoreFixture({ responseGate: response.promise });
-        await manager.spawnAgent(spawnParams(parent, 'second', 'hold sibling'));
-        const second = manager.getAgentInfo('second', parent);
-        waiting = manager.waitAllAgents(parent, ['first', 'second'], controller.signal);
-        void waiting.then(
-          () => {
-            settled = true;
-          },
-          () => {},
-        );
-        const rejected = rejectAfterInput(manager, first, input);
+        await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
+        const info = manager.getAgentInfo('worker', parent);
+        await released(manager, info);
+        const original = manager['mailbox'].find((event) => event.agentName === '/worker')!;
+        const rejected = rejectAfterInput(manager, info, gate);
         resuming = rejected.resuming;
         await rejected.entered;
-        const beforePoll = checks.mock.calls.length;
-        response.resolve();
-        await released(manager, second);
-        await waitUntil(() => checks.mock.calls.length > beforePoll);
-        expect(settled).toBe(false);
-        input.resolve();
+        observeRollback = true;
+        gate.resolve();
         expect(await resuming).toBeInstanceOf(Error);
-        expect((await waiting).responses).toEqual([
-          expect.objectContaining({ agent_name: '/second', finalResponse: 'response:hold sibling' }),
-          expect.objectContaining({ agent_name: '/first', finalResponse: 'response:original answer' }),
-        ]);
-        expect(manager['waitAllClaims'].size).toBe(0);
-        await released(manager, first);
+        await released(manager, info);
+        expect(callbackWait).toBeDefined();
+        const result = await callbackWait;
+        expect(result.event).toMatchObject({
+          id: original.id,
+          finalResponse: 'response:first',
+        });
+        expect(manager['mailbox']).toEqual([]);
+        expect(notifications).toHaveLength(1);
+        expect(rejected.state.instances[0].requests).toEqual([]);
       } finally {
-        controller.abort();
-        response.resolve();
-        input.resolve();
+        observeRollback = false;
+        gate.resolve();
         await resuming;
-        await waiting?.catch(() => {});
-        checks.mockRestore();
+        await callbackWait;
         await manager.shutdown();
       }
     });
 
-    test.each(['wait_agent', 'wait_all_agents'])(
-      'commits rollback before an activity callback consumes it with %s',
-      async (consumer) => {
-        const gate = deferred();
-        const parent = 'rollback-activity-consumer-' + randomUUID();
-        const notifications: any[] = [];
-        let observeRollback = false;
-        let callbackWait: Promise<any> | undefined;
-        const manager = new AgentManager({
-          onUnclaimedCompletion: (event) => notifications.push(event),
-          onActivityChange(event) {
-            if (!observeRollback || event.parentSessionId !== parent || event.active) return;
-            callbackWait =
-              consumer === 'wait_agent'
-                ? manager.waitAgent(parent, ['worker'])
-                : manager.waitAllAgents(parent, ['worker']);
-          },
-        });
-        let resuming: Promise<unknown> | undefined;
-        try {
-          await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
-          const info = manager.getAgentInfo('worker', parent);
-          await released(manager, info);
-          const original = manager['mailbox'].find((event) => event.agentName === '/worker')!;
-          const rejected = rejectAfterInput(manager, info, gate);
-          resuming = rejected.resuming;
-          await rejected.entered;
-          observeRollback = true;
-          gate.resolve();
-          expect(await resuming).toBeInstanceOf(Error);
-          await released(manager, info);
-          expect(callbackWait).toBeDefined();
-          const result = await callbackWait;
-          if (consumer === 'wait_agent')
-            expect(result.event).toMatchObject({
-              id: original.id,
-              finalResponse: 'response:first',
-            });
-          else
-            expect(result.responses).toEqual([
-              expect.objectContaining({ finalResponse: 'response:first' }),
-            ]);
-          expect(manager['mailbox']).toEqual([]);
-          expect(manager['defaultWaitAllTargets'].get(parent)?.has('/worker') ?? false).toBe(false);
-          expect(notifications).toHaveLength(1);
-          expect(rejected.state.instances[0].requests).toEqual([]);
-        } finally {
-          observeRollback = false;
-          gate.resolve();
-          await resuming;
-          await callbackWait;
-          await manager.shutdown();
-        }
-      },
-    );
+    test('does not replay a completion already consumed by wait_agent', async () => {
+      const gate = deferred();
+      const parent = 'consumed-rollback-' + randomUUID();
+      const notifications: any[] = [];
+      const manager = new AgentManager({
+        onUnclaimedCompletion: (event) => notifications.push(event),
+      });
+      const controller = new AbortController();
+      let resuming: Promise<unknown> | undefined;
+      let waiting: Promise<any> | undefined;
+      try {
+        await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
+        const info = manager.getAgentInfo('worker', parent);
+        await released(manager, info);
+        await manager.waitAgent(parent, ['worker']);
+        expect(manager['mailbox']).toEqual([]);
+        const rejected = rejectAfterInput(manager, info, gate);
+        resuming = rejected.resuming;
+        await rejected.entered;
+        gate.resolve();
+        expect(await resuming).toBeInstanceOf(Error);
+        await released(manager, info);
+        expect(rejected.state.instances[0].requests).toEqual([]);
+        expect(manager['mailbox']).toEqual([]);
+        expect(notifications).toHaveLength(1);
+        expect(manager.readAgentResponse('worker', parent).finalResponse).toBe('response:first');
 
-    test.each(['wait_agent', 'wait_all_agents'])(
-      'does not replay a completion already consumed by %s',
-      async (consumer) => {
-        const gate = deferred();
-        const parent = 'consumed-rollback-' + randomUUID();
-        const notifications: any[] = [];
-        const manager = new AgentManager({
-          onUnclaimedCompletion: (event) => notifications.push(event),
+        // A next-completion wait belongs to the next accepted turn.
+        waiting = manager.waitAgent(parent, undefined, controller.signal);
+        expect(manager['waiters']).toHaveLength(1);
+        fixture = configureCoreFixture();
+        await manager.sendMessage(parent, 'worker', 'second');
+        expect((await waiting).event).toMatchObject({
+          status: 'completed',
+          finalResponse: 'response:second',
         });
-        const controller = new AbortController();
-        let resuming: Promise<unknown> | undefined;
-        let waiting: Promise<any> | undefined;
-        try {
-          await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
-          const info = manager.getAgentInfo('worker', parent);
-          await released(manager, info);
-          if (consumer === 'wait_agent') await manager.waitAgent(parent, ['worker']);
-          else await manager.waitAllAgents(parent, ['worker']);
-          expect(manager['mailbox']).toEqual([]);
-          const rejected = rejectAfterInput(manager, info, gate);
-          resuming = rejected.resuming;
-          await rejected.entered;
-          gate.resolve();
-          expect(await resuming).toBeInstanceOf(Error);
-          await released(manager, info);
-          expect(rejected.state.instances[0].requests).toEqual([]);
-          expect(manager['mailbox']).toEqual([]);
-          expect(manager['defaultWaitAllTargets'].get(parent)?.has('/worker') ?? false).toBe(false);
-          expect((await manager.waitAllAgents(parent)).responses).toEqual([]);
-          expect(notifications).toHaveLength(1);
-          expect(manager.readAgentResponse('worker', parent).finalResponse).toBe('response:first');
-
-          // A next-completion wait belongs to the next accepted turn.
-          waiting = manager.waitAgent(parent, undefined, controller.signal);
-          expect(manager['waiters']).toHaveLength(1);
-          fixture = configureCoreFixture();
-          await manager.sendMessage(parent, 'worker', 'second');
-          expect((await waiting).event).toMatchObject({
-            status: 'completed',
-            finalResponse: 'response:second',
-          });
-          await released(manager, info);
-          expect(notifications).toHaveLength(1);
-        } finally {
-          controller.abort();
-          gate.resolve();
-          await resuming;
-          await waiting?.catch(() => {});
-          await manager.shutdown();
-        }
-      },
-    );
+        await released(manager, info);
+        expect(notifications).toHaveLength(1);
+      } finally {
+        controller.abort();
+        gate.resolve();
+        await resuming;
+        await waiting?.catch(() => {});
+        await manager.shutdown();
+      }
+    });
 
     test('restores a targeted waiter without satisfying an unscoped next-completion waiter', async () => {
       const gate = deferred();
@@ -3989,104 +3519,6 @@ describe('reviewed SDK lifecycle regressions', () => {
         await manager.shutdown();
       }
     });
-
-    test.each(['during input', 'after rejection', 'interrupt'])(
-      'preserves wait-all notification ownership: %s',
-      async (phase) => {
-        const responseA = deferred(),
-          responseB = deferred(),
-          input = deferred();
-        const parent = 'rollback-claims-' + randomUUID();
-        const notifications: any[] = [];
-        const manager = new AgentManager({
-          onUnclaimedCompletion: (event) => notifications.push(event),
-        });
-        const first = new AbortController(),
-          second = new AbortController();
-        let firstWait: Promise<any> | undefined, secondWait: Promise<any> | undefined;
-        let resuming: Promise<unknown> | undefined;
-        try {
-          fixture = configureCoreFixture({ responseGate: responseA.promise });
-          await manager.spawnAgent(spawnParams(parent, 'a', 'hold result A'));
-          const infoA = manager.getAgentInfo('a', parent);
-          fixture = configureCoreFixture({ responseGate: responseB.promise });
-          await manager.spawnAgent(spawnParams(parent, 'b', 'hold result B'));
-          firstWait = manager
-            .waitAllAgents(parent, ['a', 'b'], first.signal)
-            .catch((error) => error);
-          secondWait = manager
-            .waitAllAgents(parent, ['a', 'b'], second.signal)
-            .catch((error) => error);
-          responseA.resolve();
-          await released(manager, infoA);
-          const originalEvent = manager['mailbox'].find((event) => event.agentName === '/a')!;
-          expect(originalEvent).toBeDefined();
-          expect(
-            [...manager['waitAllClaims']].every((claim) =>
-              claim.suppressedEventIds.has(originalEvent.id),
-            ),
-          ).toBe(true);
-          expect(notifications).toEqual([]);
-
-          const rejected = rejectAfterInput(manager, infoA, input);
-          resuming = rejected.resuming;
-          await rejected.entered;
-          first.abort(new Error('first claim canceled'));
-          expect(await firstWait).toBeInstanceOf(Error);
-          expect(notifications).toEqual([]); // The second claim still owns the notification.
-
-          if (phase === 'during input') {
-            second.abort(new Error('last claim canceled during input'));
-            expect(await secondWait).toBeInstanceOf(Error);
-            expect(notifications).toEqual([
-              expect.objectContaining({ id: originalEvent.id, agentName: '/a' }),
-            ]);
-          }
-          if (phase === 'interrupt') {
-            const interrupting = manager.interruptAgent(parent, 'a');
-            await waitUntil(() => manager.getAgentInfo('a', parent).status === 'interrupted');
-            input.resolve();
-            await interrupting;
-          } else input.resolve();
-          expect(await resuming).toBeInstanceOf(Error);
-          await released(manager, infoA);
-
-          const currentEvent = manager['mailbox'].find((event) => event.agentName === '/a')!;
-          if (phase === 'interrupt') {
-            expect(currentEvent).toMatchObject({ status: 'interrupted' });
-            expect(currentEvent.id).not.toBe(originalEvent.id);
-          } else {
-            expect(currentEvent).toBe(originalEvent);
-            expect(rejected.state.instances[0].requests).toEqual([]);
-          }
-          if (phase !== 'during input') {
-            second.abort(new Error('last claim canceled'));
-            expect(await secondWait).toBeInstanceOf(Error);
-          }
-          expect(notifications).toEqual(
-            phase === 'interrupt'
-              ? []
-              : [
-                  expect.objectContaining({
-                    id: originalEvent.id,
-                    agentName: '/a',
-                    finalResponse: 'response:hold result A',
-                  }),
-                ],
-          );
-        } finally {
-          first.abort();
-          second.abort();
-          input.resolve();
-          responseA.resolve();
-          responseB.resolve();
-          await resuming;
-          await firstWait;
-          await secondWait;
-          await manager.shutdown();
-        }
-      },
-    );
   });
 
   test.each(['before', 'after'])(

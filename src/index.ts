@@ -324,7 +324,7 @@ A task may run on a model of its own, without a template: \`model\` takes one of
 `
     : ''
 }
-Returns after the child accepts its initial task. Continue with independent work instead of waiting; the child's final response will be delivered automatically when ready. Use \`wait_agent\` or \`wait_all_agents\` only when your next action depends on the subagent response and you have no useful work to do meanwhile.
+Returns after the child accepts its initial task. Continue with independent work instead of waiting; the child's final response will be delivered automatically when ready. Use \`wait_agent\` only when your next action depends on the subagent response and you have no useful work to do meanwhile.
 
 \`agent_type\` is optional. Omit it for a generic subagent. Use a template only when the task matches it.
 
@@ -546,7 +546,7 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
     name: 'wait_agent',
     label: 'Wait Agent',
     description:
-      'Wait for one session-owned agent completion, or for the next completion if targets is omitted. Use only when your next action depends on that response; otherwise continue working and let completion arrive automatically. Returns one final response. Use wait_all_agents when every target must finish.',
+      'Wait for one session-owned agent completion, or for the next completion if targets is omitted. Use only when your next action depends on that response; otherwise continue working and let completion arrive automatically. Returns one final response.',
     parameters: Type.Object({
       targets: Type.Optional(
         Type.Array(Type.String(), {
@@ -581,55 +581,6 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
         Array.isArray(args.targets) && args.targets.length ? args.targets.join(',') : 'any';
       return new Text(
         theme.fg('toolTitle', theme.bold('wait_agent ')) + theme.fg('accent', targets),
-        0,
-        0,
-      );
-    },
-    renderResult(result: any, _options: any, theme: Theme, context: ToolRenderContext) {
-      if (context.isError) return new Text(theme.fg('error', '✗ wait failed'), 0, 0);
-      return new Text(theme.fg('success', result.details?.message || 'done'), 0, 0);
-    },
-  });
-
-  pi.registerTool({
-    name: 'wait_all_agents',
-    label: 'Wait All Agents',
-    description:
-      'Wait until all targeted session-owned agents reach a final status. Use only when your next action depends on every response; otherwise continue working and let completions arrive automatically. Returns their final text responses.',
-    parameters: Type.Object({
-      targets: Type.Optional(
-        Type.Array(Type.String(), {
-          description:
-            'Agent task names to wait for. Omit to wait for agents spawned by this extension instance.',
-        }),
-      ),
-    }),
-    async execute(
-      _id: string,
-      params: any,
-      signal: AbortSignal | undefined,
-      _onUpdate: any,
-      ctx: any,
-    ) {
-      try {
-        const result = await ensureManager(ctx).waitAllAgents(
-          parentSessionId(ctx),
-          parseTargets(params.targets),
-          signal,
-        );
-        return boundedTextResult(JSON.stringify(result, null, 2), { message: result.message });
-      } catch (error) {
-        if (signal?.aborted) throw error;
-        throw new Error(
-          `wait_all_agents failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    },
-    renderCall(args: any, theme: Theme) {
-      const targets =
-        Array.isArray(args.targets) && args.targets.length ? args.targets.join(',') : 'all';
-      return new Text(
-        theme.fg('toolTitle', theme.bold('wait_all_agents ')) + theme.fg('accent', targets),
         0,
         0,
       );

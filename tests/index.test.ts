@@ -31,7 +31,6 @@ const sdkUrl = import.meta.resolve('@earendil-works/pi-coding-agent');
 const toolNames = [
   'spawn_agent',
   'wait_agent',
-  'wait_all_agents',
   'list_agents',
   'read_agent_response',
   'send_message',
@@ -166,12 +165,12 @@ test('uses the native render context for errors without changing successful tool
     const f = host();
     await extension(f.pi);
     const success = {
-      spawn_agent: "✓ /worker · test/fake · high", wait_agent: "success-only", wait_all_agents: "success-only",
+      spawn_agent: "✓ /worker · test/fake · high", wait_agent: "success-only",
       list_agents: "✓ 0 of 0 agents", read_agent_response: "✓ /worker",
       send_message: "✓ steered", interrupt_agent: "↯ previous: running",
     };
     const failure = {
-      spawn_agent: "✗ controlled failure", wait_agent: "✗ wait failed", wait_all_agents: "✗ wait failed",
+      spawn_agent: "✗ controlled failure", wait_agent: "✗ wait failed",
       list_agents: "✗ list failed", read_agent_response: "✗ read failed",
       send_message: "✗ send failed", interrupt_agent: "✗ interrupt failed",
     };
@@ -216,7 +215,7 @@ test('uses the native render context for errors without changing successful tool
   );
 });
 
-test('preserves the seven schemas, dynamic routing/skills, tool arguments, and return wrappers', () => {
+test('preserves the six schemas, dynamic routing/skills, tool arguments, and return wrappers', () => {
   probe(
     hostFixture +
       String.raw`
@@ -232,7 +231,7 @@ test('preserves the seven schemas, dynamic routing/skills, tool arguments, and r
     assert.deepEqual(plain(f.tools.get("spawn_agent").parameters), object({
       task_name: string, message: string, agent_type: string, skills: targets,
     }, ["task_name", "message"]));
-    for (const name of ["wait_agent", "wait_all_agents"]) assert.deepEqual(plain(f.tools.get(name).parameters), object({ targets }));
+    assert.deepEqual(plain(f.tools.get("wait_agent").parameters), object({ targets }));
     assert.deepEqual(plain(f.tools.get("list_agents").parameters), object({
       path_prefix: string, include_all: { type: "boolean" },
       limit: { type: "integer", minimum: 1, maximum: 100 }, offset: { type: "integer", minimum: 0 },
@@ -270,10 +269,6 @@ test('preserves the seven schemas, dynamic routing/skills, tool arguments, and r
     assert.deepEqual(waited, ["parent", ["task"], signal]);
     assert.deepEqual(JSON.parse(wait.content[0].text), { message: "done", event: { status: "completed" } });
     assert.deepEqual(wait.details, { message: "done" });
-    AgentManager.prototype.waitAllAgents = async (...args) => { waited = args; return { message: "all done", responses: [] }; };
-    const all = await f.call("wait_all_agents", {}, f.ctx, signal);
-    assert.deepEqual(waited, ["parent", undefined, signal]);
-    assert.deepEqual(JSON.parse(all.content[0].text), { message: "all done", responses: [] });
     let listed;
     AgentManager.prototype.listAgents = (...args) => { listed = args; return Array.from({ length: 12 }, (_, n) => ({ agent_name: "/" + n, agent_status: "completed", ...(args[2] ? { parent_session_id: "other" } : {}) })); };
     const list = await f.call("list_agents", {});
@@ -301,6 +296,32 @@ test('preserves the seven schemas, dynamic routing/skills, tool arguments, and r
     assert.deepEqual(scoped, ["parent", "task"]);
     assert.deepEqual(interrupt, { content: [{ type: "text", text: "Interrupt request handled." }], details: { previous_status: "running" } });
     await f.emit("session_shutdown", { reason: "quit" });
+  `,
+  );
+});
+
+test('wait_agent preserves target previews, error prefixes and cancellation identity', () => {
+  probe(
+    hostFixture +
+      String.raw`
+    const f = host();
+    await extension(f.pi);
+    const theme = { fg: (_color, text) => text, bold: text => text };
+    const tool = f.tools.get("wait_agent");
+    const preview = args => tool.renderCall(args, theme).render(160).join("\n").trim();
+    assert.equal(preview({}), "wait_agent any");
+    assert.equal(preview({ targets: [] }), "wait_agent any");
+    assert.equal(preview({ targets: ["/one", "/two"] }), "wait_agent /one,/two");
+    for (const failure of [new Error("controlled failure"), "plain failure"]) {
+      AgentManager.prototype.waitAgent = async () => { throw failure; };
+      await assert.rejects(f.call("wait_agent", {}), error =>
+        error.message === "wait_agent failed: " + (failure instanceof Error ? failure.message : failure));
+    }
+    const controller = new AbortController();
+    const cancellation = new Error("wait cancelled");
+    controller.abort(cancellation);
+    AgentManager.prototype.waitAgent = async () => { throw cancellation; };
+    await assert.rejects(f.call("wait_agent", {}, f.ctx, controller.signal), error => error === cancellation);
   `,
   );
 });
@@ -619,7 +640,7 @@ test.each(runtimes)(
 );
 
 test.each(runtimes)(
-  'runs seven registered tools and repeated child cleanup alongside an active SDK parent (%s)',
+  'runs six registered tools and repeated child cleanup alongside an active SDK parent (%s)',
   (_name, executable) => {
     probe(
       String.raw`
@@ -677,12 +698,12 @@ test.each(runtimes)(
               return stream;
             },
           });
-          pi.registerTool({ name: "host_driver", label: "Host test", description: "Offline seven-tool driver",
+          pi.registerTool({ name: "host_driver", label: "Host test", description: "Offline six-tool driver",
             parameters: { type: "object", properties: {} },
             async execute(_id, _args, _signal, _update, ctx) {
               try {
                 await drive(ctx);
-                return { content: [{ type: "text", text: "seven tools verified" }], details: {} };
+                return { content: [{ type: "text", text: "six tools verified" }], details: {} };
               } catch (error) { driverError = error; throw error; }
               finally { finishDriver(); }
             },
@@ -778,8 +799,8 @@ test.each(runtimes)(
         assert.equal(read.finalResponse, "child: steered work");
         settingsManager.setProjectTrusted(true);
         assert.equal((await call("send_message", { target: "worker", message: "resumed work" })).details.delivery, "prompt");
-        const all = JSON.parse((await call("wait_all_agents", { targets: ["worker"] })).content[0].text);
-        assert.equal(all.responses[0].finalResponse, "child: resumed work");
+        const resumed = JSON.parse((await call("wait_agent", { targets: ["worker"] })).content[0].text);
+        assert.equal(resumed.event.finalResponse, "child: resumed work");
         const events = fs.readFileSync(path.join(childFixture.directory, "sdk-events.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
         assert.deepEqual(events.filter(event => event.type === "session_start").map(event => event.trusted), [false, true]);
         await reclaimed("first resumption");
@@ -1036,7 +1057,6 @@ describe('extension completion delivery and TUI', () => {
       expect([...subagents.tools.keys()]).toEqual([
         'spawn_agent',
         'wait_agent',
-        'wait_all_agents',
         'list_agents',
         'read_agent_response',
         'send_message',
@@ -1843,7 +1863,7 @@ describe('extension completion delivery and TUI', () => {
   });
 });
 
-test('seven public tools carry native usage through metadata and the detail footer without consuming reads', async () => {
+test('six public tools carry native usage through metadata and the detail footer without consuming reads', async () => {
   codingAgent.initTheme('dark', false);
   configureCoreFixture({
     tokens: (text) => (text.includes('fourteen') ? 70000 : text.includes('twelve') ? 60000 : 50000),
@@ -1950,9 +1970,8 @@ test('seven public tools carry native usage through metadata and the detail foot
     };
     await commands.get('subagents').handler('', ctx);
     expect(detailOpened).toBe(1);
-    expect((await execute('wait_all_agents', { targets: ['worker'] })).content[0].text).toContain(
-      'response:sample fourteen',
-    );
+    const resumed = JSON.parse((await execute('wait_agent', { targets: ['worker'] })).content[0].text);
+    expect(resumed.event.finalResponse).toBe('response:sample fourteen');
     const saved = getAgent('worker', parent)!;
     expect(saved.contextUsage).toMatchObject({ tokens: 70000, contextWindow: 500000 });
     expect(saved.contextUsage!.percent!).toBeCloseTo(14);

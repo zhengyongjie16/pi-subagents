@@ -509,7 +509,6 @@ export class SubagentPeekOverlay {
       if (hasLiveUpdates) return;
       if (!this.loadSession()) return;
       this.rebuildChat();
-      this.invalidateCache();
       if (this.followMode) this.scrollOffset = Number.MAX_SAFE_INTEGER;
       this.tui.requestRender();
     } catch {}

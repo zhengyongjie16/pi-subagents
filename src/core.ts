@@ -3,7 +3,6 @@ import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
 import {
   CONFIG_DIR_NAME,
   getAgentDir,
@@ -1209,7 +1208,6 @@ export class EventBroadcaster {
         active.isError = event.isError ?? false;
       }
     } else if (event.type === 'message_end') {
-      if (event.message?.role === 'assistant') this.assistantStream.finish(event.message);
       if (event.message?.role === 'toolResult' && event.message.toolCallId) {
         this.activeTools.delete(event.message.toolCallId);
       }
@@ -1297,12 +1295,6 @@ export class AgentManager {
   private readonly live = new Map<string, LiveAgent>();
   private readonly mailbox: AgentCompletionEvent[] = [];
   private waiters: Waiter[] = [];
-  private readonly waitAllClaims = new Set<{
-    parentSessionId: string;
-    targets: Set<string>;
-    suppressedEventIds: Set<string>;
-  }>();
-  private readonly defaultWaitAllTargets = new Map<string, Set<string>>();
   private readonly shutdownController = new AbortController();
   private readonly reconciliation: Promise<void>;
 
@@ -1460,9 +1452,6 @@ export class AgentManager {
       };
       saveInfo(info);
       this.notifyStatusChange(info);
-      const targets = this.defaultWaitAllTargets.get(params.parentSessionId) ?? new Set<string>();
-      targets.add(info.canonicalName);
-      this.defaultWaitAllTargets.set(params.parentSessionId, targets);
       const prompt = [definition?.prompt, params.message].filter(Boolean).join('\n\n');
       try {
         await this.startLiveAgent(info, prompt, params.message);
@@ -1523,7 +1512,6 @@ export class AgentManager {
     const timeout = new Error(
       `Timed out waiting for agent ${info.canonicalName} initialization or prompt acceptance.`,
     );
-    let wasWaitAllTarget = false;
     try {
       ensureSystemPromptFile();
       live.broadcaster.start();
@@ -1554,7 +1542,7 @@ export class AgentManager {
         onShutdown: () => {
           this.requestCancellation(live, new Error('Child extension requested shutdown.'));
           try {
-            this.markInterrupted(live);
+            this.finalizeRun(live, 'interrupted');
           } catch (error) {
             this.reportError(live, error);
           } finally {
@@ -1565,8 +1553,6 @@ export class AgentManager {
       });
       const startup = live.initialization.then(async () => {
         checkCanceled();
-        wasWaitAllTarget =
-          this.defaultWaitAllTargets.get(info.parentSessionId)?.has(info.canonicalName) ?? false;
         await this.prompt(live, message, displayMessage);
       });
       await boundedWait(startup, DEFAULT_STARTUP_TIMEOUT_MS, timeout, live.cancellation.signal);
@@ -1589,8 +1575,6 @@ export class AgentManager {
           try {
             saveInfo(previous);
           } finally {
-            if (!wasWaitAllTarget)
-              this.finishWaitTarget(previous.parentSessionId, previous.canonicalName);
             const completion = live.suspendedCompletion;
             delete live.suspendedCompletion;
             if (completion) this.pushMailbox(completion, false);
@@ -1620,8 +1604,8 @@ export class AgentManager {
             this.shutdownController.signal.aborted ||
             (live.cancellation.signal.aborted && error !== timeout)
           )
-            this.markInterrupted(live);
-          else this.markFailed(live, formatAgentError(error));
+            this.finalizeRun(live, 'interrupted');
+          else this.finalizeRun(live, 'failed', formatAgentError(error));
         }
       } catch (saveError) {
         this.reportError(live, saveError);
@@ -1643,9 +1627,6 @@ export class AgentManager {
       live.info.parentSessionId,
       new Set([live.info.canonicalName]),
     );
-    const targets = this.defaultWaitAllTargets.get(live.info.parentSessionId) ?? new Set<string>();
-    targets.add(live.info.canonicalName);
-    this.defaultWaitAllTargets.set(live.info.parentSessionId, targets);
     live.info.status = 'running';
     live.info.lastTaskMessage = displayMessage;
     live.info.lastActivity = Date.now();
@@ -1711,8 +1692,8 @@ export class AgentManager {
         error ??
         live.candidateError ??
         (live.settledAborted ? 'Agent ended with aborted.' : undefined);
-      if (failure !== undefined) this.markFailed(live, formatAgentError(failure));
-      else this.markCompleted(live);
+      if (failure !== undefined) this.finalizeRun(live, 'failed', formatAgentError(failure));
+      else this.finalizeRun(live, 'completed');
     } catch (error) {
       this.reportError(live, error);
     } finally {
@@ -1758,7 +1739,7 @@ export class AgentManager {
       const error = `Model response exceeded ${timeoutMs} ms without completing.`;
       this.requestCancellation(live, new Error(error));
       try {
-        this.markFailed(live, error);
+        this.finalizeRun(live, 'failed', error);
       } catch (error) {
         this.reportError(live, error);
       } finally {
@@ -1822,18 +1803,6 @@ export class AgentManager {
     }
   }
 
-  private markCompleted(live: LiveAgent): void {
-    this.finalizeRun(live, 'completed');
-  }
-
-  private markFailed(live: LiveAgent, error: string): void {
-    this.finalizeRun(live, 'failed', error);
-  }
-
-  private markInterrupted(live: LiveAgent): void {
-    this.finalizeRun(live, 'interrupted');
-  }
-
   private finalizeRun(
     live: LiveAgent,
     status: 'completed' | 'failed' | 'interrupted',
@@ -1857,8 +1826,6 @@ export class AgentManager {
     } finally {
       // Publish status and resolve waits even when persistence fails.
       this.notifyStatusChange(live.info);
-      if (status === 'interrupted')
-        this.finishWaitTarget(live.info.parentSessionId, live.info.canonicalName);
       this.pushMailbox(
         {
           id: randomUUID(),
@@ -1894,14 +1861,7 @@ export class AgentManager {
       return;
     }
     this.mailbox.push(event);
-    const matchingClaims = [...this.waitAllClaims].filter(
-      (claim) =>
-        claim.parentSessionId === event.parentSessionId && claim.targets.has(event.agentName),
-    );
-    if (notify) {
-      for (const claim of matchingClaims) claim.suppressedEventIds.add(event.id);
-      if (!matchingClaims.length) this.notifyUnclaimedCompletion(event);
-    }
+    if (notify) this.notifyUnclaimedCompletion(event);
   }
 
   listAgentInfos(
@@ -1973,10 +1933,6 @@ export class AgentManager {
     }
   }
 
-  private finishWaitTarget(parentSessionId: string, agentName: string): void {
-    this.defaultWaitAllTargets.get(parentSessionId)?.delete(canonicalAgentName(agentName));
-  }
-
   async waitAgent(
     parentSessionId: string,
     targets?: string[],
@@ -1995,7 +1951,6 @@ export class AgentManager {
       normalizedTargets,
     );
     if (existing) {
-      this.finishWaitTarget(parentSessionId, existing.agentName);
       return {
         message: `Wait completed: ${existing.agentName} ${existing.status}.`,
         event: existing,
@@ -2012,7 +1967,6 @@ export class AgentManager {
       const finalInfo = targetInfos.find((info) => FINAL_STATUSES.has(info.status));
       if (!finalInfo) for (const info of targetInfos) this.checkWaitTarget(info);
       if (finalInfo) {
-        this.finishWaitTarget(parentSessionId, finalInfo.canonicalName);
         return {
           message: `Wait completed: ${finalInfo.canonicalName} ${finalInfo.status}.`,
           event: {
@@ -2042,108 +1996,14 @@ export class AgentManager {
         parentSessionId,
         targets: normalizedTargets,
         resolve: (event) =>
-          settle(() => {
-            this.finishWaitTarget(parentSessionId, event.agentName);
-            resolve({ message: `Wait completed: ${event.agentName} ${event.status}.`, event });
-          }),
+          settle(() =>
+            resolve({ message: `Wait completed: ${event.agentName} ${event.status}.`, event }),
+          ),
       };
       this.waiters.push(waiter);
       waitSignal.addEventListener('abort', onAbort, { once: true });
       if (waitSignal.aborted) onAbort();
     });
-  }
-
-  async waitAllAgents(
-    parentSessionId: string,
-    targets?: string[],
-    signal?: AbortSignal,
-  ): Promise<{ message: string; responses: AgentResponseEntry[] }> {
-    const waitSignal = signal
-      ? AbortSignal.any([signal, this.shutdownController.signal])
-      : this.shutdownController.signal;
-    throwIfAborted(waitSignal);
-    const explicitTargets = targets?.length ? new Set(targets.map(canonicalAgentName)) : undefined;
-    const defaultTargets = this.defaultWaitAllTargets.get(parentSessionId) ?? new Set<string>();
-    const targetSet = explicitTargets ?? new Set(defaultTargets);
-    const files = targetSet.size ? scopeDirs(parentSessionId).flatMap(readInfoFiles) : [];
-    // Snapshot target paths; legacy infoFile metadata may be missing or stale.
-    const targetFiles: string[] = [];
-    // Retry unreadable candidates until their task names can be resolved.
-    const unresolvedFiles = new Set<string>();
-    let infos = sortInfos(
-      files.flatMap((file) => {
-        const info = readInfoFile(file);
-        if (!info) {
-          unresolvedFiles.add(file);
-          return [];
-        }
-        if (!targetSet.has(info.canonicalName)) return [];
-        targetFiles.push(file);
-        return [info];
-      }),
-    );
-    if (explicitTargets) {
-      const missing = [...explicitTargets].filter(
-        (target) => !infos.some((info) => target === info.canonicalName),
-      );
-      if (missing.length)
-        throw new Error(`Agent not found in this parent session: ${missing.join(', ')}`);
-    }
-    const finalize = (infos: AgentInfo[]) => {
-      const responses = infos
-        .filter((info) => FINAL_STATUSES.has(info.status))
-        .map((info) => this.agentResponse(info));
-      for (const response of responses) this.finishWaitTarget(parentSessionId, response.agent_name);
-      for (let index = this.mailbox.length - 1; index >= 0; index--) {
-        const event = this.mailbox[index];
-        if (event.parentSessionId === parentSessionId && targetSet.has(event.agentName))
-          this.mailbox.splice(index, 1);
-      }
-      return {
-        message: 'All target agents reached final status.',
-        responses,
-      };
-    };
-    const claim = { parentSessionId, targets: targetSet, suppressedEventIds: new Set<string>() };
-    this.waitAllClaims.add(claim);
-    try {
-      while (true) {
-        throwIfAborted(waitSignal);
-        const currentInfos = infos.map((info) => this.waitTargetInfo(info));
-        const pending = currentInfos.filter((info) => {
-          this.checkWaitTarget(info);
-          return !FINAL_STATUSES.has(info.status);
-        });
-        if (!pending.length) return finalize(currentInfos);
-        await delay(250, undefined, { signal: waitSignal });
-        throwIfAborted(waitSignal);
-        infos = sortInfos(
-          [...targetFiles, ...unresolvedFiles].flatMap((file) => {
-            const info = readInfoFile(file);
-            if (!info) return [];
-            const isTarget = targetSet.has(info.canonicalName);
-            if (unresolvedFiles.delete(file) && isTarget) targetFiles.push(file);
-            return isTarget ? [info] : [];
-          }),
-        );
-      }
-    } finally {
-      this.waitAllClaims.delete(claim);
-      for (const eventId of claim.suppressedEventIds) {
-        // Claim cancellation also releases completions suspended by tentative input.
-        const event =
-          this.mailbox.find((candidate) => candidate.id === eventId) ??
-          [...this.live.values()].find((live) => live.suspendedCompletion?.id === eventId)
-            ?.suspendedCompletion;
-        if (!event) continue;
-        const claimedElsewhere = [...this.waitAllClaims].some(
-          (candidate) =>
-            candidate.parentSessionId === event.parentSessionId &&
-            candidate.targets.has(event.agentName),
-        );
-        if (!claimedElsewhere) this.notifyUnclaimedCompletion(event);
-      }
-    }
   }
 
   async sendMessage(
@@ -2203,7 +2063,7 @@ export class AgentManager {
       if (error === timeout && this.live.get(info.id) === current && !current.finalizedRun) {
         this.requestCancellation(current, timeout);
         try {
-          this.markFailed(current, timeout.message);
+          this.finalizeRun(current, 'failed', timeout.message);
         } catch (saveError) {
           this.reportError(current, saveError);
         } finally {
@@ -2245,7 +2105,7 @@ export class AgentManager {
       this.requestCancellation(live, new Error('Agent interrupted.'));
       let failure: unknown;
       try {
-        this.markInterrupted(live);
+        this.finalizeRun(live, 'interrupted');
       } catch (error) {
         failure = error;
       } finally {
@@ -2269,7 +2129,6 @@ export class AgentManager {
       delete persisted.error;
       saveInfo(persisted);
       this.notifyStatusChange(persisted);
-      this.finishWaitTarget(parentSessionId, persisted.canonicalName);
       this.pushMailbox(
         {
           id: randomUUID(),
@@ -2377,7 +2236,7 @@ export class AgentManager {
     const terminations = [...this.live.values()].map((live) => {
       this.requestCancellation(live, abortError(this.shutdownController.signal));
       try {
-        if (!live.finalizedRun) this.markInterrupted(live);
+        if (!live.finalizedRun) this.finalizeRun(live, 'interrupted');
       } catch (error) {
         errors.push(error);
       }

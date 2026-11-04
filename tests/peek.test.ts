@@ -1708,6 +1708,42 @@ describe('overlay creation paths and native lifecycle', () => {
     expect(partial).toEqual(original);
   });
 
+  test.each(['agent_settled', 'close'])(
+    '%s clears streaming state before native renderer cleanup can fail',
+    (transition) => {
+      const { overlay } = createOverlay();
+      const socket = Object.assign(new EventEmitter(), { destroy() {} });
+      const connect = spyOn(net, 'connect').mockReturnValue(socket as any);
+      try {
+        overlay['connectSocket']();
+      } finally {
+        connect.mockRestore();
+      }
+      overlay['handleEvent']({ type: 'message_start', message: assistant() });
+      start(overlay);
+      progress(overlay);
+      expect(overlay['streamingComponent']).not.toBeNull();
+      expect(overlay['pendingTools'].size).toBe(1);
+      const cleanup = spyOn(overlay as any, 'finishToolComponents').mockImplementationOnce(
+        () => {
+          throw new Error('native renderer cleanup failed');
+        },
+      );
+      try {
+        expect(() => {
+          if (transition === 'close') socket.emit('close');
+          else overlay['handleEvent']({ type: transition });
+        }).toThrow('native renderer cleanup failed');
+        expect(overlay['streamingComponent']).toBeNull();
+        expect(overlay['streamingMessage']).toBeNull();
+        expect(overlay['assistantStream'].message).toBeNull();
+        expect(overlay['pendingTools'].size).toBe(0);
+      } finally {
+        cleanup.mockRestore();
+      }
+    },
+  );
+
   test('replacement of a provisional streaming call releases its native refresh resource', () => {
     const { overlay } = createOverlay();
     overlay['handleEvent']({ type: 'message_start', message: assistant() });
@@ -2019,7 +2055,7 @@ describe('overlay creation paths and native lifecycle', () => {
       } finally {
         connect.mockRestore();
       }
-      start(overlay);
+      const component = start(overlay);
       progress(overlay);
       const previousSize = overlay['lastFileSize'];
       session.appendMessage({ role: 'user', content: 'temporary tail', timestamp: 1001 });
@@ -2036,6 +2072,9 @@ describe('overlay creation paths and native lifecycle', () => {
         else overlay['handleEvent']({ type: transition });
         expect(open).toHaveBeenCalledTimes(1);
         expect(clock!.nativeTimers()).toHaveLength(0);
+        expect(component['isPartial']).toBe(false);
+        expect(overlay['pendingTools'].size).toBe(0);
+        expect(overlay['assistantStream'].message).toBeNull();
         expect(overlay['historyDirty']).toBe(true);
         overlay['poll']();
         expect(open).toHaveBeenCalledTimes(2);

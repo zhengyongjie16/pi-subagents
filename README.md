@@ -24,7 +24,6 @@ pi install /absolute/path/to/pi-subagents
 | --------------------- | ---------------------------------------------------------------------- |
 | `spawn_agent`         | Start a fresh-context SDK session and return after task acceptance     |
 | `wait_agent`          | Block for one completion and return its final text                     |
-| `wait_all_agents`     | Block until every selected agent finishes                              |
 | `list_agents`         | List current-session agents, or explicitly include historical sessions |
 | `read_agent_response` | Read an agent's latest final raw text response                         |
 | `send_message`        | Steer a running agent or start another turn when settled               |
@@ -125,7 +124,7 @@ A thinking level written into an `enabledModels` pattern, such as `anthropic/cla
 
 ## Completion delivery
 
-A child completion or failure is delivered automatically to its parent session after the child reaches final status. If the parent is active, the result joins the current run; if the parent is idle, it starts a continuation turn. Continue independent work instead of waiting. Use `wait_agent` or `wait_all_agents` only when the next action depends on those responses and no useful work remains meanwhile; an active wait receives the result directly without a duplicate automatic message.
+A child completion or failure is delivered automatically to its parent session after the child reaches final status. If the parent is active, the result joins the current run; if the parent is idle, it starts a continuation turn. Continue independent work instead of waiting. Use `wait_agent` only when the next action depends on that response and no useful work remains meanwhile; an active wait receives the result directly without a duplicate automatic message.
 
 ## Commands and TUI
 
