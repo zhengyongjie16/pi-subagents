@@ -1210,7 +1210,7 @@ function extractTextFromMessage(message: any): string {
     .join('\n\n');
 }
 
-function previewText(text: string | undefined, maxLength = 180): string | null {
+export function previewText(text: string | undefined, maxLength = 180): string | null {
   if (!text) return null;
   const normalized = text.replace(/\s+/g, ' ').trim();
   return normalized.length <= maxLength
@@ -1849,21 +1849,27 @@ export class AgentManager {
     }
   }
 
+  listAgentInfos(
+    pathPrefix: string | undefined,
+    parentSessionId: string,
+    includeAll = false,
+  ): AgentInfo[] {
+    const prefix = pathPrefix?.trim().replace(/^\/+/, '');
+    const infos = includeAll ? readAllInfos() : readScopeInfos(parentSessionId);
+    return infos.filter((info) => !prefix || info.taskName.startsWith(prefix));
+  }
+
   listAgents(
     pathPrefix: string | undefined,
     parentSessionId: string,
     includeAll = false,
   ): AgentListEntry[] {
-    const prefix = pathPrefix?.trim().replace(/^\/+/, '');
-    const infos = includeAll ? readAllInfos() : readScopeInfos(parentSessionId);
-    return infos
-      .filter((info) => !prefix || info.taskName.startsWith(prefix))
-      .map((info) => ({
-        agent_name: info.canonicalName,
-        agent_status: info.status,
-        last_task_message: previewText(info.lastTaskMessage),
-        ...(includeAll ? { parent_session_id: info.parentSessionId } : {}),
-      }));
+    return this.listAgentInfos(pathPrefix, parentSessionId, includeAll).map((info) => ({
+      agent_name: info.canonicalName,
+      agent_status: info.status,
+      last_task_message: previewText(info.lastTaskMessage),
+      ...(includeAll ? { parent_session_id: info.parentSessionId } : {}),
+    }));
   }
 
   getAgentInfo(target: string, parentSessionId: string): AgentInfo {

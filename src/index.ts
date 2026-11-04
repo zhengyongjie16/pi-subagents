@@ -27,6 +27,7 @@ import {
   getAgentDefinitionsDescription,
   getRunsDir,
   loadSubagentConfig,
+  previewText,
   THINKING_LEVELS,
   type AgentCompletionEvent,
   type AgentInfo,
@@ -930,7 +931,7 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
     return ctx.ui.custom<AgentSelection | undefined>((tui, theme, _keybindings, done) => {
       let selected = 0;
       let showAll = false;
-      let displayed: ReturnType<AgentManager['listAgents']> = [];
+      let displayedCount = 0;
       let displayedSelection: AgentSelection | undefined;
       let cached: string[] | undefined;
       let cachedWidth: number | undefined;
@@ -943,9 +944,9 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
       return {
         render(width: number): string[] {
           if (cached && cachedWidth === width) return cached;
-          const entries = manager.listAgents(undefined, currentSessionId, showAll);
+          const entries = manager.listAgentInfos(undefined, currentSessionId, showAll);
           selected = Math.max(0, Math.min(selected, entries.length - 1));
-          displayed = entries;
+          displayedCount = entries.length;
           displayedSelection = undefined;
           const scopeLabel = showAll ? 'all sessions' : 'this session';
           const lines = [
@@ -980,25 +981,17 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
           const modelWidth = Math.max(0, Math.min(28, width - fixedWidth - nameWidth));
           if (viewStart > 0) lines.push(fg('dim', `  ↑ ${viewStart} more`));
           for (let index = viewStart; index < viewEnd; index++) {
-            const entry = entries[index];
-            let info: AgentInfo;
-            try {
-              info = manager.getAgentInfo(
-                entry.agent_name,
-                entry.parent_session_id || currentSessionId,
-              );
-            } catch {
-              continue;
-            } // A record can disappear between listing and reading its details.
+            const info = entries[index];
+            if (typeof info.canonicalName !== 'string' || !info.canonicalName.trim()) continue;
+            const sessionId = showAll ? info.parentSessionId || '' : '';
             if (index === selected)
               displayedSelection = {
-                task: entry.agent_name,
-                parentSessionId: entry.parent_session_id || currentSessionId,
+                task: info.canonicalName,
+                parentSessionId: sessionId || currentSessionId,
                 includeAll: showAll,
               };
             const pointer = index === selected ? fg('accent', '› ') : '  ';
-            const name = formatColumn(entry.agent_name, nameWidth);
-            const sessionId = entry.parent_session_id || '';
+            const name = formatColumn(info.canonicalName, nameWidth);
             const parent = showAll ? ` ${sessionId.slice(-8)}` : '';
             const details = [
               formatColumn(runtimeLabel(info), durationWidth),
@@ -1010,27 +1003,19 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
                 fg(index === selected ? 'accent' : 'text', name) +
                 ' ' +
                 fg(
-                  entry.agent_status === 'failed'
+                  info.status === 'failed'
                     ? 'error'
-                    : entry.agent_status === 'completed'
+                    : info.status === 'completed'
                       ? 'success'
                       : 'warning',
-                  entry.agent_status.padEnd(statusWidth),
+                  info.status.padEnd(statusWidth),
                 ) +
                 ' ' +
                 fg('dim', details + parent),
             );
-            if (entry.last_task_message)
-              lines.push(
-                '  ' +
-                  fg(
-                    'dim',
-                    truncateToWidth(
-                      entry.last_task_message.replace(/\s+/g, ' '),
-                      Math.max(0, width - 4),
-                    ),
-                  ),
-              );
+            const preview = previewText(info.lastTaskMessage);
+            if (preview)
+              lines.push('  ' + fg('dim', truncateToWidth(preview, Math.max(0, width - 4))));
           }
           if (viewEnd < entries.length)
             lines.push(fg('dim', `  ↓ ${entries.length - viewEnd} more`));
@@ -1058,7 +1043,7 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
             return;
           }
           if (matchesKey(data, 'down') || data === 'j') {
-            selected = Math.max(0, Math.min(displayed.length - 1, selected + 1));
+            selected = Math.max(0, Math.min(displayedCount - 1, selected + 1));
             refresh();
             return;
           }

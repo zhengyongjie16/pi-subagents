@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import { beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -1228,15 +1228,16 @@ describe('extension completion delivery and TUI', () => {
       const { default: subagentExtension } = await import('../src/index.js');
 
       const originalList = AgentManager.prototype.listAgents;
+      const originalInfos = AgentManager.prototype.listAgentInfos;
       const originalInfo = AgentManager.prototype.getAgentInfo;
       const originalConnect = (SubagentPeekOverlay.prototype as any).connectSocket;
       const list = mock(function (
         this: AgentManager,
-        ...args: Parameters<AgentManager['listAgents']>
+        ...args: Parameters<AgentManager['listAgentInfos']>
       ) {
-        return originalList.apply(this, args);
+        return originalInfos.apply(this, args);
       });
-      AgentManager.prototype.listAgents = list;
+      AgentManager.prototype.listAgentInfos = list;
       (SubagentPeekOverlay.prototype as any).connectSocket = () => {};
       const requestRender = mock(() => {});
       const selections: any[] = [];
@@ -1318,6 +1319,7 @@ describe('extension completion delivery and TUI', () => {
       } finally {
         await shutdown?.();
         AgentManager.prototype.listAgents = originalList;
+        AgentManager.prototype.listAgentInfos = originalInfos;
         AgentManager.prototype.getAgentInfo = originalInfo;
         (SubagentPeekOverlay.prototype as any).connectSocket = originalConnect;
         for (const scope of scopes) fs.rmSync(scope, { recursive: true, force: true });
@@ -1330,6 +1332,63 @@ describe('extension completion delivery and TUI', () => {
           .render(width)
           .find((line: string) => stripVTControlCharacters(line).startsWith('› ')) ?? '',
       );
+
+    test('reads each metadata file once per browser frame and never on a cache hit', async () => {
+      await withBrowser(async (f) => {
+        const own = Array.from({ length: 12 }, (_, index) => f.put(`history/${index}`));
+        const other = f.put('history/0', { modelId: 'other-model' }, f.otherId);
+        const tracked = new Set([...own, other].map((info) => info.infoFile));
+        await f.open((browser: any) => {
+          // Exclude manager startup/reconciliation and later detail lookups from this budget.
+          const reads: string[] = [];
+          const originalRead = fs.readFileSync;
+          const read = spyOn(fs, 'readFileSync').mockImplementation(((...args: any[]) => {
+            const file = String(args[0]);
+            if (tracked.has(file)) reads.push(file);
+            return originalRead.apply(fs, args as any);
+          }) as typeof fs.readFileSync);
+          const getInfo = spyOn(AgentManager.prototype, 'getAgentInfo');
+          const renderSnapshot = (width: number, expected = own) => {
+            reads.length = 0;
+            const lines = browser.render(width);
+            expect(reads).toHaveLength(expected.length);
+            expect([...reads].sort()).toEqual(
+              expected.map((info: AgentInfo) => info.infoFile).sort(),
+            );
+            return lines;
+          };
+          try {
+            const first = renderSnapshot(120);
+            reads.length = 0;
+            expect(browser.render(120)).toBe(first);
+            expect(reads).toEqual([]);
+            for (const key of ['j', 'k', 'r']) {
+              browser.handleInput(key);
+              expect(reads).toEqual([]);
+              renderSnapshot(120);
+              reads.length = 0;
+            }
+            renderSnapshot(80);
+            reads.length = 0;
+            browser.invalidate();
+            expect(reads).toEqual([]);
+            renderSnapshot(80);
+            reads.length = 0;
+            browser.handleInput('\t');
+            expect(reads).toEqual([]);
+            const all = renderSnapshot(120, [...own, other]);
+            reads.length = 0;
+            expect(browser.render(120)).toBe(all);
+            browser.handleInput('q');
+            expect(reads).toEqual([]);
+            expect(getInfo).not.toHaveBeenCalled();
+          } finally {
+            read.mockRestore();
+            getInfo.mockRestore();
+          }
+        });
+      });
+    });
 
     test('shows task previews only when present, without context or new timers', async () => {
       const originalSet = globalThis.setInterval;
@@ -1364,6 +1423,16 @@ describe('extension completion delivery and TUI', () => {
       } finally {
         globalThis.setInterval = originalSet;
       }
+    });
+
+    test('keeps the 180-character task preview limit even in a wide browser', async () => {
+      await withBrowser(async (f) => {
+        f.put('long-preview', { lastTaskMessage: '  ' + 'x'.repeat(200) + '\n tail' });
+        await f.open((browser: any) => {
+          expect(browser.render(240)).toContain('  ' + 'x'.repeat(179) + '…');
+          browser.handleInput('q');
+        });
+      });
     });
 
     test('refreshes saved metadata and previews with r', async () => {
@@ -1451,27 +1520,52 @@ describe('extension completion delivery and TUI', () => {
       },
     );
 
-    test('skips a record lost between list and detail reads, then safely selects a survivor', async () => {
+    test('skips a record lost while reading the snapshot and safely selects a survivor', async () => {
       await withBrowser(async (f) => {
         const gone = f.put('gone', { createdAt: 200 });
         f.put('survivor', { createdAt: 100 });
-        const getInfo = AgentManager.prototype.getAgentInfo;
-        AgentManager.prototype.getAgentInfo = function (target, parent) {
-          if (target === '/gone') f.remove(gone);
-          return getInfo.call(this, target, parent);
-        };
         await f.open((browser: any) => {
-          expect(() => browser.render(80)).not.toThrow();
-          expect(browser.render(80).join('\n')).not.toContain('/gone');
-          browser.handleInput('\r');
-          expect(f.selections).toEqual([]);
-          browser.handleInput('r');
-          expect(selectedRow(browser)).toContain('/survivor');
-          browser.handleInput('\r');
+          const originalRead = fs.readFileSync;
+          let removed = false;
+          const read = spyOn(fs, 'readFileSync').mockImplementation(((...args: any[]) => {
+            if (String(args[0]) === gone.infoFile) {
+              f.remove(gone);
+              removed = true;
+            }
+            return originalRead.apply(fs, args as any);
+          }) as typeof fs.readFileSync);
+          try {
+            expect(() => browser.render(80)).not.toThrow();
+            expect(removed).toBe(true);
+            expect(browser.render(80).join('\n')).not.toContain('/gone');
+            expect(selectedRow(browser, 80)).toContain('/survivor');
+            browser.handleInput('\r');
+          } finally {
+            read.mockRestore();
+          }
         });
         expect(f.opened[0].canonicalName).toBe('/survivor');
       });
     });
+
+    test.each([undefined, null, 42, '', ' \t '])(
+      'skips an invalid persisted task label (%s) without opening another agent',
+      async (canonicalName) => {
+        await withBrowser(async (f) => {
+          f.put('invalid', { createdAt: 200, canonicalName });
+          f.put('survivor', { createdAt: 100 });
+          await f.open((browser: any) => {
+            expect(browser.render(80).join('\n')).toContain('/survivor');
+            browser.handleInput('\r');
+            expect(f.selections).toEqual([]);
+            browser.handleInput('j');
+            expect(selectedRow(browser, 80)).toContain('/survivor');
+            browser.handleInput('\r');
+          });
+          expect(f.opened.map((info: AgentInfo) => info.canonicalName)).toEqual(['/survivor']);
+        });
+      },
+    );
 
     test('does not open a different agent when the displayed Enter target disappears', async () => {
       await withBrowser(async (f) => {
@@ -1638,16 +1732,12 @@ describe('extension completion delivery and TUI', () => {
 
     test('clips wide ANSI previews at 32/38/50/80/120 columns and invalidates theme caches', async () => {
       await withBrowser(async (f) => {
-        const info = f.put('wide', {
+        // Inject wide labels directly because task creation accepts ASCII names.
+        f.put('wide', {
           canonicalName: '/中文很长的名称'.repeat(6),
           modelId: '宽模型'.repeat(10),
           lastTaskMessage: '\x1b[31m中文任务 😀\tcombining é '.repeat(20) + '\x1b[0m',
         });
-        // Inject wide labels directly because task creation accepts ASCII names.
-        const getInfo = AgentManager.prototype.getAgentInfo;
-        AgentManager.prototype.getAgentInfo = function (target, parent) {
-          return target === info.canonicalName ? info : getInfo.call(this, target, parent);
-        };
         f.theme.ansi = '\x1b[36m';
         await f.open((browser: any) => {
           for (const width of [32, 38, 50, 80, 120]) {
