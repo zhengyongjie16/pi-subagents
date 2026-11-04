@@ -892,19 +892,41 @@ export type RpcAssistantStreamStatus = 'thinking' | 'streaming' | 'calling';
 
 export class RpcAssistantStreamState {
   status: RpcAssistantStreamStatus = 'thinking';
-  message: AssistantMessage | null = null;
+  private currentMessage: AssistantMessage | null = null;
+  private readonly pendingToolArguments = new Set<number>();
   private readonly toolArguments = new Map<number, string>();
 
-  start(message: AssistantMessage): void {
-    this.message = message;
-    this.status = 'thinking';
-    this.toolArguments.clear();
+  get message(): AssistantMessage | null {
+    this.flushToolArguments();
+    return this.currentMessage;
   }
 
-  update(delta: any, cumulativeMessage?: AssistantMessage): void {
+  /** Parse only changed arguments when a snapshot or UI frame actually needs them. */
+  flushToolArguments(): boolean {
+    if (!this.currentMessage || !this.pendingToolArguments.size) return false;
+    for (const index of this.pendingToolArguments) {
+      const block = this.currentMessage.content[index];
+      if (block?.type === 'toolCall')
+        block.arguments = parseStreamingJson(this.toolArguments.get(index) ?? '');
+    }
+    this.pendingToolArguments.clear();
+    return true;
+  }
+
+  start(message: AssistantMessage): void {
+    this.currentMessage = message;
+    this.status = 'thinking';
+    this.toolArguments.clear();
+    this.pendingToolArguments.clear();
+  }
+
+  /** Return the live message without forcing argument parsing between UI frames. */
+  update(delta: any, cumulativeMessage?: AssistantMessage): AssistantMessage | null {
     if (cumulativeMessage?.role === 'assistant') {
-      this.message = cumulativeMessage;
-    } else if (this.message) {
+      this.currentMessage = cumulativeMessage;
+      this.toolArguments.clear();
+      this.pendingToolArguments.clear();
+    } else if (this.currentMessage) {
       this.applyDelta(delta);
     }
     if (
@@ -926,6 +948,7 @@ export class RpcAssistantStreamState {
     ) {
       this.status = 'calling';
     }
+    return this.currentMessage;
   }
 
   resume(
@@ -933,9 +956,10 @@ export class RpcAssistantStreamState {
     status: RpcAssistantStreamStatus,
     toolArguments: Array<[number, string]> = [],
   ): void {
-    this.message = message;
+    this.currentMessage = message;
     this.status = status;
     this.toolArguments.clear();
+    this.pendingToolArguments.clear();
     for (const [index, raw] of toolArguments) {
       if (Number.isInteger(index) && index >= 0 && typeof raw === 'string')
         this.toolArguments.set(index, raw);
@@ -947,19 +971,35 @@ export class RpcAssistantStreamState {
   }
 
   finish(message?: AssistantMessage): void {
-    if (message?.role === 'assistant') this.message = message;
+    if (message?.role === 'assistant') this.currentMessage = message;
+    else this.flushToolArguments();
     this.toolArguments.clear();
+    this.pendingToolArguments.clear();
   }
 
   clear(): void {
-    this.message = null;
+    this.currentMessage = null;
     this.toolArguments.clear();
+    this.pendingToolArguments.clear();
   }
 
   private applyDelta(delta: any): void {
-    if (!this.message || !Number.isInteger(delta?.contentIndex) || delta.contentIndex < 0) return;
+    if (
+      !this.currentMessage ||
+      !Number.isInteger(delta?.contentIndex) ||
+      delta.contentIndex < 0
+    )
+      return;
     const index = delta.contentIndex;
-    const content = this.message.content as any[];
+    const content = this.currentMessage.content as any[];
+    if (
+      delta.type === 'thinking_start' ||
+      delta.type === 'text_start' ||
+      delta.type === 'toolcall_start'
+    ) {
+      this.toolArguments.delete(index);
+      this.pendingToolArguments.delete(index);
+    }
     if (delta.type === 'thinking_start') {
       content[index] = { type: 'thinking', thinking: '' };
     } else if (delta.type === 'thinking_delta') {
@@ -998,10 +1038,11 @@ export class RpcAssistantStreamState {
         content[index]?.type === 'toolCall'
           ? content[index]
           : { type: 'toolCall', id: `streaming-${index}`, name: 'tool', arguments: {} };
-      block.arguments = parseStreamingJson(raw);
+      this.pendingToolArguments.add(index);
       content[index] = block;
     } else if (delta.type === 'toolcall_end' && delta.toolCall?.type === 'toolCall') {
       this.toolArguments.delete(index);
+      this.pendingToolArguments.delete(index);
       content[index] = delta.toolCall;
     }
   }

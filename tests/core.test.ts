@@ -11,6 +11,7 @@ import {
   type CoreFixtureState,
 } from './fixtures/core-sdk-fixture.js';
 import type { AgentInfo } from '../src/core.js';
+import { parseStreamingJson, type AssistantMessage } from '@earendil-works/pi-ai';
 import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as os from 'node:os';
@@ -42,11 +43,10 @@ const {
 } = await import('../src/core.js');
 
 describe('observer stream reconstruction', () => {
-  test('assembles delta-only messages and distinguishes tool calls from thinking', () => {
-    const stream = new RpcAssistantStreamState();
-    stream.start({
+  function assistant(content: AssistantMessage['content'] = []): AssistantMessage {
+    return {
       role: 'assistant',
-      content: [],
+      content,
       api: 'test',
       provider: 'test',
       model: 'fake',
@@ -60,7 +60,21 @@ describe('observer stream reconstruction', () => {
       },
       stopReason: 'pending',
       timestamp: Date.now(),
+    };
+  }
+
+  function startTool(stream: InstanceType<typeof RpcAssistantStreamState>, index = 0) {
+    stream.update({
+      type: 'toolcall_start',
+      contentIndex: index,
+      id: 'call-' + index,
+      toolName: 'read',
     });
+  }
+
+  test('assembles delta-only messages and distinguishes tool calls from thinking', () => {
+    const stream = new RpcAssistantStreamState();
+    stream.start(assistant());
 
     stream.update({ type: 'thinking_start', contentIndex: 0 });
     stream.update({ type: 'thinking_delta', contentIndex: 0, delta: 'checking' });
@@ -88,6 +102,187 @@ describe('observer stream reconstruction', () => {
       name: 'read',
       arguments: { path: 'src/ui.rs' },
     });
+  });
+
+  test('parses pending arguments once on demand, retaining the raw prefix for further deltas', () => {
+    const stream = new RpcAssistantStreamState();
+    stream.start(assistant());
+    startTool(stream);
+    startTool(stream, 1);
+    const parse = spyOn(JSON, 'parse');
+    try {
+      const prefix = '{"code":"' + 'x'.repeat(32 * 1024);
+      stream.update({ type: 'toolcall_delta', contentIndex: 0, delta: '{"code":"' });
+      for (let index = 0; index < 32; index++)
+        stream.update({ type: 'toolcall_delta', contentIndex: 0, delta: 'x'.repeat(1024) });
+      stream.update({ type: 'toolcall_delta', contentIndex: 1, delta: '{"path":"中文"}' });
+      expect(stream.status).toBe('calling');
+      expect(stream.snapshotToolArguments()).toEqual([
+        [0, prefix],
+        [1, '{"path":"中文"}'],
+      ]);
+      expect(parse).not.toHaveBeenCalled();
+
+      const message = stream.message;
+      expect(message?.content[0]).toMatchObject({ arguments: { code: 'x'.repeat(32 * 1024) } });
+      expect(message?.content[1]).toMatchObject({ arguments: { path: '中文' } });
+      const parsed = parse.mock.calls.length;
+      expect(parsed).toBeGreaterThan(0);
+      expect(stream.message).toBe(message);
+      expect(stream.flushToolArguments()).toBe(false);
+      expect(parse.mock.calls.length).toBe(parsed);
+      expect(stream.snapshotToolArguments()[0]).toEqual([0, prefix]);
+
+      const tail = '\\n中文😀","nested":{"items":[1,{"ok":true}]}}';
+      stream.update({ type: 'toolcall_delta', contentIndex: 0, delta: tail });
+      expect(parse.mock.calls.length).toBe(parsed);
+      expect(stream.message?.content[0]).toMatchObject({
+        arguments: {
+          code: 'x'.repeat(32 * 1024) + '\n中文😀',
+          nested: { items: [1, { ok: true }] },
+        },
+      });
+      expect(stream.snapshotToolArguments()[0]).toEqual([0, prefix + tail]);
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
+  test('sync/resume at every delta boundary preserves escaped, nested and Unicode arguments', () => {
+    const args = { code: '中文😀\n"quoted"\\tail', nested: { items: [1, { ok: true }], empty: null } };
+    const raw = JSON.stringify(args);
+    const stream = new RpcAssistantStreamState();
+    stream.start(assistant());
+    startTool(stream);
+    for (let index = 0; index <= raw.length; index++) {
+      if (index) stream.update({ type: 'toolcall_delta', contentIndex: 0, delta: raw[index - 1] });
+      const prefix = raw.slice(0, index);
+      expect(stream.message?.content[0]).toMatchObject({ arguments: parseStreamingJson(prefix) });
+      expect(stream.snapshotToolArguments()).toEqual([[0, prefix]]);
+      const resumed = new RpcAssistantStreamState();
+      resumed.resume(
+        structuredClone(stream.message!),
+        stream.status,
+        stream.snapshotToolArguments(),
+      );
+      resumed.update({ type: 'toolcall_delta', contentIndex: 0, delta: raw.slice(index) });
+      expect(resumed.message?.content[0]).toMatchObject({
+        id: 'call-0',
+        name: 'read',
+        arguments: args,
+      });
+      expect(resumed.snapshotToolArguments()).toEqual([[0, raw]]);
+    }
+  });
+
+  test.each(['toolcall_end', 'cumulative', 'finish'])(
+    '%s adopts authoritative arguments without parsing stale pending fragments',
+    (source) => {
+      const stream = new RpcAssistantStreamState();
+      stream.start(assistant());
+      startTool(stream);
+      stream.update({ type: 'toolcall_delta', contentIndex: 0, delta: '{"stale":' });
+      const call = Object.freeze({
+        type: 'toolCall' as const,
+        id: 'final',
+        name: 'read',
+        arguments: Object.freeze({ path: 'final' }),
+      });
+      const final = assistant([call]);
+      const parse = spyOn(JSON, 'parse');
+      try {
+        if (source === 'toolcall_end')
+          stream.update({ type: source, contentIndex: 0, toolCall: call });
+        else if (source === 'cumulative')
+          stream.update({ type: 'toolcall_delta', contentIndex: 0 }, final);
+        else stream.finish(final);
+        expect(stream.message?.content[0]).toBe(call);
+        expect(stream.flushToolArguments()).toBe(false);
+        expect(parse).not.toHaveBeenCalled();
+        expect(stream.snapshotToolArguments()).toEqual([]);
+      } finally {
+        parse.mockRestore();
+      }
+    },
+  );
+
+  test('finish without a replacement message preserves the last pending arguments', () => {
+    const stream = new RpcAssistantStreamState();
+    stream.start(assistant());
+    startTool(stream);
+    stream.update({ type: 'toolcall_delta', contentIndex: 0, delta: '{"path":"last"}' });
+    stream.finish();
+    expect(stream.snapshotToolArguments()).toEqual([]);
+    expect(stream.message?.content[0]).toMatchObject({ arguments: { path: 'last' } });
+  });
+
+  test.each(['start', 'clear', 'resume', 'text_start', 'thinking_start', 'toolcall_start'])(
+    '%s discards pending arguments before a new message or content block replaces them',
+    (source) => {
+      const stream = new RpcAssistantStreamState();
+      stream.start(assistant());
+      startTool(stream);
+      stream.update({ type: 'toolcall_delta', contentIndex: 0, delta: '{"old":true}' });
+      const parse = spyOn(JSON, 'parse');
+      try {
+        if (source === 'start') stream.start(assistant());
+        else if (source === 'clear') stream.clear();
+        else if (source === 'resume') stream.resume(assistant(), 'streaming');
+        else stream.update({ type: source, contentIndex: 0 });
+        expect(stream.flushToolArguments()).toBe(false);
+        if (source === 'clear') expect(stream.message).toBeNull();
+        else if (source === 'start' || source === 'resume')
+          expect(stream.message?.content).toEqual([]);
+        else
+          expect(stream.message?.content[0]).toMatchObject({
+            type:
+              source === 'toolcall_start'
+                ? 'toolCall'
+                : source === 'text_start'
+                  ? 'text'
+                  : 'thinking',
+          });
+        expect(stream.snapshotToolArguments()).toEqual(source === 'toolcall_start' ? [[0, '']] : []);
+        expect(parse).not.toHaveBeenCalled();
+      } finally {
+        parse.mockRestore();
+      }
+    },
+  );
+
+  test('broadcasting delta-only updates never parses arguments, including with a connected observer', () => {
+    const broadcaster = new EventBroadcaster(randomUUID());
+    const write = mock(() => true);
+    broadcaster['connections'].push({ write } as any);
+    broadcaster.broadcast({ type: 'message_start', message: assistant() });
+    const emit = (delta: any) =>
+      broadcaster.broadcast({ type: 'message_update', assistantMessageEvent: delta });
+    emit({ type: 'toolcall_start', contentIndex: 0, id: 'call-0', toolName: 'read' });
+    const parse = spyOn(JSON, 'parse');
+    try {
+      for (const delta of ['{"path":"', '中文', '\\n', '😀"}'])
+        emit({ type: 'toolcall_delta', contentIndex: 0, delta });
+      expect(write).toHaveBeenCalledTimes(6);
+      expect(parse).not.toHaveBeenCalled();
+      expect(broadcaster['assistantStream'].snapshotToolArguments()).toEqual([
+        [0, '{"path":"中文\\n😀"}'],
+      ]);
+      expect(broadcaster['assistantStream'].message?.content[0]).toMatchObject({
+        arguments: { path: '中文\n😀' },
+      });
+      const parsed = parse.mock.calls.length;
+      emit({
+        type: 'toolcall_end',
+        contentIndex: 0,
+        toolCall: { type: 'toolCall', id: 'call-0', name: 'read', arguments: { path: 'final' } },
+      });
+      expect(broadcaster['assistantStream'].message?.content[0]).toMatchObject({
+        arguments: { path: 'final' },
+      });
+      expect(parse.mock.calls.length).toBe(parsed);
+    } finally {
+      parse.mockRestore();
+    }
   });
 });
 

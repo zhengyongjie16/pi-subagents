@@ -1349,6 +1349,85 @@ describe('overlay creation paths and native lifecycle', () => {
     },
   );
 
+  test('coalesces argument parsing until render without creating a render-request loop', () => {
+    const { overlay, requestRender } = createOverlay();
+    overlay['handleEvent']({ type: 'message_start', message: assistant() });
+    overlay['handleEvent']({
+      type: 'message_update',
+      assistantMessageEvent: {
+        type: 'toolcall_start',
+        contentIndex: 0,
+        id: 'call-1',
+        toolName: 'custom_tool',
+      },
+    });
+    const component = overlay['pendingTools'].get('call-1')!.component;
+    const args = { path: '中文😀', nested: { items: [1, true] }, text: 'x'.repeat(4096) };
+    const raw = JSON.stringify(args);
+    const parse = spyOn(JSON, 'parse');
+    try {
+      for (let index = 0; index < raw.length; index += 128)
+        overlay['handleEvent']({
+          type: 'message_update',
+          assistantMessageEvent: {
+            type: 'toolcall_delta',
+            contentIndex: 0,
+            delta: raw.slice(index, index + 128),
+          },
+        });
+      expect(parse).not.toHaveBeenCalled();
+      expect(component['args']).toEqual({});
+      overlay.render(82);
+      expect(overlay['pendingTools'].get('call-1')!.component).toBe(component);
+      expect(component['args']).toEqual(args);
+      const parsed = parse.mock.calls.length;
+      expect(parsed).toBeGreaterThan(0);
+      const requests = requestRender.mock.calls.length;
+      overlay.render(82);
+      expect(parse.mock.calls.length).toBe(parsed);
+      expect(requestRender.mock.calls.length).toBe(requests);
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
+  test.each(['toolUse', 'aborted', 'error'] as const)(
+    '%s final arguments reach tool rows even when no intermediate frame was rendered',
+    (stopReason) => {
+      const { overlay } = createOverlay();
+      overlay['handleEvent']({ type: 'message_start', message: assistant() });
+      overlay['handleEvent']({
+        type: 'message_update',
+        assistantMessageEvent: {
+          type: 'toolcall_start',
+          contentIndex: 0,
+          id: 'call-1',
+          toolName: 'custom_tool',
+        },
+      });
+      overlay['handleEvent']({
+        type: 'message_update',
+        assistantMessageEvent: {
+          type: 'toolcall_delta',
+          contentIndex: 0,
+          delta: '{"path":"pending',
+        },
+      });
+      const component = overlay['pendingTools'].get('call-1')!.component;
+      const args = { path: 'final 中文😀' };
+      const message = {
+        ...assistant([toolCall('custom_tool', 'call-1', args)]),
+        stopReason,
+        errorMessage: 'stopped',
+      };
+      overlay['handleEvent']({ type: 'message_end', message });
+      expect(component['args']).toEqual(args);
+      if (stopReason === 'toolUse') expect(component['argsComplete']).toBe(true);
+      else expect(component['result']?.isError).toBe(true);
+      expect(overlay['assistantStream'].message).toBeNull();
+    },
+  );
+
   test('message_update creation and message_end args completion wait for actual execution evidence', () => {
     const { overlay } = createOverlay();
     const message = assistant([toolCall()]);

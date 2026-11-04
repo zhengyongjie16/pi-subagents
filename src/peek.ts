@@ -339,7 +339,7 @@ export class SubagentPeekOverlay {
         delta?.type === 'toolcall_end'
           ? this.streamingMessage?.content[delta.contentIndex]
           : undefined;
-      this.assistantStream.update(delta, event.message);
+      this.streamingMessage = this.assistantStream.update(delta, event.message);
       if (previous?.type === 'toolCall' && previous.id !== delta.toolCall?.id) {
         const component = this.pendingTools.get(previous.id)?.component;
         if (component) {
@@ -348,7 +348,6 @@ export class SubagentPeekOverlay {
         }
         this.pendingTools.delete(previous.id);
       }
-      this.streamingMessage = this.assistantStream.message;
       if (this.streamingMessage) this.streamingComponent!.updateContent(this.streamingMessage);
       this.status = this.assistantStream.status;
       this.syncToolComponentsFromMessage();
@@ -357,6 +356,7 @@ export class SubagentPeekOverlay {
         this.assistantStream.finish(event.message);
         this.streamingMessage = this.assistantStream.message;
         this.streamingComponent.updateContent(this.streamingMessage!);
+        this.syncToolComponentsFromMessage();
         if (event.message.stopReason === 'aborted' || event.message.stopReason === 'error') {
           const errorMessage = event.message.errorMessage || 'Error';
           for (const { component } of this.pendingTools.values()) {
@@ -565,6 +565,7 @@ export class SubagentPeekOverlay {
   render(width: number): string[] {
     if (this.disposed) return [];
     if (width < 3) return [];
+    if (this.assistantStream.flushToolArguments()) this.syncToolComponentsFromMessage();
     const innerWidth = width - 2;
     const title = ` ${this.info.taskName} `;
     const modelTag = this.modelName ? `[${truncateToWidth(this.modelName, 18)}] ` : '';
