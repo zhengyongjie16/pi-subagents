@@ -73,7 +73,7 @@ export class SubagentPeekOverlay {
   private lastFileSize = 0;
   private contextUsage: ContextUsage | undefined;
   private lastInfoReadAt: number;
-  private historyDirty = false; // A loaded snapshot may still await replay after live execution.
+  private historyDirty = false; // Observed file changes have not been loaded yet.
   private readonly chatContainer = new Container();
   private scrollOffset = 0;
   private followMode = true;
@@ -124,13 +124,16 @@ export class SubagentPeekOverlay {
     this.pollInterval = setInterval(() => this.poll(), 200);
   }
 
-  private loadSession(): void {
+  private loadSession(): boolean {
     try {
-      if (!fs.existsSync(this.sessionFile)) return;
+      if (!fs.existsSync(this.sessionFile)) return false;
       this.sessionManager = SessionManager.open(this.sessionFile);
       this.lastFileSize = fs.statSync(this.sessionFile).size;
+      this.historyDirty = false;
+      return true;
     } catch {
       this.sessionManager = null;
+      return false;
     }
   }
 
@@ -149,7 +152,6 @@ export class SubagentPeekOverlay {
     this.cleanupStreaming();
     this.invalidateCache();
     this.chatContainer.clear();
-    this.historyDirty = false;
     if (!this.sessionManager) return;
     const context = this.sessionManager.buildSessionContext();
     for (const message of context.messages) {
@@ -497,10 +499,7 @@ export class SubagentPeekOverlay {
       this.connectSocket();
     try {
       const size = fs.statSync(this.sessionFile).size;
-      if (size !== this.lastFileSize) {
-        this.loadSession();
-        this.historyDirty = true;
-      }
+      if (size !== this.lastFileSize) this.historyDirty = true;
       if (!this.historyDirty) return;
       const hasLiveUpdates =
         this.socket &&
@@ -508,6 +507,7 @@ export class SubagentPeekOverlay {
         !this.socket.destroyed &&
         (this.streamingComponent || [...this.pendingTools.values()].some((tool) => tool.executing));
       if (hasLiveUpdates) return;
+      if (!this.loadSession()) return;
       this.rebuildChat();
       this.invalidateCache();
       if (this.followMode) this.scrollOffset = Number.MAX_SAFE_INTEGER;

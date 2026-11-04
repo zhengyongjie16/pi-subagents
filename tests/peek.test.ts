@@ -1752,7 +1752,7 @@ describe('overlay creation paths and native lifecycle', () => {
     expectNativeLines(restored, reference);
   });
 
-  test('deferred history is consumed after execution ends without rereading an unchanged file', () => {
+  test('defers history loading during execution and loads the latest snapshot once it ends', () => {
     const directory = fs.mkdtempSync(join(tmpdir(), 'pi-peek-deferred-'));
     temporaryDirectories.push(directory);
     const session = SessionManager.create(cwd, directory);
@@ -1762,6 +1762,8 @@ describe('overlay creation paths and native lifecycle', () => {
     const component = start(overlay);
     progress(overlay);
     overlay['socket'] = { connecting: false, destroyed: false, destroy() {} } as any;
+    const snapshot = overlay['sessionManager'];
+    const previousSize = overlay['lastFileSize'];
     const final = freeze(textResult('persisted before end event', { durationMs: 5100 }));
     session.appendMessage({
       role: 'toolResult',
@@ -1770,23 +1772,36 @@ describe('overlay creation paths and native lifecycle', () => {
       ...final,
       timestamp: 1001,
     });
-    const load = spyOn(overlay as any, 'loadSession');
+    const open = spyOn(SessionManager, 'open');
     try {
       const requests = requestRender.mock.calls.length;
+      for (let index = 0; index < 3; index++) {
+        session.appendMessage({
+          role: 'user',
+          content: 'deferred update ' + index,
+          timestamp: 1002 + index,
+        });
+        overlay['poll']();
+        expect(overlay['historyDirty']).toBe(true);
+        expect(overlay['pendingTools'].get('call-1')!.component).toBe(component);
+        expect(overlay['sessionManager']).toBe(snapshot);
+        expect(overlay['lastFileSize']).toBe(previousSize);
+        expect(open).not.toHaveBeenCalled();
+        expect(requestRender.mock.calls).toHaveLength(requests);
+      }
       overlay['poll']();
-      expect(overlay['historyDirty']).toBe(true);
-      expect(overlay['pendingTools'].get('call-1')!.component).toBe(component);
-      expect(load).toHaveBeenCalledTimes(1);
-      expect(requestRender.mock.calls).toHaveLength(requests);
-      overlay['poll']();
-      expect(load).toHaveBeenCalledTimes(1);
+      expect(open).not.toHaveBeenCalled();
       const size = fs.statSync(file).size;
       overlay['handleEvent']({ type: 'tool_execution_end', toolCallId: 'call-1', result: final });
       expect(clock!.nativeTimers()).toHaveLength(0);
       overlay['poll']();
-      expect(load).toHaveBeenCalledTimes(1);
-      expect(fs.statSync(file).size).toBe(size);
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(overlay['lastFileSize']).toBe(size);
       expect(overlay['historyDirty']).toBe(false);
+      expect(overlay['sessionManager']!.buildSessionContext().messages.at(-1)).toMatchObject({
+        role: 'user',
+        content: 'deferred update 2',
+      });
       const restored = toolRows(overlay)[0];
       expect(restored).not.toBe(component);
       expect(restored['executionStarted']).toBe(false);
@@ -1794,10 +1809,167 @@ describe('overlay creation paths and native lifecycle', () => {
       const reference = referenceTool('codemode', codeArgs, nativeCodemodeRenderers);
       reference.updateResult(final);
       expectNativeLines(restored, reference);
+      overlay['poll']();
+      expect(open).toHaveBeenCalledTimes(1);
     } finally {
-      load.mockRestore();
+      open.mockRestore();
     }
   });
+
+  test('defers history loading while an assistant streams without changing manual scrolling', () => {
+    const { overlay, session } = createSavedOverlay();
+    overlay['socket'] = { connecting: false, destroyed: false, destroy() {} } as any;
+    const message = {
+      ...assistant([{ type: 'text', text: 'streamed final response' }]),
+      stopReason: 'stop' as const,
+    };
+    overlay['handleEvent']({ type: 'message_start', message: assistant() });
+    overlay['handleEvent']({
+      type: 'message_update',
+      message,
+      assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'streamed final response' },
+    });
+    overlay.handleInput('g');
+    overlay.render(80);
+    const streaming = overlay['streamingComponent'];
+    const snapshot = overlay['sessionManager'];
+    const previousSize = overlay['lastFileSize'];
+    const cached = overlay['cachedLines'];
+    const offset = overlay['scrollOffset'];
+    const open = spyOn(SessionManager, 'open');
+    try {
+      session.appendMessage(message);
+      for (let index = 0; index < 3; index++) overlay['poll']();
+      expect(open).not.toHaveBeenCalled();
+      expect(overlay['historyDirty']).toBe(true);
+      expect(overlay['sessionManager']).toBe(snapshot);
+      expect(overlay['lastFileSize']).toBe(previousSize);
+      expect(overlay['streamingComponent']).toBe(streaming);
+      expect(overlay['cachedLines']).toBe(cached);
+      expect(overlay['scrollOffset']).toBe(offset);
+      overlay['handleEvent']({ type: 'message_end', message });
+      expect(overlay['streamingComponent']).toBeNull();
+      overlay['poll']();
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(overlay['historyDirty']).toBe(false);
+      expect(overlay['lastFileSize']).toBe(fs.statSync(session.getSessionFile()!).size);
+      expect(overlay['sessionManager']!.buildSessionContext().messages.at(-1)).toMatchObject(message);
+      expect(overlay['followMode']).toBe(false);
+      expect(overlay['scrollOffset']).toBe(offset);
+      overlay.handleInput('G');
+      expect(stripVTControlCharacters(overlay.render(80).join('\n'))).toContain(
+        'streamed final response',
+      );
+      overlay['poll']();
+      expect(open).toHaveBeenCalledTimes(1);
+    } finally {
+      open.mockRestore();
+    }
+  });
+
+  test.each([false, true])(
+    'replays an observed file change even if its size returns to the loaded size (load failure=%s)',
+    (failOnce) => {
+      const directory = fs.mkdtempSync(join(tmpdir(), 'pi-peek-rewritten-'));
+      temporaryDirectories.push(directory);
+      const session = SessionManager.create(cwd, directory);
+      session.appendMessage({ role: 'user', content: 'old content', timestamp: 1000 });
+      session.appendMessage(assistant([toolCall()]));
+      const file = session.getSessionFile()!;
+      const original = fs.readFileSync(file, 'utf8');
+      const { overlay } = createOverlay({}, file);
+      start(overlay);
+      overlay['socket'] = { connecting: false, destroyed: false, destroy() {} } as any;
+      const previousSize = overlay['lastFileSize'];
+      const open = spyOn(SessionManager, 'open');
+      try {
+        session.appendMessage({ role: 'user', content: 'temporary tail', timestamp: 1001 });
+        overlay['poll']();
+        expect(overlay['historyDirty']).toBe(true);
+        expect(open).not.toHaveBeenCalled();
+        fs.writeFileSync(file, original.replace('old content', 'new content'));
+        expect(fs.statSync(file).size).toBe(previousSize);
+        overlay['poll']();
+        expect(overlay['historyDirty']).toBe(true);
+        expect(open).not.toHaveBeenCalled();
+        overlay['handleEvent']({
+          type: 'tool_execution_end',
+          toolCallId: 'call-1',
+          result: textResult('completed'),
+        });
+        if (failOnce) {
+          open.mockImplementationOnce(() => {
+            throw new Error('temporary session read failure');
+          });
+          const children = [...overlay['chatContainer'].children];
+          overlay['poll']();
+          expect(open).toHaveBeenCalledTimes(1);
+          expect(overlay['historyDirty']).toBe(true);
+          expect(overlay['lastFileSize']).toBe(previousSize);
+          expect(overlay['chatContainer'].children).toEqual(children);
+        }
+        overlay['poll']();
+        expect(open).toHaveBeenCalledTimes(failOnce ? 2 : 1);
+        expect(overlay['historyDirty']).toBe(false);
+        expect(overlay['sessionManager']!.buildSessionContext().messages[0]).toMatchObject({
+          role: 'user',
+          content: 'new content',
+        });
+        overlay['poll']();
+        expect(open).toHaveBeenCalledTimes(failOnce ? 2 : 1);
+      } finally {
+        open.mockRestore();
+      }
+    },
+  );
+
+  test.each(['sync', 'agent_settled', 'close'])(
+    '%s retries deferred history after a failed explicit load without retaining native timers',
+    (transition) => {
+      const { overlay, session } = createSavedOverlay();
+      const file = session.getSessionFile()!;
+      const original = fs.readFileSync(file, 'utf8');
+      const socket = Object.assign(new EventEmitter(), {
+        connecting: false,
+        destroyed: false,
+        destroy() {},
+      });
+      const connect = spyOn(net, 'connect').mockReturnValue(socket as any);
+      try {
+        overlay['connectSocket']();
+      } finally {
+        connect.mockRestore();
+      }
+      start(overlay);
+      progress(overlay);
+      const previousSize = overlay['lastFileSize'];
+      session.appendMessage({ role: 'user', content: 'temporary tail', timestamp: 1001 });
+      overlay['poll']();
+      expect(overlay['historyDirty']).toBe(true);
+      expect(overlay['lastFileSize']).toBe(previousSize);
+      fs.writeFileSync(file, original.replace('chat_line_100', 'chat_line_999'));
+      expect(fs.statSync(file).size).toBe(previousSize);
+      const open = spyOn(SessionManager, 'open').mockImplementationOnce(() => {
+        throw new Error('temporary explicit session read failure');
+      });
+      try {
+        if (transition === 'close') socket.emit('close');
+        else overlay['handleEvent']({ type: transition });
+        expect(open).toHaveBeenCalledTimes(1);
+        expect(clock!.nativeTimers()).toHaveLength(0);
+        expect(overlay['historyDirty']).toBe(true);
+        overlay['poll']();
+        expect(open).toHaveBeenCalledTimes(2);
+        expect(overlay['historyDirty']).toBe(false);
+        overlay.handleInput('G');
+        expect(stripVTControlCharacters(overlay.render(80).join('\n'))).toContain('chat_line_999');
+        overlay['poll']();
+        expect(open).toHaveBeenCalledTimes(2);
+      } finally {
+        open.mockRestore();
+      }
+    },
+  );
 
   test.each(['disconnected', 'destroyed', 'connecting'])(
     'poll preserves live pending rows but %s socket state permits file fallback and releases timers',
@@ -1830,20 +2002,26 @@ describe('overlay creation paths and native lifecycle', () => {
       expect(overlay['pendingTools'].get('call-1')!.executing).toBe(true);
       expect(toolRows(overlay)[0]).toBe(component);
       expect(clock!.timers.has(timerId)).toBe(true);
-      expect(overlay['lastFileSize']).toBeGreaterThan(previousSize);
-      expect(overlay['lastFileSize']).toBe(fs.statSync(file).size);
+      expect(overlay['lastFileSize']).toBe(previousSize);
+      expect(fs.statSync(file).size).toBeGreaterThan(previousSize);
       expect(overlay['historyDirty']).toBe(true);
       expect(
         overlay['sessionManager']!.buildSessionContext().messages.some(
           (message) => message.role === 'toolResult',
         ),
-      ).toBe(true);
+      ).toBe(false);
+      session.appendMessage({ role: 'user', content: 'latest file fallback', timestamp: 1002 });
       if (state === 'disconnected') overlay['socket'] = null;
       else if (state === 'destroyed') socket.destroyed = true;
       else socket.connecting = true;
-      // Replay deferred history once live updates are unavailable.
+      // Load the latest history once live updates are unavailable.
       overlay['poll']();
+      expect(overlay['lastFileSize']).toBe(fs.statSync(file).size);
       expect(overlay['historyDirty']).toBe(false);
+      expect(overlay['sessionManager']!.buildSessionContext().messages.at(-1)).toMatchObject({
+        role: 'user',
+        content: 'latest file fallback',
+      });
       expect(clock!.clear).toHaveBeenCalledWith(timerId);
       expect(clock!.nativeTimers()).toHaveLength(0);
       expect(overlay['pendingTools'].size).toBe(0);
@@ -2224,7 +2402,8 @@ describe('observer socket integration', () => {
     expect(overlay['pendingTools'].get('c')!.component).toBe(c);
     session.appendMessage(persistedResult('a', 'a result'));
     overlay['poll']();
-    const deferredSize = overlay['lastFileSize'];
+    const deferredSize = fs.statSync(info.sessionFile).size;
+    expect(overlay['lastFileSize']).toBeLessThan(deferredSize);
     emit(end('c', textResult('c result')));
     await waitUntil(() => !overlay['pendingTools'].has('c'));
     overlay['poll']();
