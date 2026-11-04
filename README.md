@@ -49,7 +49,6 @@ provider: openai-codex
 model: gpt-5.6-sol
 thinking: high
 tools: read,bash,grep,find,ls
-skills: web-investigate
 extensions: @scope/pi-extra-tools, ~/.pi/agent/extensions/local-helper.ts
 hint: Give this reviewer exact file paths and a narrow scope.
 ---
@@ -59,11 +58,13 @@ You are a focused review subagent. Return concise findings with file paths.
 
 `provider` and `model` are optional. A template `model` uses its `provider` when set, otherwise the parent's current provider. When `model` is omitted, the child inherits both the parent's provider and model. `thinking` is also optional and otherwise inherits the parent. Template `tools` override inherited tool names.
 
-`skills` may contain skill names or paths. `extensions` may contain local files/directories or npm package names already installed by Pi. Package names are resolved from project-local packages first and then Pi's global npm directory. Missing packages are never installed automatically.
+`extensions` may contain local files/directories or npm package names already installed by Pi. Package names are resolved from project-local packages first and then Pi's global npm directory. Missing packages are never installed automatically.
 
 When a template loads extensions but omits `tools`, the child uses Pi's normal tool activation so tools registered by those extensions are available. Set template `tools` when you want an explicit allowlist. Without configured extensions, omitted template tools inherit the parent's active tool names.
 
-Automatic extension, skill, prompt-template, theme, and context-file discovery is disabled in children. `AGENTS.md` and `CLAUDE.md` files are excluded from automatic loading. Each child replaces Pi's default coding prompt with the contents of `~/.pi/agent/pi-subagents/SYSTEM.md`, while only explicitly configured skills and extensions load. This file is created with a minimal subagent prompt when first used and can be edited directly. If the selected model comes from an extension-registered provider, add that provider extension to the selected template or configured defaults so the child can resolve it.
+Children discover skills through Pi's native resource loader, using their working directory, Pi settings, and effective project trust. With a file-reading tool available, model-invocable skill names, descriptions, and locations are advertised to the model; full instructions are read when needed. Parent-session skill selections are not copied. This extension does not support `spawn_agent.skills`, template `skills`, or `defaults.skills`; remove those keys from existing callers and configurations. Existing history is not migrated, and legacy skill fields in saved run metadata no longer control resource loading.
+
+Automatic extension, prompt-template, theme, and context-file discovery remains disabled. `AGENTS.md` and `CLAUDE.md` files are excluded from automatic loading. Each child replaces Pi's default coding prompt with the contents of `~/.pi/agent/pi-subagents/SYSTEM.md`, and loads only explicitly configured extensions. This file is created with a minimal subagent prompt when first used and can be edited directly. If the selected model comes from an extension-registered provider, add that provider extension to the selected template or configured defaults so the child can resolve it.
 
 For the parent's working directory, each creation/resume uses the parent's current project-trust decision. Other directories follow Pi's trust store and headless policy.
 
@@ -83,7 +84,6 @@ Optional configuration lives at:
   "models": ["openai-codex/gpt-5.6-sol", "anthropic/claude-opus-4-6"],
   "modelsFromEnabledModels": true,
   "defaults": {
-    "skills": ["web-investigate"],
     "extensions": ["@scope/pi-extra-tools"]
   }
 }
@@ -97,7 +97,7 @@ Optional configuration lives at:
 
 Configuration is read when agents spawn, while cleanup runs when the agent manager initializes. Restart Pi after changing `storageDir` or `retentionDays` so storage lookup and cleanup use the same configuration throughout the process.
 
-Template skills and extensions override configured defaults. Skills explicitly requested by the parent are added to configured template/default skills. Tool selection belongs to the template or is inherited from the parent. A `model` and `thinking` level requested by the parent override the template and the inherited values, so one task can run on another model without a template.
+Template extensions override configured defaults. Tool selection belongs to the template or is inherited from the parent. A `model` and `thinking` level requested by the parent override the template and the inherited values, so one task can run on another model without a template.
 
 ## Model routing
 

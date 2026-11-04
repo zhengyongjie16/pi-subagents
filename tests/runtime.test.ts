@@ -31,7 +31,7 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
     assert.equal(result.status, 0, output);
     assert.match(
       output,
-      /explicit SYSTEM\/skills\/extensions only/,
+      /native skill discovery with explicit SYSTEM\/extensions/,
       'child must execute the real suite, not silently skip it',
     );
     console.log(output.trim());
@@ -119,8 +119,13 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
     const systemPromptPath = path.join(root, 'child-SYSTEM.md');
     const configPath = path.join(extensionDir, 'sdk-fixture.json');
     const eventsPath = path.join(extensionDir, 'sdk-events.jsonl');
-    const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-    process.env.PI_CODING_AGENT_DIR = agentDir;
+    const previousEnvironment = Object.fromEntries(
+      ['PI_CODING_AGENT_DIR', 'HOME'].map((key) => [key, process.env[key]]),
+    );
+    Object.assign(process.env, {
+      PI_CODING_AGENT_DIR: agentDir,
+      HOME: path.join(root, 'home'),
+    });
     const sessions = new Set<AgentSession>();
     const pending: Promise<AgentSession>[] = [];
     const errors: unknown[] = [];
@@ -133,6 +138,7 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
       extensionPaths: [extensionPath],
     };
     fs.mkdirSync(cwd, { recursive: true });
+    fs.mkdirSync(path.join(root, '.git'), { recursive: true });
     fs.mkdirSync(path.dirname(info.sessionFile), { recursive: true });
     write(extensionPath, fs.readFileSync(fixtureSource, 'utf8'));
     json(configPath, config);
@@ -222,8 +228,10 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
           }
         }),
       );
-      if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-      else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+      for (const [key, value] of Object.entries(previousEnvironment)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
       fs.rmSync(root, { recursive: true, force: true });
     }
   }
@@ -241,7 +249,7 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
     return accepted;
   }
 
-  test('explicit SYSTEM/skills/extensions only; no global, ancestor or project discovery', async () =>
+  test('native skill discovery with explicit SYSTEM/extensions; other automatic resources stay disabled', async () =>
     withFixture({}, async (f) => {
       const marker = 'FORBIDDEN_DEFAULT_RESOURCE';
       for (const dir of [
@@ -260,48 +268,98 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
           write(path.join(dir, name), marker);
       }
       for (const dir of [f.agentDir, path.join(f.cwd, CONFIG_DIR_NAME)]) {
-        write(
-          path.join(dir, 'skills', 'default-skill', 'SKILL.md'),
-          '---\nname: default-skill\ndescription: ' + marker + '\n---\nDefault body',
-        );
         write(path.join(dir, 'prompts', 'default-template.md'), marker);
+        write(path.join(dir, 'themes', 'default.json'), '{ invalid theme');
         write(
           path.join(dir, 'extensions', 'default.ts'),
           'export default () => { throw new Error("default extension must not load"); };',
         );
       }
+      const projectSkill = path.join(f.cwd, CONFIG_DIR_NAME, 'skills', 'project-skill', 'SKILL.md');
+      for (const [file, name, extra] of [
+        [path.join(f.agentDir, 'skills', 'user-skill', 'SKILL.md'), 'user-skill', ''],
+        [projectSkill, 'project-skill', ''],
+        [path.join(path.dirname(f.cwd), '.agents', 'skills', 'ancestor-skill', 'SKILL.md'), 'ancestor-skill', ''],
+        [path.join(f.agentDir, 'skills', 'hidden-skill', 'SKILL.md'), 'hidden-skill', 'disable-model-invocation: true\n'],
+      ]) {
+        write(file, '---\nname: ' + name + '\ndescription: AUTO_DESCRIPTION_' + name + '\n' + extra + '---\nAUTO_SKILL_BODY_' + name);
+      }
       write(
-        path.join(path.dirname(f.cwd), '.agents', 'skills', 'ancestor-skill', 'SKILL.md'),
-        '---\nname: ancestor-skill\ndescription: ' + marker + '\n---\nBody',
+        path.join(f.root, 'parent-only-skill', 'SKILL.md'),
+        '---\nname: parent-only-skill\ndescription: FORBIDDEN_PARENT_SKILL\n---\nNot a discovered resource.',
       );
-      const skillPath = path.join(f.root, 'chosen-skill', 'SKILL.md');
-      write(
-        skillPath,
-        '---\nname: chosen-skill\ndescription: EXPLICIT_SKILL_DESCRIPTION\n---\nEXPLICIT_SKILL_BODY',
-      );
-      const session = await f.create({
-        projectTrusted: true,
-        info: { ...f.info, skillPaths: [skillPath] },
-      });
+      const session = await f.create({ projectTrusted: true });
       assert.deepEqual(session.messages, []);
       assert.match(session.systemPrompt, /CHILD_EXPLICIT_SYSTEM/);
-      assert.match(session.systemPrompt, /EXPLICIT_SKILL_DESCRIPTION/);
-      assert.doesNotMatch(session.systemPrompt, /FORBIDDEN_DEFAULT_RESOURCE|EXPLICIT_SKILL_BODY/);
+      for (const name of ['user-skill', 'project-skill', 'ancestor-skill'])
+        assert.ok(session.systemPrompt.includes('AUTO_DESCRIPTION_' + name));
+      assert.ok(session.systemPrompt.includes(projectSkill));
+      assert.doesNotMatch(session.systemPrompt, /FORBIDDEN_|AUTO_SKILL_BODY_|AUTO_DESCRIPTION_hidden-skill/);
       assert.deepEqual(session.resourceLoader.getAgentsFiles().agentsFiles, []);
       assert.deepEqual(session.resourceLoader.getAppendSystemPrompt(), []);
       assert.deepEqual(session.resourceLoader.getPrompts().prompts, []);
       assert.deepEqual(session.resourceLoader.getThemes().themes, []);
-      assert.deepEqual(
-        session.resourceLoader.getSkills().skills.map((skill) => skill.name),
-        ['chosen-skill'],
-      );
+      const skills = session.resourceLoader.getSkills().skills;
+      assert.deepEqual(skills.map((skill) => skill.name).sort(), [
+        'ancestor-skill', 'hidden-skill', 'project-skill', 'user-skill',
+      ]);
+      assert.equal(skills.find((skill) => skill.name === 'hidden-skill')?.disableModelInvocation, true);
+      const reader = session.agent.state.tools.find((tool) => tool.name === 'read');
+      assert.ok(reader, 'native read tool must remain available');
+      const result = await reader.execute('skill-read', { path: projectSkill }, new AbortController().signal);
+      assert.match(JSON.stringify(result.content), /AUTO_SKILL_BODY_project-skill/);
       await prompt(session, 'Template body still belongs in the first user message');
       const request = f.events().find((event) => event.type === 'request')!;
       assert.deepEqual(request.userTexts, [
         'Template body still belongs in the first user message',
       ]);
-      assert.doesNotMatch(request.systemPrompt, /FORBIDDEN_DEFAULT_RESOURCE/);
+      assert.doesNotMatch(request.systemPrompt, /FORBIDDEN_|AUTO_SKILL_BODY_|AUTO_DESCRIPTION_hidden-skill/);
       assert.deepEqual(f.errors, []);
+    }));
+
+  for (const trusted of [false, true]) {
+    test('native project skill discovery respects effective trust: ' + trusted, async () =>
+      withFixture({}, async (f) => {
+        for (const [dir, name] of [
+          [path.join(f.agentDir, 'skills'), 'trusted-user-skill'],
+          [path.join(f.cwd, CONFIG_DIR_NAME, 'skills'), 'trusted-project-skill'],
+          [path.join(path.dirname(f.cwd), '.agents', 'skills'), 'trusted-ancestor-skill'],
+        ]) {
+          write(path.join(dir, name, 'SKILL.md'), '---\nname: ' + name + '\ndescription: Trust fixture\n---\nBody');
+        }
+        const session = await f.create({ projectTrusted: trusted });
+        assert.deepEqual(session.resourceLoader.getSkills().skills.map((skill) => skill.name).sort(),
+          trusted
+            ? ['trusted-ancestor-skill', 'trusted-project-skill', 'trusted-user-skill']
+            : ['trusted-user-skill']);
+      }));
+  }
+
+  test('native Pi skill exclusions remain effective', async () =>
+    withFixture({}, async (f) => {
+      for (const name of ['included-skill', 'excluded-skill'])
+        write(path.join(f.agentDir, 'skills', name, 'SKILL.md'),
+          '---\nname: ' + name + '\ndescription: Native settings fixture\n---\nBody');
+      json(path.join(f.agentDir, 'settings.json'), {
+        ...baseSettings, skills: ['-skills/excluded-skill'],
+      });
+      const session = await f.create();
+      assert.deepEqual(session.resourceLoader.getSkills().skills.map((skill) => skill.name), ['included-skill']);
+      assert.doesNotMatch(session.systemPrompt, /excluded-skill/);
+    }));
+
+  test('retired persisted skill fields are not consumed when reopening a child', async () =>
+    withFixture({}, async (f) => {
+      const skillPath = path.join(f.root, 'retired-skill', 'SKILL.md');
+      write(skillPath, '---\nname: retired-skill\ndescription: RETIRED_SKILL_MARKER\n---\nBody');
+      const legacyInfo = {
+        ...f.info,
+        skills: ['retired-skill'],
+        skillPaths: [skillPath, path.join(f.root, 'missing-retired-skill.md')],
+      };
+      const session = await f.create({ info: legacyInfo });
+      assert.deepEqual(session.resourceLoader.getSkills().skills, []);
+      assert.doesNotMatch(session.systemPrompt, /RETIRED_SKILL_MARKER/);
     }));
 
   test('SYSTEM file whose text is another path is read once, not reinterpreted', async () =>
@@ -512,9 +570,9 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
 
   test('ordinary skill warnings are logged rather than promoted to startup failure', async () =>
     withFixture({}, async (f) => {
-      const invalidSkill = path.join(f.root, 'warning-skill', 'SKILL.md');
+      const invalidSkill = path.join(f.agentDir, 'skills', 'warning-skill', 'SKILL.md');
       write(invalidSkill, '---\nname: warning-skill\n---\nMissing description');
-      await f.create({ info: { ...f.info, skillPaths: [invalidSkill] } });
+      await f.create();
       assert.equal(
         f.logs.filter((message) => message.includes('warning') && message.includes('description'))
           .length,

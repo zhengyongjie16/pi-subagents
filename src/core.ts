@@ -80,7 +80,6 @@ export interface SubagentConfig {
   modelsFromEnabledModels?: boolean;
   modelResponseTimeoutMs?: number;
   defaults?: {
-    skills?: string[];
     extensions?: string[];
   };
 }
@@ -93,7 +92,6 @@ export interface AgentDefinition {
   model?: string;
   thinking?: ThinkingLevel;
   tools?: string;
-  skills?: string[];
   extensions?: string[];
   prompt?: string;
 }
@@ -110,8 +108,6 @@ export interface AgentInfo {
   model: string;
   thinking?: ThinkingLevel;
   tools?: string;
-  skills?: string[];
-  skillPaths?: string[];
   extensions?: string[];
   extensionPaths?: string[];
   cwd: string;
@@ -150,8 +146,6 @@ export interface SpawnAgentParams {
   task_name: string;
   message: string;
   agent_type?: string;
-  skills?: string[];
-  loadedSkillPaths?: Record<string, string>;
   cwd: string;
   parentSessionId: string;
   parentSessionFile?: string;
@@ -272,7 +266,6 @@ function normalizeConfig(value: unknown): SubagentConfig {
       : undefined;
   const defaults = defaultsRaw
     ? {
-        ...(stringList(defaultsRaw.skills) ? { skills: stringList(defaultsRaw.skills) } : {}),
         ...(stringList(defaultsRaw.extensions)
           ? { extensions: stringList(defaultsRaw.extensions) }
           : {}),
@@ -632,7 +625,6 @@ export function parseAgentDefinitionText(text: string, fallbackName: string): Ag
     model: attrs.model?.trim() || undefined,
     thinking: isThinkingLevel(attrs.thinking) ? attrs.thinking : undefined,
     tools: attrs.tools,
-    skills: stringList(attrs.skills),
     extensions: stringList(attrs.extensions),
     prompt: (match ? text.slice(match[0].length) : text).trim() || undefined,
   };
@@ -689,77 +681,6 @@ function normalizeList(values?: string[]): string[] | undefined {
     new Set((values ?? []).map((value) => value.trim()).filter(Boolean)),
   );
   return normalized.length ? normalized : undefined;
-}
-
-function findNearestSkillDirs(cwd: string): string[] {
-  const directories: string[] = [];
-  let current = cwd;
-  while (true) {
-    directories.push(path.join(current, CONFIG_DIR_NAME, 'skills'));
-    directories.push(path.join(current, '.agents', 'skills'));
-    const parent = path.dirname(current);
-    if (parent === current) break;
-    current = parent;
-  }
-  return directories;
-}
-
-function parseSkillName(content: string): string | undefined {
-  const match = content.match(/^---\s*\n([\s\S]*?)\n---/);
-  const frontmatter = match?.[1] ?? content.slice(0, 2048);
-  return frontmatter.match(/^name:\s*["']?([^"'\n]+)["']?\s*$/m)?.[1]?.trim();
-}
-
-function resolveSkillPath(skill: string, cwd: string): string {
-  const expanded = expandHome(skill);
-  if (path.isAbsolute(expanded) || expanded.startsWith('.')) {
-    const candidate = path.resolve(cwd, expanded);
-    if (fs.existsSync(candidate)) return candidate;
-    throw new Error(`Skill path not found: ${skill}`);
-  }
-  const npmRoot = path.join(getAgentDir(), 'npm', 'node_modules');
-  const roots = [
-    path.join(getAgentDir(), 'skills'),
-    path.join(os.homedir(), '.agents', 'skills'),
-    ...findNearestSkillDirs(cwd),
-    npmRoot,
-  ];
-  for (const root of roots) {
-    const directDirectory = path.join(root, skill);
-    if (fs.existsSync(path.join(directDirectory, 'SKILL.md'))) return directDirectory;
-    const directMarkdown = path.join(root, `${skill}.md`);
-    if (fs.existsSync(directMarkdown)) return directMarkdown;
-  }
-  const stack = fs.existsSync(npmRoot) ? [npmRoot] : [];
-  while (stack.length) {
-    const directory = stack.pop()!;
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(directory, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    const skillFile = path.join(directory, 'SKILL.md');
-    if (fs.existsSync(skillFile)) {
-      try {
-        if (parseSkillName(fs.readFileSync(skillFile, 'utf8')) === skill) return directory;
-      } catch {}
-    }
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      if (entry.name === 'node_modules' && directory !== npmRoot) continue;
-      stack.push(path.join(directory, entry.name));
-    }
-  }
-  throw new Error(`Skill not found: ${skill}`);
-}
-
-function resolveSkillPaths(
-  skills: string[] | undefined,
-  cwd: string,
-  loadedSkillPaths?: Record<string, string>,
-): string[] | undefined {
-  return skills?.map((skill) => loadedSkillPaths?.[skill] ?? resolveSkillPath(skill, cwd));
 }
 
 function looksLikePath(value: string): boolean {
@@ -1390,8 +1311,6 @@ export class AgentManager {
       templateModel ?? { provider: params.inheritedProvider, modelId: params.inheritedModelId };
     const config = loadSubagentConfig();
     readSystemPrompt();
-    const configuredSkills = definition?.skills ?? config.defaults?.skills;
-    const skills = normalizeList([...(configuredSkills ?? []), ...(params.skills ?? [])]);
     const extensions = normalizeList(definition?.extensions ?? config.defaults?.extensions);
     const tools =
       definition?.tools !== undefined
@@ -1434,8 +1353,6 @@ export class AgentManager {
         model: `${provider}:${modelId}`,
         thinking,
         tools,
-        skills,
-        skillPaths: resolveSkillPaths(skills, cwd, params.loadedSkillPaths),
         extensions,
         extensionPaths: resolveExtensionPaths(extensions, cwd),
         cwd,

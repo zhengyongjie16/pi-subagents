@@ -334,9 +334,16 @@ Review the requested files.`,
       model: 'gpt-5.6-sol',
       thinking: 'high',
       extensions: ['@scope/tools', '~/.pi/helper.ts'],
-      skills: ['web-investigate'],
       prompt: 'Review the requested files.',
     });
+    expect(Object.hasOwn(definition, 'skills')).toBe(false);
+  });
+
+  test('ignores retired skill defaults without changing extension defaults', () => {
+    writeConfig({ defaults: { skills: ['missing-retired-skill'], extensions: [CORE_SDK_EXTENSION] } });
+    expect(loadSubagentConfig().defaults).toEqual({ extensions: [CORE_SDK_EXTENSION] });
+    writeConfig({ defaults: { skills: ['missing-retired-skill'] } });
+    expect(loadSubagentConfig().defaults).toBeUndefined();
   });
 
   test('trims routing values and treats blank values as omitted', () => {
@@ -2673,7 +2680,7 @@ describe('SDK business scope, waits and resources', () => {
     }
   });
 
-  test('passes only its SYSTEM path and explicitly resolved template/skill resources, with fresh context', async () => {
+  test('discovers skills independently while retaining explicit SYSTEM/extensions and fresh context', async () => {
     const parent = 'resource-policy-' + randomUUID();
     const root = fs.mkdtempSync(path.join(TEST_AGENT_DIR, 'resources-'));
     const cwd = path.join(root, 'project', 'nested');
@@ -2701,17 +2708,17 @@ describe('SDK business scope, waits and resources', () => {
     }
     put(
       path.join(cwd, '.pi', 'skills', 'unselected', 'SKILL.md'),
-      '---\nname: unselected\ndescription: FORBIDDEN_AUTO_SKILL\n---\nDo not discover this.',
+      '---\nname: unselected\ndescription: AUTO_CORE_SKILL_DESCRIPTION\n---\nAutomatically discovered skill body.',
     );
     const skill = path.join(root, 'explicit-skill', 'SKILL.md');
     put(
       skill,
-      '---\nname: explicit-core-skill\ndescription: EXPLICIT_CORE_SKILL_DESCRIPTION\n---\nExplicit skill body.',
+      '---\nname: parent-only-skill\ndescription: FORBIDDEN_PARENT_SKILL\n---\nParent-only skill body.',
     );
     const template = path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents', 'resource-policy.md');
     put(
       template,
-      '---\nname: resource-policy\nskills: explicit-core-skill\n---\nEXPLICIT_TEMPLATE_BODY',
+      '---\nname: resource-policy\n---\nEXPLICIT_TEMPLATE_BODY',
     );
     const parentSession = codingAgent.SessionManager.create(cwd, root);
     parentSession.appendMessage({
@@ -2726,11 +2733,13 @@ describe('SDK business scope, waits and resources', () => {
         cwd,
         agent_type: 'resource-policy',
         parentSessionFile: parentSession.getSessionFile()!,
-        loadedSkillPaths: { 'explicit-core-skill': path.dirname(skill) },
       });
       const info = manager.getAgentInfo('worker', parent);
       await released(manager, info);
-      expect(info.skillPaths).toEqual([path.dirname(skill)]);
+      for (const snapshot of [info, JSON.parse(fs.readFileSync(info.infoFile, 'utf8'))]) {
+        expect(Object.hasOwn(snapshot, 'skills')).toBe(false);
+        expect(Object.hasOwn(snapshot, 'skillPaths')).toBe(false);
+      }
       expect(info.extensionPaths).toEqual([CORE_SDK_EXTENSION]);
       expect(info.cwd).toBe(cwd);
       expect(fixture.instances).toHaveLength(1);
@@ -2738,14 +2747,21 @@ describe('SDK business scope, waits and resources', () => {
       expect(request.text).toBe('EXPLICIT_TEMPLATE_BODY\n\nassigned work');
       const input = JSON.stringify(request.context);
       expect(input).toContain(literalTarget.replaceAll('\\', '\\\\'));
-      expect(input).toContain('EXPLICIT_CORE_SKILL_DESCRIPTION');
+      expect(input).toContain('AUTO_CORE_SKILL_DESCRIPTION');
       expect(input).not.toContain('FORBIDDEN_');
-      expect(input).not.toContain('Explicit skill body.');
+      expect(input).not.toContain('Automatically discovered skill body.');
       fs.writeFileSync(ownSystem, 'UPDATED_OWN_SYSTEM');
+      put(
+        path.join(cwd, '.pi', 'skills', 'added-on-resume', 'SKILL.md'),
+        '---\nname: added-on-resume\ndescription: RESUMED_AUTO_SKILL_DESCRIPTION\n---\nNew skill body.',
+      );
       await manager.sendMessage(parent, 'worker', 'continuation');
       await released(manager, info);
       expect(JSON.stringify(fixture.instances[1].requests[0].context)).toContain(
         'UPDATED_OWN_SYSTEM',
+      );
+      expect(JSON.stringify(fixture.instances[1].requests[0].context)).toContain(
+        'RESUMED_AUTO_SKILL_DESCRIPTION',
       );
       expect(fixture.instances[1].requests[0].text).toBe('continuation');
       const nativeList = await codingAgent.SessionManager.list(cwd);

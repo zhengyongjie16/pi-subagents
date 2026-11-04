@@ -23,19 +23,23 @@ export function useTestAgentDir(): string {
     [
       'PI_SUBAGENT_TEMP_DIR',
       'PI_CODING_AGENT_DIR',
+      'HOME',
       'PI_OFFLINE',
       'PI_SKIP_VERSION_CHECK',
       'PI_TELEMETRY',
     ].map((key) => [key, process.env[key]]),
   );
+  // Native user skill discovery uses HOME; keep USERPROFILE unchanged for Bun module resolution.
   Object.assign(process.env, {
     PI_SUBAGENT_TEMP_DIR: testAgentDir,
     PI_CODING_AGENT_DIR: testAgentDir,
+    HOME: testAgentDir,
     PI_OFFLINE: '1',
     PI_SKIP_VERSION_CHECK: '1',
     PI_TELEMETRY: '0',
   });
   fs.mkdirSync(path.join(testAgentDir, 'pi-subagents', 'agents'), { recursive: true });
+  fs.mkdirSync(path.join(testAgentDir, '.git'), { recursive: true });
   fs.writeFileSync(
     path.join(testAgentDir, 'settings.json'),
     JSON.stringify({

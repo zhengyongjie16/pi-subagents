@@ -215,7 +215,7 @@ test('uses the native render context for errors without changing successful tool
   );
 });
 
-test('preserves the six schemas, dynamic routing/skills, tool arguments, and return wrappers', () => {
+test('preserves the six schemas, dynamic routing, tool arguments, and return wrappers', () => {
   probe(
     hostFixture +
       String.raw`
@@ -229,7 +229,7 @@ test('preserves the six schemas, dynamic routing/skills, tool arguments, and ret
     const object = (properties, required = []) => ({ type: "object", properties, ...(required.length ? { required } : {}) });
     const string = { type: "string" }, targets = { type: "array", items: string };
     assert.deepEqual(plain(f.tools.get("spawn_agent").parameters), object({
-      task_name: string, message: string, agent_type: string, skills: targets,
+      task_name: string, message: string, agent_type: string,
     }, ["task_name", "message"]));
     assert.deepEqual(plain(f.tools.get("wait_agent").parameters), object({ targets }));
     assert.deepEqual(plain(f.tools.get("list_agents").parameters), object({
@@ -246,22 +246,30 @@ test('preserves the six schemas, dynamic routing/skills, tool arguments, and ret
     assert.deepEqual(spawnSchema.properties.model, { type: "string", enum: ["test/fake"] });
     assert.deepEqual(spawnSchema.properties.thinking.enum, ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
     assert.deepEqual(spawnSchema.required, ["task_name", "message"]);
-    await f.emit("before_agent_start", { systemPromptOptions: { skills: [
-      { name: "chosen", description: "selected", filePath: "/skill/SKILL.md" },
-      { name: "hidden", disableModelInvocation: true, filePath: "/hidden/SKILL.md" },
-    ] } });
-    assert.ok(f.tools.get("spawn_agent").description.includes("chosen"));
-    assert.ok(!f.tools.get("spawn_agent").description.includes("hidden"));
+    const description = f.tools.get("spawn_agent").description;
+    assert.ok(description.includes("Skills are discovered automatically by the child session."));
+    assert.ok(!description.includes("Available parent skills"));
+    assert.ok(!Object.hasOwn(spawnSchema.properties, "skills"));
+    for (const skills of [
+      [{ name: "parent-only-marker", description: "selected", filePath: "/skill/SKILL.md" }],
+      [{ name: "hidden-marker", disableModelInvocation: true, filePath: "/hidden/SKILL.md" }],
+      [],
+    ]) {
+      await f.emit("before_agent_start", { systemPromptOptions: { skills } });
+      assert.equal(f.tools.get("spawn_agent").description, description);
+      assert.deepEqual(plain(f.tools.get("spawn_agent").parameters), spawnSchema);
+    }
     let spawned;
     AgentManager.prototype.spawnAgent = async params => { spawned = params; return { task_name: "/task", nickname: null }; };
     AgentManager.prototype.getAgentInfo = () => ({ provider: "test", modelId: "fake", thinking: "high" });
-    const spawn = await f.call("spawn_agent", { task_name: "task", message: "work", skills: ["chosen"], model: "test/fake", thinking: "high" });
+    const spawn = await f.call("spawn_agent", { task_name: "task", message: "work", model: "test/fake", thinking: "high" });
     assert.deepEqual(spawn, { content: [{ type: "text", text: "Spawned /task." }], details: { task_name: "/task", nickname: null, provider: "test", modelId: "fake", thinking: "high" } });
     assert.equal(spawned.parentSessionId, "parent");
     assert.equal(spawned.cwd, f.ctx.cwd);
     assert.equal(spawned.parentSessionFile, "parent.jsonl");
     assert.equal(spawned.inheritedTools, "read");
-    assert.deepEqual(spawned.loadedSkillPaths, { chosen: "/skill/SKILL.md" });
+    assert.ok(!Object.hasOwn(spawned, "skills"));
+    assert.ok(!Object.hasOwn(spawned, "loadedSkillPaths"));
     const signal = new AbortController().signal;
     let waited;
     AgentManager.prototype.waitAgent = async (...args) => { waited = args; return { message: "done", event: { status: "completed" } }; };

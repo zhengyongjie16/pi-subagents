@@ -129,8 +129,6 @@ export default async function index_(pi: ExtensionAPI) {
 
   const widgetKey = 'pi-subagents';
   const completionMessageType = 'pi-subagent-completion';
-  let cachedSkills: Array<{ name: string; description: string; filePath: string }> = [];
-  let cachedSkillsSignature = '';
   let activeContext: any;
   const activeAgents = new Set<string>();
 
@@ -316,7 +314,7 @@ export default async function index_(pi: ExtensionAPI) {
     name: 'spawn_agent',
     label: 'Spawn Agent',
     get description() {
-      return `Spawn a fresh-context Pi subagent for a concrete task. Automatic extension, skill, and prompt-template discovery is disabled. Agent templates may configure a model with an optional provider, thinking level, tools, skills, and extensions. A template model without a provider uses the current parent provider at spawn; without a model, both provider and model inherit (provider-only templates do not reroute). A caller model overrides the template route. Exact registered provider/model IDs are required, and any provider extension must be explicitly loaded in the child. Other omitted template settings inherit from the parent where applicable.
+      return `Spawn a fresh-context Pi subagent for a concrete task. Skills are discovered automatically by the child session. Automatic extension and prompt-template discovery is disabled. Agent templates may configure a model with an optional provider, thinking level, tools, and extensions. A template model without a provider uses the current parent provider at spawn; without a model, both provider and model inherit (provider-only templates do not reroute). A caller model overrides the template route. Exact registered provider/model IDs are required, and any provider extension must be explicitly loaded in the child. Other omitted template settings inherit from the parent where applicable.
 ${
   spawnModels.size
     ? `
@@ -329,10 +327,7 @@ Returns after the child accepts its initial task. Continue with independent work
 \`agent_type\` is optional. Omit it for a generic subagent. Use a template only when the task matches it.
 
 Available agent templates:
-${getAgentDefinitionsDescription()}
-
-Available parent skills that may be added by name:
-${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${skill.description}`).join('\n') : 'No model-invocable skills are loaded in the parent session.'}`;
+${getAgentDefinitionsDescription()}`;
     },
     get parameters() {
       return Type.Object({
@@ -344,12 +339,6 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
         agent_type: Type.Optional(
           Type.String({
             description: 'Optional agent template name from ~/.pi/agent/pi-subagents/agents/.',
-          }),
-        ),
-        skills: Type.Optional(
-          Type.Array(Type.String(), {
-            description:
-              'Additional skill names from the loaded parent skills listed in this tool description.',
           }),
         ),
         ...(spawnModels.size
@@ -385,17 +374,6 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
       const currentModel = ctx.model;
       if (!currentModel?.provider || !currentModel?.id)
         throw new Error('spawn_agent failed: the parent has no active provider/model pair.');
-      const requestedSkills: string[] = params.skills ?? [];
-      const loadedSkillPaths = Object.fromEntries(
-        cachedSkills.map((skill) => [skill.name, skill.filePath]),
-      );
-      const unavailableSkills = requestedSkills.filter(
-        (skill) => !Object.hasOwn(loadedSkillPaths, skill),
-      );
-      if (unavailableSkills.length)
-        throw new Error(
-          `spawn_agent failed: skills are not loaded in the parent session: ${unavailableSkills.join(', ')}`,
-        );
       const model = params.model ? spawnModels.get(params.model) : undefined;
       if (params.model && !model)
         throw new Error(
@@ -425,8 +403,6 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
           task_name: params.task_name,
           message: params.message,
           agent_type: params.agent_type,
-          skills: requestedSkills,
-          loadedSkillPaths,
           cwd: ctx.cwd,
           parentSessionId: parentSessionId(ctx),
           parentSessionFile: ctx.sessionManager.getSessionFile?.(),
@@ -498,30 +474,6 @@ ${cachedSkills.length ? cachedSkills.map((skill) => `- \`${skill.name}\` — ${s
         activeAgents.add(entry.agent_name);
     }
     refreshAgentWidget();
-  });
-
-  pi.on('before_agent_start', async (event: any) => {
-    const skills = event?.systemPromptOptions?.skills;
-    const nextSkills = Array.isArray(skills)
-      ? skills
-          .filter(
-            (skill: any) =>
-              !skill?.disableModelInvocation &&
-              typeof skill?.name === 'string' &&
-              typeof skill?.filePath === 'string',
-          )
-          .map((skill: any) => ({
-            name: skill.name,
-            description: String(skill.description || ''),
-            filePath: skill.filePath,
-          }))
-      : [];
-    const signature = JSON.stringify(nextSkills);
-    if (signature !== cachedSkillsSignature) {
-      cachedSkills = nextSkills;
-      cachedSkillsSignature = signature;
-      pi.registerTool(spawnAgentTool);
-    }
   });
 
   pi.on('session_shutdown', async (_event, ctx) => {

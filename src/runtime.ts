@@ -21,7 +21,6 @@ export interface ChildSessionOptions {
     modelId: string;
     thinking?: AgentSession['thinkingLevel'];
     tools?: string;
-    skillPaths?: string[];
     extensionPaths?: string[];
   };
   systemPromptPath: string;
@@ -103,13 +102,11 @@ export async function createChildSession(options: ChildSessionOptions): Promise<
     settingsManager,
     resourceLoaderOptions: {
       noContextFiles: true,
-      noSkills: true,
       noExtensions: true,
       noPromptTemplates: true,
       noThemes: true,
       systemPrompt: systemPromptPath,
       appendSystemPrompt: [],
-      additionalSkillPaths: info.skillPaths,
       additionalExtensionPaths: info.extensionPaths,
     },
   });
