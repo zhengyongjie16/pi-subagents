@@ -150,7 +150,10 @@ describe('observer stream reconstruction', () => {
   });
 
   test('sync/resume at every delta boundary preserves escaped, nested and Unicode arguments', () => {
-    const args = { code: '中文😀\n"quoted"\\tail', nested: { items: [1, { ok: true }], empty: null } };
+    const args = {
+      code: '中文😀\n"quoted"\\tail',
+      nested: { items: [1, { ok: true }], empty: null },
+    };
     const raw = JSON.stringify(args);
     const stream = new RpcAssistantStreamState();
     stream.start(assistant());
@@ -243,7 +246,9 @@ describe('observer stream reconstruction', () => {
                   ? 'text'
                   : 'thinking',
           });
-        expect(stream.snapshotToolArguments()).toEqual(source === 'toolcall_start' ? [[0, '']] : []);
+        expect(stream.snapshotToolArguments()).toEqual(
+          source === 'toolcall_start' ? [[0, '']] : [],
+        );
         expect(parse).not.toHaveBeenCalled();
       } finally {
         parse.mockRestore();
@@ -340,48 +345,52 @@ Review the requested files.`,
     expect(Object.hasOwn(definition, 'skills')).toBe(false);
   });
 
-  test.each(['\n', '\r\n'])('parses multiline description and hint without changing other fields (%j)', (newline) => {
-    const definition = parseAgentDefinitionText(
-      [
-        '---',
-        'name: explorer',
-        'description: |- # keep structure',
-        '  Use explorer: # literal text',
-        '  <rules>',
-        '    <rule>Reuse & trust "results".</rule>',
-        '  </rules>',
-        '',
-        '    model: not-a-route',
-        '  ---',
-        'hint: |-',
-        '  Give exact paths.',
-        '  - Scope:',
-        '    - One question.',
-        '  caller_hint: literal text',
-        'caller_hint: Fallback hint.',
-        'provider: " template-provider "',
-        'model: " template-model "',
-        'thinking: off',
-        'tools:',
-        'extensions: @scope/tools, ~/.pi/helper.ts',
-        '---',
-        'Child instructions.',
-        'description: this belongs to the body',
-      ].join(newline),
-      'fallback',
-    );
-    expect(definition).toEqual({
-      name: 'explorer',
-      description: 'Use explorer: # literal text\n<rules>\n  <rule>Reuse & trust "results".</rule>\n</rules>\n\n  model: not-a-route\n---',
-      hint: 'Give exact paths.\n- Scope:\n  - One question.\ncaller_hint: literal text',
-      provider: 'template-provider',
-      model: 'template-model',
-      thinking: 'off',
-      tools: '',
-      extensions: ['@scope/tools', '~/.pi/helper.ts'],
-      prompt: ['Child instructions.', 'description: this belongs to the body'].join(newline),
-    });
-  });
+  test.each(['\n', '\r\n'])(
+    'parses multiline description and hint without changing other fields (%j)',
+    (newline) => {
+      const definition = parseAgentDefinitionText(
+        [
+          '---',
+          'name: explorer',
+          'description: |- # keep structure',
+          '  Use explorer: # literal text',
+          '  <rules>',
+          '    <rule>Reuse & trust "results".</rule>',
+          '  </rules>',
+          '',
+          '    model: not-a-route',
+          '  ---',
+          'hint: |-',
+          '  Give exact paths.',
+          '  - Scope:',
+          '    - One question.',
+          '  caller_hint: literal text',
+          'caller_hint: Fallback hint.',
+          'provider: " template-provider "',
+          'model: " template-model "',
+          'thinking: off',
+          'tools:',
+          'extensions: @scope/tools, ~/.pi/helper.ts',
+          '---',
+          'Child instructions.',
+          'description: this belongs to the body',
+        ].join(newline),
+        'fallback',
+      );
+      expect(definition).toEqual({
+        name: 'explorer',
+        description:
+          'Use explorer: # literal text\n<rules>\n  <rule>Reuse & trust "results".</rule>\n</rules>\n\n  model: not-a-route\n---',
+        hint: 'Give exact paths.\n- Scope:\n  - One question.\ncaller_hint: literal text',
+        provider: 'template-provider',
+        model: 'template-model',
+        thinking: 'off',
+        tools: '',
+        extensions: ['@scope/tools', '~/.pi/helper.ts'],
+        prompt: ['Child instructions.', 'description: this belongs to the body'].join(newline),
+      });
+    },
+  );
 
   test.each([
     ['|', 'First.\nSecond.\n'],
@@ -395,7 +404,16 @@ Review the requested files.`,
   ])('uses native YAML block semantics for all descriptive fields: %s', (style, expected) => {
     for (const field of ['description', 'hint', 'caller_hint']) {
       const definition = parseAgentDefinitionText(
-        ['---', field + ': ' + style, '  First.', '  Second.', '', 'model: fake', '---', 'Body.'].join('\n'),
+        [
+          '---',
+          field + ': ' + style,
+          '  First.',
+          '  Second.',
+          '',
+          'model: fake',
+          '---',
+          'Body.',
+        ].join('\n'),
         'fallback',
       );
       expect(field === 'description' ? definition.description : definition.hint).toBe(expected);
@@ -409,14 +427,25 @@ Review the requested files.`,
     (style) => {
       for (const field of ['description', 'hint', 'caller_hint']) {
         for (const blankLines of [0, 1, 2]) {
-          const block = [field + ': ' + style, '  First.', '  Second.', ...Array(blankLines).fill('')];
+          const block = [
+            field + ': ' + style,
+            '  First.',
+            '  Second.',
+            ...Array(blankLines).fill(''),
+          ];
           // Keep a following key in the native reference so the SDK preserves the YAML's final newline.
-          const expected = codingAgent.parseFrontmatter(['---', ...block, 'model: fake', '---'].join('\n'))
-            .frontmatter[field];
+          const expected = codingAgent.parseFrontmatter(
+            ['---', ...block, 'model: fake', '---'].join('\n'),
+          ).frontmatter[field];
           for (const newline of ['\n', '\r\n']) {
             for (const suffix of [[], ['model: fake']]) {
-              const definition = parseAgentDefinitionText(['---', ...block, ...suffix, '---', 'Body.'].join(newline), 'fallback');
-              expect(field === 'description' ? definition.description : definition.hint).toBe(expected);
+              const definition = parseAgentDefinitionText(
+                ['---', ...block, ...suffix, '---', 'Body.'].join(newline),
+                'fallback',
+              );
+              expect(field === 'description' ? definition.description : definition.hint).toBe(
+                expected,
+              );
               expect(definition.prompt).toBe('Body.');
             }
           }
@@ -434,28 +463,35 @@ Review the requested files.`,
       expect(read(field + ':|-\n  First.\n  Second.')).toBe('First.\nSecond.');
       expect(read(field + ': "|"')).toBe('|');
       expect(read(field + ": '>-'")).toBe('>-');
-      expect(read(field + ': inline\n' + field + ': |-\n  First.\n  Second.')).toBe('First.\nSecond.');
+      expect(read(field + ': inline\n' + field + ': |-\n  First.\n  Second.')).toBe(
+        'First.\nSecond.',
+      );
       expect(read(field + ': |-\n  First.\n  Second.\n' + field + ': inline')).toBe('inline');
     }
   });
 
   test('preserves legacy inline values, ignored lines and last-key-wins behavior', () => {
     const hint = String.raw`Keep \n literal and \"quotes\".`;
-    expect(parseAgentDefinitionText([
-      '---',
-      'name: initial',
-      'description: Rules: prefer # literal text',
-      'hint: "' + hint + '"',
-      'provider: on',
-      'model: 123',
-      'tools:',
-      'extensions: @scope/tools, +codemode',
-      'ignored line',
-      '  ignored: nested text',
-      'name: final',
-      '---',
-      'Body.',
-    ].join('\n'), 'fallback')).toMatchObject({
+    expect(
+      parseAgentDefinitionText(
+        [
+          '---',
+          'name: initial',
+          'description: Rules: prefer # literal text',
+          'hint: "' + hint + '"',
+          'provider: on',
+          'model: 123',
+          'tools:',
+          'extensions: @scope/tools, +codemode',
+          'ignored line',
+          '  ignored: nested text',
+          'name: final',
+          '---',
+          'Body.',
+        ].join('\n'),
+        'fallback',
+      ),
+    ).toMatchObject({
       name: 'final',
       description: 'Rules: prefer # literal text',
       hint,
@@ -465,26 +501,44 @@ Review the requested files.`,
       extensions: ['@scope/tools', '+codemode'],
       prompt: 'Body.',
     });
-    expect(parseAgentDefinitionText('---\ndescription: > ordinary inline text\nhint: | ordinary inline text\n---', 'fallback'))
-      .toMatchObject({ description: '> ordinary inline text', hint: '| ordinary inline text' });
-    expect(parseAgentDefinitionText('No frontmatter.\nBody.', 'fallback'))
-      .toMatchObject({ name: 'fallback', prompt: 'No frontmatter.\nBody.' });
+    expect(
+      parseAgentDefinitionText(
+        '---\ndescription: > ordinary inline text\nhint: | ordinary inline text\n---',
+        'fallback',
+      ),
+    ).toMatchObject({ description: '> ordinary inline text', hint: '| ordinary inline text' });
+    expect(parseAgentDefinitionText('No frontmatter.\nBody.', 'fallback')).toMatchObject({
+      name: 'fallback',
+      prompt: 'No frontmatter.\nBody.',
+    });
   });
 
   test('keeps hint precedence and supports multiline caller_hint fallback', () => {
     const fallback = 'caller_hint: |-\n  First fallback.\n  Second fallback.\n';
     for (const hint of ['', 'hint:\n', 'hint: |-\n']) {
-      expect(parseAgentDefinitionText('---\n' + hint + fallback + '---', 'fallback').hint)
-        .toBe('First fallback.\nSecond fallback.');
+      expect(parseAgentDefinitionText('---\n' + hint + fallback + '---', 'fallback').hint).toBe(
+        'First fallback.\nSecond fallback.',
+      );
     }
-    expect(parseAgentDefinitionText('---\n' + fallback + 'hint: |-\n  Preferred.\n  Hint.\n---', 'fallback').hint)
-      .toBe('Preferred.\nHint.');
+    expect(
+      parseAgentDefinitionText(
+        '---\n' + fallback + 'hint: |-\n  Preferred.\n  Hint.\n---',
+        'fallback',
+      ).hint,
+    ).toBe('Preferred.\nHint.');
   });
 
   test('rejects malformed blocks instead of treating their markers as descriptions', () => {
     for (const field of ['description', 'hint', 'caller_hint']) {
-      expect(() => parseAgentDefinitionText('---\n' + field + ': |0\n  Text.\n---', 'fallback')).toThrow();
-      expect(() => parseAgentDefinitionText('---\n' + field + ': |-\n   First.\n  Bad indentation.\n---', 'fallback')).toThrow();
+      expect(() =>
+        parseAgentDefinitionText('---\n' + field + ': |0\n  Text.\n---', 'fallback'),
+      ).toThrow();
+      expect(() =>
+        parseAgentDefinitionText(
+          '---\n' + field + ': |-\n   First.\n  Bad indentation.\n---',
+          'fallback',
+        ),
+      ).toThrow();
     }
   });
 
@@ -498,7 +552,9 @@ Review the requested files.`,
       fs.writeFileSync(valid, '---\ndescription: |-\n  First.\n  Second.\n---');
       fs.writeFileSync(invalid, '---\nhint: |0\n  Invalid.\n---');
       const definitions = listAgentDefinitions();
-      expect(definitions.find(({ name }) => name === 'valid-multiline')?.description).toBe('First.\nSecond.');
+      expect(definitions.find(({ name }) => name === 'valid-multiline')?.description).toBe(
+        'First.\nSecond.',
+      );
       expect(definitions.some(({ name }) => name === 'invalid-multiline')).toBe(false);
       expect(warn).toHaveBeenCalledTimes(1);
       expect(String(warn.mock.calls[0][0])).toContain(invalid);
@@ -512,8 +568,10 @@ Review the requested files.`,
   test('formats multiline descriptions and hints separately from route metadata', () => {
     const directory = path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents');
     const templates = {
-      'multiline-both': 'description: |\n  Explore.\n\n  <rules>\n    <rule>Reuse & trust.</rule>\n  </rules>\nhint: |\n  Give paths.\n  - Narrow scope.\nmodel: fake\nthinking: high\nextensions: @scope/tools',
-      'multiline-hint': 'description: Inline description.\ncaller_hint: |-\n  First hint.\n  Second hint.',
+      'multiline-both':
+        'description: |\n  Explore.\n\n  <rules>\n    <rule>Reuse & trust.</rule>\n  </rules>\nhint: |\n  Give paths.\n  - Narrow scope.\nmodel: fake\nthinking: high\nextensions: @scope/tools',
+      'multiline-hint':
+        'description: Inline description.\ncaller_hint: |-\n  First hint.\n  Second hint.',
       'single-line': 'description: Inline description.\nhint: Inline hint.\nmodel: fake',
     };
     fs.mkdirSync(directory, { recursive: true });
@@ -522,27 +580,36 @@ Review the requested files.`,
         fs.writeFileSync(path.join(directory, name + '.md'), '---\n' + fields + '\n---');
       }
       const description = getAgentDefinitionsDescription();
-      expect(description).toContain([
-        '- `multiline-both` — model: fake (inherited provider) — thinking: high — extensions: @scope/tools',
-        '  Description:',
-        '    Explore.',
-        '    ',
-        '    <rules>',
-        '      <rule>Reuse & trust.</rule>',
-        '    </rules>',
-        '  Caller hint:',
-        '    Give paths.',
-        '    - Narrow scope.',
-      ].join('\n'));
-      expect(description).toContain('- `multiline-hint` — Inline description.\n  Caller hint:\n    First hint.\n    Second hint.');
-      expect(description).toContain('- `single-line` — Inline description. — model: fake (inherited provider)\n  Caller hint: Inline hint.');
+      expect(description).toContain(
+        [
+          '- `multiline-both` — model: fake (inherited provider) — thinking: high — extensions: @scope/tools',
+          '  Description:',
+          '    Explore.',
+          '    ',
+          '    <rules>',
+          '      <rule>Reuse & trust.</rule>',
+          '    </rules>',
+          '  Caller hint:',
+          '    Give paths.',
+          '    - Narrow scope.',
+        ].join('\n'),
+      );
+      expect(description).toContain(
+        '- `multiline-hint` — Inline description.\n  Caller hint:\n    First hint.\n    Second hint.',
+      );
+      expect(description).toContain(
+        '- `single-line` — Inline description. — model: fake (inherited provider)\n  Caller hint: Inline hint.',
+      );
     } finally {
-      for (const name of Object.keys(templates)) fs.rmSync(path.join(directory, name + '.md'), { force: true });
+      for (const name of Object.keys(templates))
+        fs.rmSync(path.join(directory, name + '.md'), { force: true });
     }
   });
 
   test('ignores retired skill defaults without changing extension defaults', () => {
-    writeConfig({ defaults: { skills: ['missing-retired-skill'], extensions: [CORE_SDK_EXTENSION] } });
+    writeConfig({
+      defaults: { skills: ['missing-retired-skill'], extensions: [CORE_SDK_EXTENSION] },
+    });
     expect(loadSubagentConfig().defaults).toEqual({ extensions: [CORE_SDK_EXTENSION] });
     writeConfig({ defaults: { skills: ['missing-retired-skill'] } });
     expect(loadSubagentConfig().defaults).toBeUndefined();
@@ -837,7 +904,10 @@ describe('run storage', () => {
         path.join(scope, id + suffix),
       );
       for (const file of [info, ...artifacts]) {
-        fs.writeFileSync(file, file === info ? JSON.stringify({ status: 'completed' }) : 'artifact');
+        fs.writeFileSync(
+          file,
+          file === info ? JSON.stringify({ status: 'completed' }) : 'artifact',
+        );
         fs.utimesSync(file, oldTime, oldTime);
       }
       const attempts: string[] = [];
@@ -2918,10 +2988,7 @@ describe('SDK business scope, waits and resources', () => {
       '---\nname: parent-only-skill\ndescription: FORBIDDEN_PARENT_SKILL\n---\nParent-only skill body.',
     );
     const template = path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents', 'resource-policy.md');
-    put(
-      template,
-      '---\nname: resource-policy\n---\nEXPLICIT_TEMPLATE_BODY',
-    );
+    put(template, '---\nname: resource-policy\n---\nEXPLICIT_TEMPLATE_BODY');
     const parentSession = codingAgent.SessionManager.create(cwd, root);
     parentSession.appendMessage({
       role: 'user',
@@ -2976,37 +3043,46 @@ describe('SDK business scope, waits and resources', () => {
     }
   });
 
-  test.each(['defaults', 'template'])('loads +codemode from %s extensions and on resume', async (source) => {
-    const parent = 'codemode-' + source + '-' + randomUUID();
-    const name = 'codemode-' + randomUUID();
-    const template = path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents', name + '.md');
-    const extensions = [CORE_SDK_EXTENSION, '+codemode'];
-    if (source === 'defaults') writeConfig({ defaults: { extensions } });
-    else fs.writeFileSync(template, '---\nname: ' + name + '\nextensions: ' + extensions.join(', ') + '\n---\n');
-    const active: string[][] = [];
-    fixture.onStart = (pi) => { active.push(pi.getActiveTools()); };
-    const manager = new AgentManager();
-    try {
-      await manager.spawnAgent({
-        ...spawnParams(parent, 'worker', 'inspect codemode'),
-        ...(source === 'template' ? { agent_type: name } : {}),
-        inheritedTools: 'read',
-      });
-      const info = manager.getAgentInfo('worker', parent);
-      await released(manager, info);
-      expect(info.extensions).toEqual(extensions);
-      expect(info.extensionPaths).toEqual([CORE_SDK_EXTENSION, 'builtin:codemode']);
-      expect(info.tools).toBeUndefined();
-      expect(active[0]).toContain('codemode');
-      await manager.sendMessage(parent, 'worker', 'continue with codemode');
-      await released(manager, info);
-      expect(active).toHaveLength(2);
-      expect(active[1]).toContain('codemode');
-    } finally {
-      await manager.shutdown();
-      fs.rmSync(template, { force: true });
-    }
-  });
+  test.each(['defaults', 'template'])(
+    'loads +codemode from %s extensions and on resume',
+    async (source) => {
+      const parent = 'codemode-' + source + '-' + randomUUID();
+      const name = 'codemode-' + randomUUID();
+      const template = path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents', name + '.md');
+      const extensions = [CORE_SDK_EXTENSION, '+codemode'];
+      if (source === 'defaults') writeConfig({ defaults: { extensions } });
+      else
+        fs.writeFileSync(
+          template,
+          '---\nname: ' + name + '\nextensions: ' + extensions.join(', ') + '\n---\n',
+        );
+      const active: string[][] = [];
+      fixture.onStart = (pi) => {
+        active.push(pi.getActiveTools());
+      };
+      const manager = new AgentManager();
+      try {
+        await manager.spawnAgent({
+          ...spawnParams(parent, 'worker', 'inspect codemode'),
+          ...(source === 'template' ? { agent_type: name } : {}),
+          inheritedTools: 'read',
+        });
+        const info = manager.getAgentInfo('worker', parent);
+        await released(manager, info);
+        expect(info.extensions).toEqual(extensions);
+        expect(info.extensionPaths).toEqual([CORE_SDK_EXTENSION, 'builtin:codemode']);
+        expect(info.tools).toBeUndefined();
+        expect(active[0]).toContain('codemode');
+        await manager.sendMessage(parent, 'worker', 'continue with codemode');
+        await released(manager, info);
+        expect(active).toHaveLength(2);
+        expect(active[1]).toContain('codemode');
+      } finally {
+        await manager.shutdown();
+        fs.rmSync(template, { force: true });
+      }
+    },
+  );
 
   test.each([undefined, '', 'read'])(
     'retains the tool-selection three-state contract (%s)',

@@ -279,10 +279,28 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
       for (const [file, name, extra] of [
         [path.join(f.agentDir, 'skills', 'user-skill', 'SKILL.md'), 'user-skill', ''],
         [projectSkill, 'project-skill', ''],
-        [path.join(path.dirname(f.cwd), '.agents', 'skills', 'ancestor-skill', 'SKILL.md'), 'ancestor-skill', ''],
-        [path.join(f.agentDir, 'skills', 'hidden-skill', 'SKILL.md'), 'hidden-skill', 'disable-model-invocation: true\n'],
+        [
+          path.join(path.dirname(f.cwd), '.agents', 'skills', 'ancestor-skill', 'SKILL.md'),
+          'ancestor-skill',
+          '',
+        ],
+        [
+          path.join(f.agentDir, 'skills', 'hidden-skill', 'SKILL.md'),
+          'hidden-skill',
+          'disable-model-invocation: true\n',
+        ],
       ]) {
-        write(file, '---\nname: ' + name + '\ndescription: AUTO_DESCRIPTION_' + name + '\n' + extra + '---\nAUTO_SKILL_BODY_' + name);
+        write(
+          file,
+          '---\nname: ' +
+            name +
+            '\ndescription: AUTO_DESCRIPTION_' +
+            name +
+            '\n' +
+            extra +
+            '---\nAUTO_SKILL_BODY_' +
+            name,
+        );
       }
       write(
         path.join(f.root, 'parent-only-skill', 'SKILL.md'),
@@ -294,26 +312,42 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
       for (const name of ['user-skill', 'project-skill', 'ancestor-skill'])
         assert.ok(session.systemPrompt.includes('AUTO_DESCRIPTION_' + name));
       assert.ok(session.systemPrompt.includes(projectSkill));
-      assert.doesNotMatch(session.systemPrompt, /FORBIDDEN_|AUTO_SKILL_BODY_|AUTO_DESCRIPTION_hidden-skill/);
+      assert.doesNotMatch(
+        session.systemPrompt,
+        /FORBIDDEN_|AUTO_SKILL_BODY_|AUTO_DESCRIPTION_hidden-skill/,
+      );
       assert.deepEqual(session.resourceLoader.getAgentsFiles().agentsFiles, []);
       assert.deepEqual(session.resourceLoader.getAppendSystemPrompt(), []);
       assert.deepEqual(session.resourceLoader.getPrompts().prompts, []);
       assert.deepEqual(session.resourceLoader.getThemes().themes, []);
       const skills = session.resourceLoader.getSkills().skills;
       assert.deepEqual(skills.map((skill) => skill.name).sort(), [
-        'ancestor-skill', 'hidden-skill', 'project-skill', 'user-skill',
+        'ancestor-skill',
+        'hidden-skill',
+        'project-skill',
+        'user-skill',
       ]);
-      assert.equal(skills.find((skill) => skill.name === 'hidden-skill')?.disableModelInvocation, true);
+      assert.equal(
+        skills.find((skill) => skill.name === 'hidden-skill')?.disableModelInvocation,
+        true,
+      );
       const reader = session.agent.state.tools.find((tool) => tool.name === 'read');
       assert.ok(reader, 'native read tool must remain available');
-      const result = await reader.execute('skill-read', { path: projectSkill }, new AbortController().signal);
+      const result = await reader.execute(
+        'skill-read',
+        { path: projectSkill },
+        new AbortController().signal,
+      );
       assert.match(JSON.stringify(result.content), /AUTO_SKILL_BODY_project-skill/);
       await prompt(session, 'Template body still belongs in the first user message');
       const request = f.events().find((event) => event.type === 'request')!;
       assert.deepEqual(request.userTexts, [
         'Template body still belongs in the first user message',
       ]);
-      assert.doesNotMatch(request.systemPrompt, /FORBIDDEN_|AUTO_SKILL_BODY_|AUTO_DESCRIPTION_hidden-skill/);
+      assert.doesNotMatch(
+        request.systemPrompt,
+        /FORBIDDEN_|AUTO_SKILL_BODY_|AUTO_DESCRIPTION_hidden-skill/,
+      );
       assert.deepEqual(f.errors, []);
     }));
 
@@ -325,26 +359,41 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
           [path.join(f.cwd, CONFIG_DIR_NAME, 'skills'), 'trusted-project-skill'],
           [path.join(path.dirname(f.cwd), '.agents', 'skills'), 'trusted-ancestor-skill'],
         ]) {
-          write(path.join(dir, name, 'SKILL.md'), '---\nname: ' + name + '\ndescription: Trust fixture\n---\nBody');
+          write(
+            path.join(dir, name, 'SKILL.md'),
+            '---\nname: ' + name + '\ndescription: Trust fixture\n---\nBody',
+          );
         }
         const session = await f.create({ projectTrusted: trusted });
-        assert.deepEqual(session.resourceLoader.getSkills().skills.map((skill) => skill.name).sort(),
+        assert.deepEqual(
+          session.resourceLoader
+            .getSkills()
+            .skills.map((skill) => skill.name)
+            .sort(),
           trusted
             ? ['trusted-ancestor-skill', 'trusted-project-skill', 'trusted-user-skill']
-            : ['trusted-user-skill']);
-      }));
+            : ['trusted-user-skill'],
+        );
+      }),
+    );
   }
 
   test('native Pi skill exclusions remain effective', async () =>
     withFixture({}, async (f) => {
       for (const name of ['included-skill', 'excluded-skill'])
-        write(path.join(f.agentDir, 'skills', name, 'SKILL.md'),
-          '---\nname: ' + name + '\ndescription: Native settings fixture\n---\nBody');
+        write(
+          path.join(f.agentDir, 'skills', name, 'SKILL.md'),
+          '---\nname: ' + name + '\ndescription: Native settings fixture\n---\nBody',
+        );
       json(path.join(f.agentDir, 'settings.json'), {
-        ...baseSettings, skills: ['-skills/excluded-skill'],
+        ...baseSettings,
+        skills: ['-skills/excluded-skill'],
       });
       const session = await f.create();
-      assert.deepEqual(session.resourceLoader.getSkills().skills.map((skill) => skill.name), ['included-skill']);
+      assert.deepEqual(
+        session.resourceLoader.getSkills().skills.map((skill) => skill.name),
+        ['included-skill'],
+      );
       assert.doesNotMatch(session.systemPrompt, /excluded-skill/);
     }));
 
@@ -386,7 +435,10 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
 
   test('tools retain undefined / allowlist / no-builtin tri-state; SDK does not load CLI builtins', async () =>
     withFixture({}, async (f) => {
-      json(path.join(f.agentDir, 'settings.json'), { ...baseSettings, defaultTools: ['+codemode'] });
+      json(path.join(f.agentDir, 'settings.json'), {
+        ...baseSettings,
+        defaultTools: ['+codemode'],
+      });
       for (const tools of [undefined, 'read', '']) {
         const session = await f.create({
           info: {
@@ -418,17 +470,24 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
       f.info.extensionPaths!.push('builtin:codemode');
       write(path.join(f.cwd, 'codemode.txt'), 'OFFLINE_CODEMODE_FILE');
       f.configure({
-        codemodeScript: '// @options: {"timeout_ms": 15000}\n' +
+        codemodeScript:
+          '// @options: {"timeout_ms": 15000}\n' +
           'const results = await Promise.allSettled([tools.read({ path: "codemode.txt" }), tools.fixture_tool({})]);\n' +
           'for (const result of results) { if (result.status !== "fulfilled") throw result.reason; text(result.value); }\n' +
           'store("offline-check", "CODEMODE_PERSISTED");',
       });
       let session = await f.create();
-      assert.deepEqual(new Set(session.getActiveToolNames()), new Set(['read', 'codemode', 'fixture_tool']));
+      assert.deepEqual(
+        new Set(session.getActiveToolNames()),
+        new Set(['read', 'codemode', 'fixture_tool']),
+      );
       const metadata = session.getAllTools().find((tool) => tool.name === 'codemode')!;
       assert.equal(metadata.sourceInfo.path, 'builtin:codemode');
       assert.equal(metadata.sourceInfo.source, 'builtin');
-      assert.deepEqual(session.settingsManager.getSettings().codemode, { mode: 'only', inlineBudget: 0 });
+      assert.deepEqual(session.settingsManager.getSettings().codemode, {
+        mode: 'only',
+        inlineBudget: 0,
+      });
       assert.ok(!session.getAllTools().some((tool) => tool.name === 'tool_search'));
       await prompt(session, 'Run the offline codemode check');
       const result = session.messages.findLast((message) => message.role === 'toolResult');
@@ -438,14 +497,19 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
       assert.match(output, /OFFLINE_CODEMODE_FILE/);
       assert.match(output, /fixture tool/);
       await f.close(session);
-      f.configure({ codemodeScript: '// @options: {"timeout_ms": 15000}\ntext(load("offline-check"));' });
+      f.configure({
+        codemodeScript: '// @options: {"timeout_ms": 15000}\ntext(load("offline-check"));',
+      });
       session = await f.create();
       await prompt(session, 'Read the persisted codemode value');
       const stored = session.messages.findLast((message) => message.role === 'toolResult');
       assert.ok(stored?.role === 'toolResult');
       assert.match(JSON.stringify(stored.content), /Script completed/);
       assert.match(JSON.stringify(stored.content), /CODEMODE_PERSISTED/);
-      assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.agentDir, 'settings.json'), 'utf8')).defaultTools, ['read']);
+      assert.deepEqual(
+        JSON.parse(fs.readFileSync(path.join(f.agentDir, 'settings.json'), 'utf8')).defaultTools,
+        ['read'],
+      );
       assert.deepEqual(f.errors, []);
     }));
 
@@ -479,17 +543,25 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
       const session = await f.create({
         info: { ...f.info, extensionPaths: [...f.info.extensionPaths!, 'builtin:codemode'] },
       });
-      assert.deepEqual(new Set(session.getActiveToolNames()), new Set(['codemode', 'fixture_tool']));
+      assert.deepEqual(
+        new Set(session.getActiveToolNames()),
+        new Set(['codemode', 'fixture_tool']),
+      );
     }));
 
   test('native codemode opt-in does not conflict with an explicitly configured codemode file', async () =>
     withFixture({}, async (f) => {
-      const codemodePath = fileURLToPath(new URL(
-        './extensions/codemode/index.js',
-        import.meta.resolve('@earendil-works/pi-coding-agent'),
-      ));
+      const codemodePath = fileURLToPath(
+        new URL(
+          './extensions/codemode/index.js',
+          import.meta.resolve('@earendil-works/pi-coding-agent'),
+        ),
+      );
       const session = await f.create({
-        info: { ...f.info, extensionPaths: [...f.info.extensionPaths!, 'builtin:codemode', codemodePath] },
+        info: {
+          ...f.info,
+          extensionPaths: [...f.info.extensionPaths!, 'builtin:codemode', codemodePath],
+        },
       });
       assert.ok(session.getActiveToolNames().includes('codemode'));
       assert.equal(session.getAllTools().filter((tool) => tool.name === 'codemode').length, 1);

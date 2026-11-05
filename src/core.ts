@@ -663,7 +663,10 @@ export function listAgentDefinitions(): AgentDefinition[] {
       );
     } catch (error) {
       console.warn(
-        '[subagents] Failed to load agent template ' + path.join(AGENTS_DIR, name) + ': ' + String(error),
+        '[subagents] Failed to load agent template ' +
+          path.join(AGENTS_DIR, name) +
+          ': ' +
+          String(error),
       );
     }
   }
@@ -947,11 +950,7 @@ export class RpcAssistantStreamState {
   }
 
   private applyDelta(delta: any): void {
-    if (
-      !this.currentMessage ||
-      !Number.isInteger(delta?.contentIndex) ||
-      delta.contentIndex < 0
-    )
+    if (!this.currentMessage || !Number.isInteger(delta?.contentIndex) || delta.contentIndex < 0)
       return;
     const index = delta.contentIndex;
     const content = this.currentMessage.content as any[];

@@ -2054,7 +2054,9 @@ test('six public tools carry native usage through metadata and the detail footer
     };
     await commands.get('subagents').handler('', ctx);
     expect(detailOpened).toBe(1);
-    const resumed = JSON.parse((await execute('wait_agent', { targets: ['worker'] })).content[0].text);
+    const resumed = JSON.parse(
+      (await execute('wait_agent', { targets: ['worker'] })).content[0].text,
+    );
     expect(resumed.event.finalResponse).toBe('response:sample fourteen');
     const saved = getAgent('worker', parent)!;
     expect(saved.contextUsage).toMatchObject({ tokens: 70000, contextWindow: 500000 });

@@ -1724,11 +1724,9 @@ describe('overlay creation paths and native lifecycle', () => {
       progress(overlay);
       expect(overlay['streamingComponent']).not.toBeNull();
       expect(overlay['pendingTools'].size).toBe(1);
-      const cleanup = spyOn(overlay as any, 'finishToolComponents').mockImplementationOnce(
-        () => {
-          throw new Error('native renderer cleanup failed');
-        },
-      );
+      const cleanup = spyOn(overlay as any, 'finishToolComponents').mockImplementationOnce(() => {
+        throw new Error('native renderer cleanup failed');
+      });
       try {
         expect(() => {
           if (transition === 'close') socket.emit('close');
@@ -1942,7 +1940,11 @@ describe('overlay creation paths and native lifecycle', () => {
     overlay['handleEvent']({
       type: 'message_update',
       message,
-      assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'streamed final response' },
+      assistantMessageEvent: {
+        type: 'text_delta',
+        contentIndex: 0,
+        delta: 'streamed final response',
+      },
     });
     overlay.handleInput('g');
     overlay.render(80);
@@ -1968,7 +1970,9 @@ describe('overlay creation paths and native lifecycle', () => {
       expect(open).toHaveBeenCalledTimes(1);
       expect(overlay['historyDirty']).toBe(false);
       expect(overlay['lastFileSize']).toBe(fs.statSync(session.getSessionFile()!).size);
-      expect(overlay['sessionManager']!.buildSessionContext().messages.at(-1)).toMatchObject(message);
+      expect(overlay['sessionManager']!.buildSessionContext().messages.at(-1)).toMatchObject(
+        message,
+      );
       expect(overlay['followMode']).toBe(false);
       expect(overlay['scrollOffset']).toBe(offset);
       overlay.handleInput('G');

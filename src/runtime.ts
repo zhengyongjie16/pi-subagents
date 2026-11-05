@@ -111,7 +111,14 @@ export async function createChildSession(options: ChildSessionOptions): Promise<
       appendSystemPrompt: [],
       additionalExtensionPaths: info.extensionPaths,
       extensionFactories: codemode
-        ? [{ name: 'codemode', builtin: true, replaceable: true, factory: createCodemodeExtension() }]
+        ? [
+            {
+              name: 'codemode',
+              builtin: true,
+              replaceable: true,
+              factory: createCodemodeExtension(),
+            },
+          ]
         : [],
     },
   });
@@ -123,7 +130,9 @@ export async function createChildSession(options: ChildSessionOptions): Promise<
   // Resource loading reloads settings; extend the resolved selection afterwards.
   if (codemode) {
     const defaults = settingsManager.getDefaultTools();
-    settingsManager.applyOverrides({ defaultTools: defaults ? [...defaults, 'codemode'] : ['+codemode'] });
+    settingsManager.applyOverrides({
+      defaultTools: defaults ? [...defaults, 'codemode'] : ['+codemode'],
+    });
   }
 
   const available = await services.modelRuntime.getAvailable(info.provider);
