@@ -514,6 +514,82 @@ const runtimes: Array<[string, string]> = [['Bun', process.execPath]];
 if (Bun.which('node')) runtimes.push(['Node', Bun.which('node')!]);
 
 test.each(runtimes)(
+  'preserves multiline template text through real SDK tools, reload and child input (%s)',
+  (_name, executable) => {
+    probe(
+      String.raw`
+    import assert from "node:assert/strict";
+    import * as fs from "node:fs";
+    import * as path from "node:path";
+    process.env.PI_OFFLINE = "1";
+    const { createAgentSessionServices, createAgentSessionFromServices, SessionManager, SettingsManager } = await import(${JSON.stringify(sdkUrl)});
+    const { configureCoreFixture } = await import(${JSON.stringify(pathToFileURL(path.join(packageDir, 'tests', 'fixtures', 'core-sdk-fixture.ts')).href)});
+    const { getCurrentTools } = await import(${JSON.stringify(import.meta.resolve('@earendil-works/pi-ai'))});
+    const fixturePath = ${JSON.stringify(CORE_SDK_EXTENSION)};
+    const fixture = configureCoreFixture();
+    const agentDir = process.env.PI_CODING_AGENT_DIR;
+    const directory = path.join(agentDir, "pi-subagents");
+    const templatePath = path.join(directory, "agents", "multiline.md");
+    fs.mkdirSync(path.dirname(templatePath), { recursive: true });
+    fs.writeFileSync(path.join(directory, "config.json"), JSON.stringify({ defaults: { extensions: [fixturePath] } }));
+    const template = [
+      "---", "name: multiline", "description: |-", "  First exploration line.", "  <rules>",
+      "    <rule>Reuse & trust.</rule>", "  </rules>", "hint: |-", "  Give exact paths.", "  - Narrow scope.",
+      "provider: test", "model: fake", "thinking: off", "tools: read", "---", "Child template instructions.",
+    ].join("\n");
+    fs.writeFileSync(templatePath, template);
+    const settings = { compaction: { enabled: false }, retry: { enabled: false }, cacheWarming: "off" };
+    fs.writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify(settings));
+    const settingsManager = SettingsManager.inMemory(settings);
+    settingsManager.setProjectTrusted(true);
+    const services = await createAgentSessionServices({
+      cwd: agentDir, agentDir, settingsManager, resourceLoaderOptions: {
+        noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+        additionalExtensionPaths: [process.argv[2], fixturePath],
+      },
+    });
+    assert.deepEqual(services.resourceLoader.getExtensions().errors, []);
+    const model = (await services.modelRuntime.getAvailable("test")).find(model => model.id === "fake");
+    const { session } = await createAgentSessionFromServices({ services, model, sessionManager: SessionManager.inMemory(agentDir) });
+    const errors = [];
+    try {
+      await session.bindExtensions({ mode: "print", onError: error => errors.push(error) });
+      const spawnTool = () => session.getToolDefinition("spawn_agent");
+      const schema = JSON.stringify(spawnTool().parameters);
+      const checkDescription = (description, firstLine) => {
+        assert.ok(description.includes("  Description:\n    " + firstLine + "\n    <rules>\n      <rule>Reuse & trust.</rule>\n    </rules>"), description);
+        assert.ok(description.includes("  Caller hint:\n    Give exact paths.\n    - Narrow scope."), description);
+        assert.ok(description.includes("model: test/fake — thinking: off"), description);
+        assert.ok(!description.includes("Child template instructions."));
+      };
+      checkDescription(spawnTool().description, "First exploration line.");
+      await session.prompt("Inspect template descriptions.");
+      checkDescription(getCurrentTools(fixture.instances[0].requests.at(-1).context.messages).find(tool => tool.name === "spawn_agent").description, "First exploration line.");
+      const ctx = session.extensionRunner.createContext();
+      const result = await spawnTool().execute("spawn", { task_name: "multiline-child", agent_type: "multiline", message: "work" }, undefined, undefined, ctx);
+      const waited = await session.getToolDefinition("wait_agent").execute("wait", { targets: ["multiline-child"] }, undefined, undefined, ctx);
+      assert.equal(JSON.parse(waited.content[0].text).event.status, "completed");
+      assert.equal(result.details.provider, "test");
+      assert.equal(result.details.modelId, "fake");
+      assert.equal(result.details.thinking, "off");
+      assert.equal(fixture.instances.at(-1).inputs[0].text, "Child template instructions.\n\nwork");
+      fs.writeFileSync(templatePath, template.replace("First exploration line.", "Updated exploration line.").replace("\nhint: |-", "\ncaller_hint: |-"));
+      await session.extensionRunner.emit({ type: "session_start", reason: "reload" });
+      assert.equal(JSON.stringify(spawnTool().parameters), schema);
+      await session.prompt("Inspect refreshed template descriptions.");
+      checkDescription(getCurrentTools(fixture.instances[0].requests.at(-1).context.messages).find(tool => tool.name === "spawn_agent").description, "Updated exploration line.");
+      assert.deepEqual(errors, []);
+    } finally {
+      try { await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); }
+      finally { session.dispose(); }
+    }
+  `,
+      executable,
+    );
+  },
+);
+
+test.each(runtimes)(
   'validates dynamic spawn schemas and enforces thinking overrides with real SDK children (%s)',
   (_name, executable) => {
     probe(

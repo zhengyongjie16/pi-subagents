@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import {
   CONFIG_DIR_NAME,
   getAgentDir,
+  parseFrontmatter,
   type AgentSession,
   type AgentSessionEvent,
   type ContextUsage,
@@ -612,9 +613,27 @@ export function parseAgentDefinitionText(text: string, fallbackName: string): Ag
   const match = text.match(/^---\s*\n([\s\S]*?)\n---\s*\n?/);
   const attrs: Record<string, string> = {};
   if (match) {
-    for (const line of match[1].split(/\r?\n/)) {
-      const entry = line.match(/^([A-Za-z0-9_-]+):\s*(.*?)\s*$/);
-      if (entry) attrs[entry[1]] = entry[2].replace(/^['"]|['"]$/g, '');
+    const lines = match[1].replace(/\r$/, '').split(/\r?\n/);
+    for (let index = 0; index < lines.length; index++) {
+      const entry = lines[index].match(/^([A-Za-z0-9_-]+):\s*(.*?)\s*$/);
+      if (!entry) continue;
+      const [, key, value] = entry;
+      if (
+        ['description', 'hint', 'caller_hint'].includes(key) &&
+        /^[|>][0-9+-]*(?:[ \t]+#.*)?$/.test(value)
+      ) {
+        // Only collect the block; native YAML handles indentation, folding and chomping.
+        const block = [`${key}: ${value}`];
+        while (index + 1 < lines.length && /^(?:[ \t]|$)/.test(lines[index + 1]))
+          block.push(lines[++index]);
+        // The helper consumes the newline before ---, so retain the block's final newline.
+        attrs[key] = parseFrontmatter<Record<string, string>>(
+          '---\n' + block.join('\n') + '\n\n---\n',
+        ).frontmatter[key];
+      } else {
+        // Preserve legacy inline values, including unquoted @, colons and # characters.
+        attrs[key] = value.replace(/^['"]|['"]$/g, '');
+      }
     }
   }
   return {
@@ -642,7 +661,11 @@ export function listAgentDefinitions(): AgentDefinition[] {
           name.replace(/\.md$/, ''),
         ),
       );
-    } catch {}
+    } catch (error) {
+      console.warn(
+        '[subagents] Failed to load agent template ' + path.join(AGENTS_DIR, name) + ': ' + String(error),
+      );
+    }
   }
   return definitions.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -656,13 +679,22 @@ export function getAgentDefinitionsDescription(): string {
   if (!definitions.length) return 'None configured, so omit `agent_type`.';
   return definitions
     .map((definition) => {
-      let line = `- \`${definition.name}\`${definition.description ? ` — ${definition.description}` : ''}`;
+      const description = definition.description?.replace(/\n+$/, '');
+      const hint = definition.hint?.replace(/\n+$/, '');
+      const multiline = description?.includes('\n');
+      let line = `- \`${definition.name}\`${description && !multiline ? ` — ${description}` : ''}`;
       if (definition.model)
         line += ` — model: ${definition.provider ? `${definition.provider}/${definition.model}` : `${definition.model} (inherited provider)`}`;
       if (definition.thinking) line += ` — thinking: ${definition.thinking}`;
       if (definition.extensions?.length)
         line += ` — extensions: ${definition.extensions.join(', ')}`;
-      return definition.hint ? `${line}\n  Caller hint: ${definition.hint}` : line;
+      if (description && multiline)
+        line += '\n  Description:\n' + description.replace(/^/gm, '    ');
+      if (hint)
+        line += hint.includes('\n')
+          ? '\n  Caller hint:\n' + hint.replace(/^/gm, '    ')
+          : '\n  Caller hint: ' + hint;
+      return line;
     })
     .join('\n');
 }
