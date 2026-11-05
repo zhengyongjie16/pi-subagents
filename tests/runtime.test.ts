@@ -386,6 +386,7 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
 
   test('tools retain undefined / allowlist / no-builtin tri-state; SDK does not load CLI builtins', async () =>
     withFixture({}, async (f) => {
+      json(path.join(f.agentDir, 'settings.json'), { ...baseSettings, defaultTools: ['+codemode'] });
       for (const tools of [undefined, 'read', '']) {
         const session = await f.create({
           info: {
@@ -405,6 +406,95 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
         );
         await f.close(session);
       }
+    }));
+
+  test('native codemode opt-in executes nested tools, preserves settings and restores its store', async () =>
+    withFixture({}, async (f) => {
+      json(path.join(f.agentDir, 'settings.json'), {
+        ...baseSettings,
+        defaultTools: ['read'],
+        codemode: { mode: 'only', inlineBudget: 0 },
+      });
+      f.info.extensionPaths!.push('builtin:codemode');
+      write(path.join(f.cwd, 'codemode.txt'), 'OFFLINE_CODEMODE_FILE');
+      f.configure({
+        codemodeScript: '// @options: {"timeout_ms": 15000}\n' +
+          'const results = await Promise.allSettled([tools.read({ path: "codemode.txt" }), tools.fixture_tool({})]);\n' +
+          'for (const result of results) { if (result.status !== "fulfilled") throw result.reason; text(result.value); }\n' +
+          'store("offline-check", "CODEMODE_PERSISTED");',
+      });
+      let session = await f.create();
+      assert.deepEqual(new Set(session.getActiveToolNames()), new Set(['read', 'codemode', 'fixture_tool']));
+      const metadata = session.getAllTools().find((tool) => tool.name === 'codemode')!;
+      assert.equal(metadata.sourceInfo.path, 'builtin:codemode');
+      assert.equal(metadata.sourceInfo.source, 'builtin');
+      assert.deepEqual(session.settingsManager.getSettings().codemode, { mode: 'only', inlineBudget: 0 });
+      assert.ok(!session.getAllTools().some((tool) => tool.name === 'tool_search'));
+      await prompt(session, 'Run the offline codemode check');
+      const result = session.messages.findLast((message) => message.role === 'toolResult');
+      assert.ok(result?.role === 'toolResult');
+      const output = JSON.stringify(result.content);
+      assert.match(output, /Script completed/);
+      assert.match(output, /OFFLINE_CODEMODE_FILE/);
+      assert.match(output, /fixture tool/);
+      await f.close(session);
+      f.configure({ codemodeScript: '// @options: {"timeout_ms": 15000}\ntext(load("offline-check"));' });
+      session = await f.create();
+      await prompt(session, 'Read the persisted codemode value');
+      const stored = session.messages.findLast((message) => message.role === 'toolResult');
+      assert.ok(stored?.role === 'toolResult');
+      assert.match(JSON.stringify(stored.content), /Script completed/);
+      assert.match(JSON.stringify(stored.content), /CODEMODE_PERSISTED/);
+      assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.agentDir, 'settings.json'), 'utf8')).defaultTools, ['read']);
+      assert.deepEqual(f.errors, []);
+    }));
+
+  test('native codemode opt-in respects explicit allowlists, empty tools and tool modifiers', async () =>
+    withFixture({}, async (f) => {
+      json(path.join(f.agentDir, 'settings.json'), { ...baseSettings, defaultTools: ['read'] });
+      const cases: Array<[string, string[]]> = [
+        ['read', ['read']],
+        ['read,codemode', ['read', 'codemode']],
+        ['', ['fixture_tool']],
+        ['-codemode', ['read', 'fixture_tool']],
+        ['+grep', ['read', 'codemode', 'grep', 'fixture_tool']],
+      ];
+      for (const [index, [tools, active]] of cases.entries()) {
+        const session = await f.create({
+          info: {
+            ...f.info,
+            tools,
+            extensionPaths: [...f.info.extensionPaths!, 'builtin:codemode'],
+            sessionFile: path.join(f.root, 'subagents', 'codemode-tools-' + index + '.jsonl'),
+          },
+        });
+        assert.deepEqual(new Set(session.getActiveToolNames()), new Set(active), tools);
+        await f.close(session);
+      }
+    }));
+
+  test('native codemode opt-in preserves an empty default tool selection', async () =>
+    withFixture({}, async (f) => {
+      json(path.join(f.agentDir, 'settings.json'), { ...baseSettings, defaultTools: [] });
+      const session = await f.create({
+        info: { ...f.info, extensionPaths: [...f.info.extensionPaths!, 'builtin:codemode'] },
+      });
+      assert.deepEqual(new Set(session.getActiveToolNames()), new Set(['codemode', 'fixture_tool']));
+    }));
+
+  test('native codemode opt-in does not conflict with an explicitly configured codemode file', async () =>
+    withFixture({}, async (f) => {
+      const codemodePath = fileURLToPath(new URL(
+        './extensions/codemode/index.js',
+        import.meta.resolve('@earendil-works/pi-coding-agent'),
+      ));
+      const session = await f.create({
+        info: { ...f.info, extensionPaths: [...f.info.extensionPaths!, 'builtin:codemode', codemodePath] },
+      });
+      assert.ok(session.getActiveToolNames().includes('codemode'));
+      assert.equal(session.getAllTools().filter((tool) => tool.name === 'codemode').length, 1);
+      assert.deepEqual(session.resourceLoader.getExtensions().errors, []);
+      assert.deepEqual(f.errors, []);
     }));
 
   test('explicit effective trust overrides saved decisions and gates project settings everywhere', async () =>

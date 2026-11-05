@@ -17,6 +17,7 @@ export interface OfflineFixtureConfig {
   provider?: string;
   modelId?: string;
   prefix?: string;
+  codemodeScript?: string;
   filtered?: boolean;
   filterAtStart?: boolean;
   changeModelAtStart?: boolean;
@@ -106,6 +107,20 @@ export default async function (pi: ExtensionAPI) {
         if (config.responseGate && request === 1) await waitForRelease('response', options?.signal);
         options?.signal?.throwIfAborted();
         if (config.stopReason) throw new Error('fixture ' + config.stopReason);
+        if (config.codemodeScript && request === 1) {
+          const toolCall = {
+            type: 'toolCall' as const,
+            id: 'codemode-' + invocation,
+            name: 'codemode',
+            arguments: { code: config.codemodeScript },
+          };
+          message.content.push(toolCall);
+          message.stopReason = 'toolUse';
+          stream.push({ type: 'toolcall_start', contentIndex: 0, partial: message });
+          stream.push({ type: 'toolcall_end', contentIndex: 0, toolCall, partial: message });
+          stream.push({ type: 'done', reason: 'toolUse', message });
+          return;
+        }
         const text = (config.prefix ?? 'offline') + ': ' + userTexts.at(-1);
         message.content.push({ type: 'text', text: '' });
         stream.push({ type: 'text_start', contentIndex: 0, partial: message });

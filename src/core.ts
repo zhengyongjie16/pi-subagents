@@ -688,6 +688,7 @@ function looksLikePath(value: string): boolean {
 }
 
 function resolveExtensionPath(extension: string, cwd: string): string {
+  if (extension === '+codemode') return 'builtin:codemode';
   if (looksLikePath(extension)) {
     const expanded = expandHome(extension);
     const resolved = path.isAbsolute(expanded) ? expanded : path.resolve(cwd, expanded);

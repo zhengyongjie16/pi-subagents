@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path';
 import {
   createAgentSessionFromServices,
   createAgentSessionServices,
+  createCodemodeExtension,
   getAgentDir,
   hasTrustRequiringProjectResources,
   ProjectTrustStore,
@@ -96,6 +97,7 @@ export async function createChildSession(options: ChildSessionOptions): Promise<
       settingsManager.getDefaultProjectTrust() === 'always');
   settingsManager.setProjectTrusted(projectTrusted);
 
+  const codemode = info.extensionPaths?.includes('builtin:codemode');
   const services = await createAgentSessionServices({
     cwd,
     agentDir,
@@ -108,6 +110,9 @@ export async function createChildSession(options: ChildSessionOptions): Promise<
       systemPrompt: systemPromptPath,
       appendSystemPrompt: [],
       additionalExtensionPaths: info.extensionPaths,
+      extensionFactories: codemode
+        ? [{ name: 'codemode', builtin: true, replaceable: true, factory: createCodemodeExtension() }]
+        : [],
     },
   });
   checkCanceled();
@@ -115,6 +120,11 @@ export async function createChildSession(options: ChildSessionOptions): Promise<
   checkDiagnostics(services, options.log, loggedDiagnostics);
   if (!services.resourceLoader.getSystemPrompt()?.trim())
     throw new Error(`System prompt is empty: ${systemPromptPath}`);
+  // Resource loading reloads settings; extend the resolved selection afterwards.
+  if (codemode) {
+    const defaults = settingsManager.getDefaultTools();
+    settingsManager.applyOverrides({ defaultTools: defaults ? [...defaults, 'codemode'] : ['+codemode'] });
+  }
 
   const available = await services.modelRuntime.getAvailable(info.provider);
   checkCanceled();

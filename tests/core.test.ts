@@ -2774,6 +2774,38 @@ describe('SDK business scope, waits and resources', () => {
     }
   });
 
+  test.each(['defaults', 'template'])('loads +codemode from %s extensions and on resume', async (source) => {
+    const parent = 'codemode-' + source + '-' + randomUUID();
+    const name = 'codemode-' + randomUUID();
+    const template = path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents', name + '.md');
+    const extensions = [CORE_SDK_EXTENSION, '+codemode'];
+    if (source === 'defaults') writeConfig({ defaults: { extensions } });
+    else fs.writeFileSync(template, '---\nname: ' + name + '\nextensions: ' + extensions.join(', ') + '\n---\n');
+    const active: string[][] = [];
+    fixture.onStart = (pi) => { active.push(pi.getActiveTools()); };
+    const manager = new AgentManager();
+    try {
+      await manager.spawnAgent({
+        ...spawnParams(parent, 'worker', 'inspect codemode'),
+        ...(source === 'template' ? { agent_type: name } : {}),
+        inheritedTools: 'read',
+      });
+      const info = manager.getAgentInfo('worker', parent);
+      await released(manager, info);
+      expect(info.extensions).toEqual(extensions);
+      expect(info.extensionPaths).toEqual([CORE_SDK_EXTENSION, 'builtin:codemode']);
+      expect(info.tools).toBeUndefined();
+      expect(active[0]).toContain('codemode');
+      await manager.sendMessage(parent, 'worker', 'continue with codemode');
+      await released(manager, info);
+      expect(active).toHaveLength(2);
+      expect(active[1]).toContain('codemode');
+    } finally {
+      await manager.shutdown();
+      fs.rmSync(template, { force: true });
+    }
+  });
+
   test.each([undefined, '', 'read'])(
     'retains the tool-selection three-state contract (%s)',
     async (tools) => {

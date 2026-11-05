@@ -60,6 +60,14 @@ You are a focused review subagent. Return concise findings with file paths.
 
 `extensions` may contain local files/directories or npm package names already installed by Pi. Package names are resolved from project-local packages first and then Pi's global npm directory. Missing packages are never installed automatically.
 
+Add `+codemode` to template `extensions` or configuration `defaults.extensions` to load and enable Pi's native codemode without an installation-specific path:
+
+```yaml
+extensions: +codemode
+```
+
+This preserves the configured Pi default tools and uses Pi's `codemode.mode` and `codemode.inlineBudget` settings unchanged. Explicit template `tools` still take precedence: include `codemode` in a plain allowlist (for example `tools: read,codemode`), or use `-codemode` to disable it. Other extensions and MCP servers are not loaded implicitly.
+
 When a template loads extensions but omits `tools`, the child uses Pi's normal tool activation so tools registered by those extensions are available. Set template `tools` when you want an explicit allowlist. Without configured extensions, omitted template tools inherit the parent's active tool names.
 
 Children discover skills through Pi's native resource loader, using their working directory, Pi settings, and effective project trust. With a file-reading tool available, model-invocable skill names, descriptions, and locations are advertised to the model; full instructions are read when needed. Parent-session skill selections are not copied. This extension does not support `spawn_agent.skills`, template `skills`, or `defaults.skills`; remove those keys from existing callers and configurations. Existing history is not migrated, and legacy skill fields in saved run metadata no longer control resource loading.
@@ -84,7 +92,7 @@ Optional configuration lives at:
   "models": ["openai-codex/gpt-5.6-sol", "anthropic/claude-opus-4-6"],
   "modelsFromEnabledModels": true,
   "defaults": {
-    "extensions": ["@scope/pi-extra-tools"]
+    "extensions": ["+codemode", "@scope/pi-extra-tools"]
   }
 }
 ```
