@@ -83,11 +83,7 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
     write(file, JSON.stringify(value));
   }
   function deferred<T = void>() {
-    let resolve!: (value: T | PromiseLike<T>) => void;
-    const promise = new Promise<T>((done) => {
-      resolve = done;
-    });
-    return { promise, resolve };
+    return Promise.withResolvers<T>();
   }
   interface Fixture {
     root: string;
@@ -1153,6 +1149,33 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
       );
       unsubscribe();
       assert.equal(assistants(session).length, 0);
+    }));
+
+  test('core fixture timer abort releases its stream and preserves default/large responses', async () =>
+    withFixture({}, async (f) => {
+      const { configureCoreFixture, waitUntil } = await import('./fixtures/core-sdk-fixture.ts');
+      const state = configureCoreFixture({ routes: [[f.info.provider, f.info.modelId]] });
+      const session = await f.create({
+        info: {
+          ...f.info,
+          extensionPaths: [
+            fileURLToPath(new URL('./fixtures/core-sdk-fixture.ts', import.meta.url)),
+          ],
+        },
+      });
+      const completion = prompt(session, 'slow timer abort');
+      await waitUntil(() => state.instances[0].activeStreams === 1);
+      await session.abort();
+      await completion;
+      const instance = state.instances[0];
+      assert.equal(instance.requests[0].message.stopReason, 'aborted');
+      assert.match(instance.requests[0].message.errorMessage!, /abort/i);
+      assert.equal(instance.activeStreams, 0);
+      assert.equal(session.isStreaming, false);
+      await prompt(session, 'ordinary');
+      assert.equal(session.getLastAssistantText(), 'response:ordinary');
+      await prompt(session, 'large');
+      assert.equal(session.getLastAssistantText(), 'x'.repeat(60 * 1024));
     }));
 
   test('normal prompt return is not model success: stopReason error/aborted remain authoritative', async () => {

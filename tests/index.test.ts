@@ -308,7 +308,7 @@ test('preserves the six schemas, dynamic routing, tool arguments, and return wra
   );
 });
 
-test('wait_agent preserves target previews, error prefixes and cancellation identity', () => {
+test('preserves tool error prefixes, quota explanations, wait previews and cancellation identity', () => {
   probe(
     hostFixture +
       String.raw`
@@ -320,10 +320,23 @@ test('wait_agent preserves target previews, error prefixes and cancellation iden
     assert.equal(preview({}), "wait_agent any");
     assert.equal(preview({ targets: [] }), "wait_agent any");
     assert.equal(preview({ targets: ["/one", "/two"] }), "wait_agent /one,/two");
-    for (const failure of [new Error("controlled failure"), "plain failure"]) {
-      AgentManager.prototype.waitAgent = async () => { throw failure; };
-      await assert.rejects(f.call("wait_agent", {}), error =>
-        error.message === "wait_agent failed: " + (failure instanceof Error ? failure.message : failure));
+    for (const [name, method, params] of [
+      ["spawn_agent", "spawnAgent", { task_name: "task", message: "work" }],
+      ["wait_agent", "waitAgent", {}],
+      ["read_agent_response", "readAgentResponse", { target: "task" }],
+      ["send_message", "sendMessage", { target: "task", message: "next" }],
+      ["interrupt_agent", "interruptAgent", { target: "task" }],
+    ]) {
+      for (const [failure, message] of [
+        [new Error("controlled failure"), "controlled failure"],
+        ["plain failure", "plain failure"],
+        [Object.assign(new Error("write failed"), { code: "EDQUOT" }), "write failed\nCause: Disk quota exceeded (EDQUOT)."],
+      ]) {
+        AgentManager.prototype[method] = method === "readAgentResponse"
+          ? () => { throw failure; }
+          : async () => { throw failure; };
+        await assert.rejects(f.call(name, params), error => error.message === name + " failed: " + message);
+      }
     }
     const controller = new AbortController();
     const cancellation = new Error("wait cancelled");
@@ -412,6 +425,8 @@ test('forwards only current same-cwd effective trust and reports errors without 
     assert.equal(options.projectTrusted(next.cwd), false, "resumption must use its current context, not the startup snapshot");
     options.onError(new Error("subscription/save failed"));
     assert.deepEqual(f.notifications.pop(), ["[subagents] subscription/save failed", "error"]);
+    options.onError(new AggregateError(["plain failure", Object.assign(new Error("write failed"), { code: "EDQUOT" })], "shutdown failed"));
+    assert.deepEqual(f.notifications.pop(), ["[subagents] shutdown failed\nplain failure\nwrite failed\nCause: Disk quota exceeded (EDQUOT).", "error"]);
     const logged = [], previous = console.error;
     console.error = (...args) => logged.push(args.join(" "));
     try {
@@ -1097,7 +1112,7 @@ test('packs runtime.ts without an SDK copy and loads the extracted package throu
     expect(manifest.dependencies).toBeUndefined();
     expect(manifest.bundledDependencies).toBeUndefined();
     for (const name of ['pi-ai', 'pi-coding-agent', 'pi-tui']) {
-      expect(manifest.peerDependencies['@earendil-works/' + name]).toBe('>=1.0.0');
+      expect(manifest.peerDependencies['@earendil-works/' + name]).toBe('>=1.1.0');
       expect(manifest.devDependencies['@earendil-works/' + name]).toBe('1.5.0');
     }
     expect(manifest.engines.node).toBe('>=22.19.0');

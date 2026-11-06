@@ -321,6 +321,27 @@ describe('session-scoped identities', () => {
 });
 
 describe('agent templates', () => {
+  test('template listing initializes only the templates directory', () => {
+    const mkdir = spyOn(fs, 'mkdirSync');
+    const read = spyOn(fs, 'readFileSync');
+    const write = spyOn(fs, 'writeFileSync');
+    const chmod = spyOn(fs, 'chmodSync');
+    try {
+      listAgentDefinitions();
+      expect(mkdir.mock.calls.map(([directory]) => String(directory))).toEqual([
+        path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents'),
+      ]);
+      expect(read.mock.calls.some(([file]) => String(file) === configFile)).toBe(false);
+      expect(write).not.toHaveBeenCalled();
+      expect(chmod).not.toHaveBeenCalled();
+    } finally {
+      mkdir.mockRestore();
+      read.mockRestore();
+      write.mockRestore();
+      chmod.mockRestore();
+    }
+  });
+
   test('parses optional routing and extension fields', () => {
     const definition = parseAgentDefinitionText(
       `---
@@ -676,6 +697,35 @@ describe('run storage', () => {
   test('uses persistent package storage by default', () => {
     fs.rmSync(configFile, { force: true });
     expect(getRunsDir()).toBe(path.join(packageDir, 'runs'));
+  });
+
+  test.each([
+    ['omitted', undefined, undefined],
+    ['comma-separated', ' first, , second ', ['first', 'second']],
+    ['mixed array', [' first ', null, 7, false, '', ' second '], ['first', 'second']],
+    ['empty array', [], undefined],
+    ['invalid object', {}, undefined],
+  ])('normalizes configuration lists without empty defaults (%s)', (_label, value, expected) => {
+    writeConfig({ models: value, defaults: { extensions: value } });
+    expect(loadSubagentConfig()).toEqual(
+      expected ? { models: expected, defaults: { extensions: expected } } : {},
+    );
+  });
+
+  test('reuses a configuration snapshot without caching later storage changes', () => {
+    writeConfig({ storageDir: 'first-runs' });
+    const config = loadSubagentConfig();
+    writeConfig({ storageDir: 'second-runs' });
+    const read = spyOn(fs, 'readFileSync');
+    try {
+      expect(getRunsDir(config)).toBe(path.join(packageDir, 'first-runs'));
+      expect(read).not.toHaveBeenCalled();
+      expect(getRunsDir()).toBe(path.join(packageDir, 'second-runs'));
+      expect(read.mock.calls.filter(([file]) => String(file) === configFile)).toHaveLength(1);
+    } finally {
+      read.mockRestore();
+      fs.rmSync(configFile, { force: true });
+    }
   });
 
   test('loads the model response timeout from package configuration', () => {
@@ -4106,7 +4156,15 @@ describe('SDK cleanup ownership regressions', () => {
       await manager.spawnAgent(spawnParams(parent, 'worker', 'hold logger run'));
       const info = manager.getAgentInfo('worker', parent);
       const live = manager['live'].get(info.id)!;
-      live.logger.info('regression', 'normal write');
+      const mkdirWhileOpen = spyOn(fs, 'mkdirSync');
+      try {
+        live.logger.info('regression', 'normal write');
+        expect(mkdirWhileOpen).toHaveBeenCalledTimes(1);
+        live.logger.info('regression', 'same stream write');
+        expect(mkdirWhileOpen).toHaveBeenCalledTimes(1);
+      } finally {
+        mkdirWhileOpen.mockRestore();
+      }
       expect(tracked.streams).toHaveLength(1);
       const original = tracked.streams[0];
 
@@ -4149,7 +4207,12 @@ describe('SDK cleanup ownership regressions', () => {
         .map((line) => JSON.parse(line))
         .filter((entry) => entry.category === 'regression')
         .map((entry) => entry.message);
-      expect(messages).toEqual(['normal write', 'closing write', 'restored append']);
+      expect(messages).toEqual([
+        'normal write',
+        'same stream write',
+        'closing write',
+        'restored append',
+      ]);
     } finally {
       responseGate.resolve();
       shutdownGate.resolve();

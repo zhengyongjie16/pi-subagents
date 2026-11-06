@@ -24,6 +24,7 @@ import {
 } from '@earendil-works/pi-tui';
 import {
   AgentManager,
+  formatAgentError,
   getAgentDefinitionsDescription,
   getRunsDir,
   loadSubagentConfig,
@@ -245,7 +246,7 @@ export default async function index_(pi: ExtensionAPI) {
 
   const reportError = (error: unknown, ctx = activeContext) => {
     const errors = error instanceof AggregateError ? [error, ...error.errors] : [error];
-    const message = `[subagents] ${errors.map((entry) => (entry instanceof Error ? entry.message : String(entry))).join('\n')}`;
+    const message = `[subagents] ${errors.map(formatAgentError).join('\n')}`;
     try {
       if (ctx?.hasUI && typeof ctx.ui?.notify === 'function') {
         ctx.ui.notify(message, 'error');
@@ -421,9 +422,7 @@ ${getAgentDefinitionsDescription()}`;
           thinking: info.thinking,
         });
       } catch (error) {
-        throw new Error(
-          `spawn_agent failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        throw new Error(`spawn_agent failed: ${formatAgentError(error)}`);
       }
     },
     renderCall(args: any, theme: Theme) {
@@ -523,9 +522,7 @@ ${getAgentDefinitionsDescription()}`;
         return boundedTextResult(JSON.stringify(result, null, 2), { message: result.message });
       } catch (error) {
         if (signal?.aborted) throw error;
-        throw new Error(
-          `wait_agent failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        throw new Error(`wait_agent failed: ${formatAgentError(error)}`);
       }
     },
     renderCall(args: any, theme: Theme) {
@@ -650,9 +647,7 @@ ${getAgentDefinitionsDescription()}`;
           status: result.status,
         });
       } catch (error) {
-        throw new Error(
-          `read_agent_response failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        throw new Error(`read_agent_response failed: ${formatAgentError(error)}`);
       }
     },
     renderCall(args: any, theme: Theme) {
@@ -698,9 +693,7 @@ ${getAgentDefinitionsDescription()}`;
           { target: params.target, ...result },
         );
       } catch (error) {
-        throw new Error(
-          `send_message failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        throw new Error(`send_message failed: ${formatAgentError(error)}`);
       }
     },
     renderCall(args: any, theme: Theme) {
@@ -742,9 +735,7 @@ ${getAgentDefinitionsDescription()}`;
         );
         return textResult('Interrupt request handled.', result);
       } catch (error) {
-        throw new Error(
-          `interrupt_agent failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        throw new Error(`interrupt_agent failed: ${formatAgentError(error)}`);
       }
     },
     renderCall(args: any, theme: Theme) {
@@ -780,7 +771,7 @@ ${getAgentDefinitionsDescription()}`;
     try {
       info = manager.getAgentInfo(task, scopeId);
     } catch (error) {
-      ctx.ui.notify(error instanceof Error ? error.message : String(error), 'error');
+      ctx.ui.notify(formatAgentError(error), 'error');
       return;
     }
 
@@ -820,7 +811,7 @@ ${getAgentDefinitionsDescription()}`;
       try {
         info = manager.getAgentInfo(next.agent_name, next.parent_session_id || currentSessionId);
       } catch (error) {
-        ctx.ui.notify(error instanceof Error ? error.message : String(error), 'error');
+        ctx.ui.notify(formatAgentError(error), 'error');
         return;
       }
     }

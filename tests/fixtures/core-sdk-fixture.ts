@@ -10,6 +10,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
+import { setTimeout as delay } from 'node:timers/promises';
 
 // The SDK caches modules and core's storage paths for the lifetime of the test process.
 // Share one isolated agent directory across module suites, and remove it when they all exit.
@@ -104,7 +105,6 @@ export interface CoreFixtureOptions {
     instance: CoreFixtureInstance,
   ) => Promise<InputEventResult | void> | InputEventResult | void;
   tokens?: number | ((text: string) => number);
-  response?: (text: string) => string;
 }
 export interface CoreFixtureState extends CoreFixtureOptions {
   instances: CoreFixtureInstance[];
@@ -115,11 +115,7 @@ export function configureCoreFixture(options: CoreFixtureOptions = {}): CoreFixt
   return (shared[key] = { ...options, instances: [] });
 }
 export function deferred() {
-  let resolve!: () => void;
-  const promise = new Promise<void>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
+  return Promise.withResolvers<void>();
 }
 const routes: Array<[string, string]> = [
   ['test', 'fake'],
@@ -154,19 +150,6 @@ async function pause(
     ]);
   } finally {
     signal.removeEventListener('abort', abort);
-  }
-}
-async function delay(ms: number, signal?: AbortSignal): Promise<void> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await pause(
-      new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, ms);
-      }),
-      signal,
-    );
-  } finally {
-    clearTimeout(timer);
   }
 }
 export default function coreSdkFixture(pi: ExtensionAPI) {
@@ -275,11 +258,11 @@ export default function coreSdkFixture(pi: ExtensionAPI) {
               stream.push({ type: 'done', reason: 'toolUse', message });
               return;
             } else {
-              await delay(text.startsWith('slow') ? 200 : 35, options?.signal);
+              await delay(text.startsWith('slow') ? 200 : 35, undefined, {
+                signal: options?.signal,
+              });
             }
-            const response =
-              state.response?.(text) ??
-              (text.startsWith('large') ? 'x'.repeat(60 * 1024) : 'response:' + text);
+            const response = text.startsWith('large') ? 'x'.repeat(60 * 1024) : 'response:' + text;
             const index = message.content.length;
             message.content.push({ type: 'text', text: '' });
             stream.push({ type: 'text_start', contentIndex: index, partial: message });

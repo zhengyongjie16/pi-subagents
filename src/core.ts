@@ -265,13 +265,8 @@ function normalizeConfig(value: unknown): SubagentConfig {
     raw.defaults && typeof raw.defaults === 'object' && !Array.isArray(raw.defaults)
       ? (raw.defaults as Record<string, unknown>)
       : undefined;
-  const defaults = defaultsRaw
-    ? {
-        ...(stringList(defaultsRaw.extensions)
-          ? { extensions: stringList(defaultsRaw.extensions) }
-          : {}),
-      }
-    : undefined;
+  const extensions = stringList(defaultsRaw?.extensions);
+  const models = stringList(raw.models);
   const retentionDays =
     typeof raw.retentionDays === 'number' &&
     Number.isFinite(raw.retentionDays) &&
@@ -292,10 +287,10 @@ function normalizeConfig(value: unknown): SubagentConfig {
       ? { storageDir: raw.storageDir.trim() }
       : {}),
     ...(retentionDays !== undefined ? { retentionDays } : {}),
-    ...(stringList(raw.models) ? { models: stringList(raw.models) } : {}),
+    ...(models ? { models } : {}),
     ...(raw.modelsFromEnabledModels === true ? { modelsFromEnabledModels: true } : {}),
     ...(modelResponseTimeoutMs !== undefined ? { modelResponseTimeoutMs } : {}),
-    ...(defaults && Object.keys(defaults).length ? { defaults } : {}),
+    ...(extensions ? { defaults: { extensions } } : {}),
   };
 }
 
@@ -307,8 +302,8 @@ export function loadSubagentConfig(): SubagentConfig {
   return {};
 }
 
-export function getRunsDir(): string {
-  const configured = loadSubagentConfig().storageDir;
+export function getRunsDir(config: SubagentConfig = loadSubagentConfig()): string {
+  const configured = config.storageDir;
   if (configured) {
     const expanded = expandHome(configured);
     return path.isAbsolute(expanded) ? expanded : path.resolve(SUBAGENT_DIR, expanded);
@@ -344,7 +339,8 @@ function readSystemPrompt(): string {
 function ensureBaseDirs(): void {
   fs.mkdirSync(AGENTS_DIR, { recursive: true });
   ensureSystemPromptFile();
-  ensurePrivateDir(getRunsDir(), !loadSubagentConfig().storageDir);
+  const config = loadSubagentConfig();
+  ensurePrivateDir(getRunsDir(config), !config.storageDir);
   ensurePrivateDir(SOCKET_DIR, true);
 }
 
@@ -650,7 +646,7 @@ export function parseAgentDefinitionText(text: string, fallbackName: string): Ag
 }
 
 export function listAgentDefinitions(): AgentDefinition[] {
-  ensureBaseDirs();
+  fs.mkdirSync(AGENTS_DIR, { recursive: true });
   const definitions: AgentDefinition[] = [];
   for (const name of fs.readdirSync(AGENTS_DIR)) {
     if (!name.endsWith('.md')) continue;
@@ -823,8 +819,8 @@ class SessionLogger {
   ) {}
   write(level: string, category: string, message: string, data?: any): void {
     if (this.closed) return;
-    fs.mkdirSync(path.dirname(this.file), { recursive: true });
     if (!this.stream) {
+      fs.mkdirSync(path.dirname(this.file), { recursive: true });
       const stream = fs.createWriteStream(this.file, { flags: 'a' });
       stream.on('error', (error) => {
         if (this.stream === stream) this.stream = null;
@@ -1587,12 +1583,11 @@ export class AgentManager {
     live.lastActivityPersistedAt = live.info.updatedAt;
     this.notifyStatusChange(live.info);
 
-    let resolveAccepted!: () => void;
-    let rejectAccepted!: (error: unknown) => void;
-    const accepted = new Promise<void>((resolve, reject) => {
-      resolveAccepted = resolve;
-      rejectAccepted = reject;
-    });
+    const {
+      promise: accepted,
+      resolve: resolveAccepted,
+      reject: rejectAccepted,
+    } = Promise.withResolvers<void>();
     throwIfAborted(this.shutdownController.signal);
     throwIfAborted(live.cancellation.signal);
     if (live.closing) throw new Error('Child session is closing.');
