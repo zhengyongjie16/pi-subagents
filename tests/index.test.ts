@@ -309,6 +309,79 @@ test('preserves the six schemas, dynamic routing, tool arguments, and return wra
   );
 });
 
+test('exposes validated structured data without changing text, pagination or response truncation', () => {
+  probe(
+    hostFixture +
+      `const { Value } = await import(${JSON.stringify(import.meta.resolve("typebox/value"))});` +
+      String.raw`
+    const f = host();
+    await extension(f.pi);
+    const check = (name, result) => {
+      const data = result.structuredContent;
+      assert.ok(Value.Check(f.tools.get(name).outputSchema, data), name + ": " + JSON.stringify([...Value.Errors(f.tools.get(name).outputSchema, data)]));
+      if (!result.details?.truncated) assert.deepEqual(data, JSON.parse(result.content[0].text));
+      return data;
+    };
+    for (const name of ["spawn_agent", "send_message", "interrupt_agent"])
+      assert.equal(f.tools.get(name).outputSchema, undefined, name + " must stay text-only");
+    const statuses = ["starting", "running", "completed", "failed", "interrupted"];
+    for (const status of ["completed", "failed", "interrupted"]) {
+      AgentManager.prototype.waitAgent = async () => ({ message: "done", event: {
+        agentName: "/worker", status, finalResponse: "private body", error: "private error", parentSessionId: "private parent",
+      } });
+      const result = await f.call("wait_agent", {});
+      assert.deepEqual(check("wait_agent", result), { agent_name: "/worker", status });
+      assert.deepEqual(result.details, { message: "done" });
+    }
+    assert.equal(Value.Check(f.tools.get("wait_agent").outputSchema, { agent_name: "/worker", status: "running" }), false);
+    assert.equal(Value.Check(f.tools.get("wait_agent").outputSchema, { agent_name: "/worker", status: "completed", finalResponse: "leak" }), false);
+    for (const status of statuses) {
+      AgentManager.prototype.listAgents = (_prefix, _parent, all) => [{
+        agent_name: "/worker", agent_status: status, last_task_message: "excluded task",
+        ...(all ? { parent_session_id: "other" } : {}),
+      }];
+      const listed = check("list_agents", await f.call("list_agents", {}));
+      assert.deepEqual(listed, { total: 1, returned: 1, offset: 0, limit: 10, next_offset: null, agents: [{ agent_name: "/worker", agent_status: status }] });
+      const history = check("list_agents", await f.call("list_agents", { include_all: true }));
+      assert.equal(history.agents[0].parent_session_id, "other");
+      AgentManager.prototype.readAgentResponse = () => ({ agent_name: "/worker", status, last_task_message: null });
+      const pending = check("read_agent_response", await f.call("read_agent_response", { target: "worker" }));
+      assert.equal(Object.hasOwn(pending, "finalResponse"), false);
+      assert.equal(Object.hasOwn(pending, "error"), false);
+    }
+    AgentManager.prototype.listAgents = () => Array.from({ length: 12 }, (_, n) => ({ agent_name: "/" + n, agent_status: "completed" }));
+    const first = check("list_agents", await f.call("list_agents", {}));
+    assert.equal(first.returned, 10);
+    assert.equal(first.next_offset, 10);
+    const last = check("list_agents", await f.call("list_agents", { offset: 10 }));
+    assert.equal(last.returned, 2);
+    assert.equal(last.next_offset, null);
+    const empty = check("list_agents", await f.call("list_agents", { offset: 20 }));
+    assert.equal(empty.returned, 0);
+    assert.deepEqual(empty.agents, []);
+    AgentManager.prototype.listAgents = () => [];
+    assert.equal(check("list_agents", await f.call("list_agents", {})).total, 0);
+    for (const fields of [{ finalResponse: "" }, { finalResponse: "answer" }, { error: "child failed" }]) {
+      const expected = { agent_name: "/worker", status: fields.error ? "failed" : "completed", last_task_message: "task", ...fields };
+      AgentManager.prototype.readAgentResponse = () => expected;
+      assert.deepEqual(check("read_agent_response", await f.call("read_agent_response", { target: "worker" })), expected);
+    }
+    const expected = { agent_name: "/worker", status: "completed", last_task_message: null,
+      finalResponse: '中文🙂"\\\n'.repeat(10_000),
+    };
+    AgentManager.prototype.readAgentResponse = () => expected;
+    const large = await f.call("read_agent_response", { target: "worker" });
+    assert.deepEqual(check("read_agent_response", large), expected);
+    assert.equal(large.details.truncated, true);
+    assert.ok(large.content[0].text.includes("Output truncated"));
+    assert.ok(Buffer.byteLength(large.content[0].text) < Buffer.byteLength(JSON.stringify(expected)));
+    assert.deepEqual(JSON.parse(fs.readFileSync(large.details.fullOutputPath, "utf8")), expected);
+    assert.equal(Value.Check(f.tools.get("read_agent_response").outputSchema, { ...expected, last_task_message: undefined }), false);
+    await f.emit("session_shutdown", { reason: "quit" });
+  `,
+  );
+});
+
 test('preserves tool error prefixes, quota explanations, wait previews and cancellation identity', () => {
   probe(
     hostFixture +
@@ -765,6 +838,112 @@ test.each(runtimes)(
       const changed = await spawn("model-only-current", { agent_type: "model-only" });
       assert.equal(changed.provider, "template-provider");
       assert.equal(changed.modelId, "template-model");
+      assert.deepEqual(errors, []);
+    } finally {
+      try { await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); }
+      finally { session.dispose(); }
+    }
+  `,
+      executable,
+    );
+  },
+);
+
+test.each(runtimes)(
+  'native codemode receives structured subagent results and preserves errors and redaction (%s)',
+  (_name, executable) => {
+    probe(
+      String.raw`
+    import assert from "node:assert/strict";
+    import * as fs from "node:fs";
+    import * as path from "node:path";
+    const { Value } = await import(${JSON.stringify(import.meta.resolve("typebox/value"))});
+    const { createAgentSessionServices, createAgentSessionFromServices, createCodemodeExtension, SessionManager, SettingsManager } = await import(${JSON.stringify(sdkUrl)});
+    const agentDir = process.env.PI_CODING_AGENT_DIR;
+    const fixtureSource = ${JSON.stringify(path.join(packageDir, "tests", "fixtures", "sdk-offline-extension.ts"))};
+    const fixture = (name, config) => {
+      const directory = path.join(agentDir, name);
+      fs.mkdirSync(directory);
+      const extension = path.join(directory, "extension.ts");
+      fs.copyFileSync(fixtureSource, extension);
+      fs.writeFileSync(path.join(directory, "sdk-fixture.json"), JSON.stringify(config));
+      return { directory, extension };
+    };
+    const child = fixture("child-provider", { prefix: "child" });
+    const script = [
+      'await tools.spawn_agent({ task_name: "worker", message: "first" });',
+      'const waited = await tools.wait_agent({ targets: ["worker"] });',
+      'if (typeof waited !== "object" || waited.agent_name !== "/worker" || waited.status !== "completed" || Object.keys(waited).length !== 2) throw new Error("wait contract");',
+      'const listed = await tools.list_agents({});',
+      'if (typeof listed !== "object" || listed.total !== 1 || listed.agents[0].agent_name !== "/worker" || listed.next_offset !== null) throw new Error("list contract");',
+      'const response = await tools.read_agent_response({ target: "worker" });',
+      'if (typeof response !== "object" || response.finalResponse !== "child: first") throw new Error("read contract");',
+      'const missing = await Promise.allSettled([tools.read_agent_response({ target: "missing" }), tools.wait_agent({ targets: ["missing"] })]);',
+      'if (missing.some(result => result.status !== "rejected")) throw new Error("tool errors must reject");',
+      'const redacted = await tools.read_agent_response({ target: "/worker" });',
+      'if (redacted !== "redacted by test hook") throw new Error("native redaction must not leak structured data");',
+      'await tools.send_message({ target: "worker", message: "x".repeat(100000) });',
+      'const second = await tools.wait_agent({ targets: ["worker"] });',
+      'const large = await tools.read_agent_response({ target: "worker" });',
+      'if (second.status !== "completed" || large.finalResponse !== "child: " + "x".repeat(100000)) throw new Error("large structured response");',
+      'text({ marker: "structured-codemode-ok", responseLength: large.finalResponse.length });',
+    ].join("\n");
+    const parent = fixture("parent-provider", { codemodeScript: script });
+    const configDir = path.join(agentDir, "pi-subagents");
+    fs.mkdirSync(configDir);
+    fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ retentionDays: 0, defaults: { extensions: [child.extension] } }));
+    const settingsManager = SettingsManager.inMemory({
+      compaction: { enabled: false }, retry: { enabled: false }, cacheWarming: "off",
+      defaultTools: ["+codemode"], codemode: { mode: "only", inlineBudget: 0 },
+    });
+    settingsManager.setProjectTrusted(false);
+    const successful = [], failures = [];
+    const services = await createAgentSessionServices({ cwd: agentDir, agentDir, settingsManager,
+      resourceLoaderOptions: {
+        noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+        additionalExtensionPaths: [process.argv[2], parent.extension],
+        extensionFactories: [createCodemodeExtension(), pi => {
+          pi.on("tool_result", event => {
+            if (event.toolName === "read_agent_response" && event.input.target === "/worker")
+              return { content: [{ type: "text", text: "redacted by test hook" }] };
+          });
+          pi.on("tool_execution_end", event => {
+            if (!["wait_agent", "list_agents", "read_agent_response"].includes(event.toolName)) return;
+            if (event.isError) { failures.push(event); return; }
+            if (event.toolName === "read_agent_response" && event.result.content[0]?.text === "redacted by test hook") {
+              assert.equal(event.result.structuredContent, undefined);
+              return;
+            }
+            const schema = schemas.get(event.toolName);
+            assert.ok(Value.Check(schema, event.result.structuredContent), event.toolName + " schema");
+            successful.push(event);
+          });
+        }],
+      },
+    });
+    const model = (await services.modelRuntime.getAvailable("sdk-offline")).find(model => model.id === "exact/model");
+    assert.ok(model);
+    const { session } = await createAgentSessionFromServices({ services, model, sessionManager: SessionManager.inMemory(agentDir) });
+    const schemas = new Map(["wait_agent", "list_agents", "read_agent_response"].map(name => [name, session.getToolDefinition(name).outputSchema]));
+    const errors = [];
+    try {
+      await session.bindExtensions({ mode: "print", onError: error => errors.push(error) });
+      await session.prompt("Exercise structured subagent results", { source: "rpc" });
+      await session.waitForIdle();
+      const result = session.messages.find(message => message.role === "toolResult" && message.toolName === "codemode");
+      assert.ok(result && !result.isError, JSON.stringify(result));
+      const output = JSON.stringify(result.content);
+      assert.ok(output.includes("structured-codemode-ok"), output);
+      assert.ok(output.includes("100007"), output);
+      assert.ok(!output.includes("x".repeat(1000)), "codemode must only print the selected fields");
+      assert.equal(successful.length, 5, JSON.stringify({ names: successful.map(event => event.toolName), errors }));
+      assert.equal(failures.length, 2);
+      assert.ok(failures.every(event => event.result.structuredContent === undefined));
+      const large = successful.find(event => event.result.details?.truncated);
+      assert.ok(large);
+      assert.ok(large.result.content[0].text.includes("Output truncated"));
+      assert.equal(JSON.parse(fs.readFileSync(large.result.details.fullOutputPath, "utf8")).finalResponse.length, 100007);
+      assert.equal(session.messages.filter(message => message.role === "custom" && message.customType === "pi-subagent-completion").length, 2);
       assert.deepEqual(errors, []);
     } finally {
       try { await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); }

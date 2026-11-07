@@ -39,6 +39,10 @@ import { SubagentPeekOverlay } from './peek.js';
 
 type ToolRenderContext = Parameters<NonNullable<ToolRenderers['renderResult']>>[3];
 
+const agentStatusSchema = Type.Unsafe<AgentInfo['status']>(
+  StringEnum(['starting', 'running', 'completed', 'failed', 'interrupted']),
+);
+
 function textResult(text: string, details?: any) {
   return { content: [{ type: 'text' as const, text }], details };
 }
@@ -507,6 +511,15 @@ ${getAgentDefinitionsDescription()}`;
         }),
       ),
     }),
+    outputSchema: Type.Object(
+      {
+        agent_name: Type.String(),
+        status: Type.Unsafe<'completed' | 'failed' | 'interrupted'>(
+          StringEnum(['completed', 'failed', 'interrupted']),
+        ),
+      },
+      { additionalProperties: false },
+    ),
     async execute(
       _id: string,
       params: any,
@@ -520,10 +533,11 @@ ${getAgentDefinitionsDescription()}`;
           parseTargets(params.targets),
           signal,
         );
-        return textResult(
-          JSON.stringify({ agent_name: result.event.agentName, status: result.event.status }),
-          { message: result.message },
-        );
+        const data = { agent_name: result.event.agentName, status: result.event.status };
+        return {
+          ...textResult(JSON.stringify(data), { message: result.message }),
+          structuredContent: data,
+        };
       } catch (error) {
         if (signal?.aborted) throw error;
         throw new Error(`wait_agent failed: ${formatAgentError(error)}`);
@@ -573,6 +587,26 @@ ${getAgentDefinitionsDescription()}`;
         }),
       ),
     }),
+    outputSchema: Type.Object(
+      {
+        total: Type.Integer({ minimum: 0 }),
+        returned: Type.Integer({ minimum: 0, maximum: 100 }),
+        offset: Type.Integer({ minimum: 0 }),
+        limit: Type.Integer({ minimum: 1, maximum: 100 }),
+        next_offset: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]),
+        agents: Type.Array(
+          Type.Object(
+            {
+              agent_name: Type.String(),
+              agent_status: agentStatusSchema,
+              parent_session_id: Type.Optional(Type.String()),
+            },
+            { additionalProperties: false },
+          ),
+        ),
+      },
+      { additionalProperties: false },
+    ),
     async execute(
       _id: string,
       params: any,
@@ -611,7 +645,10 @@ ${getAgentDefinitionsDescription()}`;
         next_offset: nextOffset,
         agents,
       };
-      return textResult(JSON.stringify(result, null, 2), result);
+      return {
+        ...textResult(JSON.stringify(result, null, 2), result),
+        structuredContent: result,
+      };
     },
     renderCall(_args: any, theme: Theme) {
       return new Text(theme.fg('toolTitle', theme.bold('list_agents')), 0, 0);
@@ -634,6 +671,16 @@ ${getAgentDefinitionsDescription()}`;
     parameters: Type.Object({
       target: Type.String({ description: 'Session-owned agent task name.' }),
     }),
+    outputSchema: Type.Object(
+      {
+        agent_name: Type.String(),
+        status: agentStatusSchema,
+        finalResponse: Type.Optional(Type.String()),
+        error: Type.Optional(Type.String()),
+        last_task_message: Type.Union([Type.String(), Type.Null()]),
+      },
+      { additionalProperties: false },
+    ),
     async execute(
       _id: string,
       params: any,
@@ -646,10 +693,13 @@ ${getAgentDefinitionsDescription()}`;
           cleanTarget(params.target),
           parentSessionId(ctx),
         );
-        return boundedTextResult(JSON.stringify(result, null, 2), {
-          agent_name: result.agent_name,
-          status: result.status,
-        });
+        return {
+          ...boundedTextResult(JSON.stringify(result, null, 2), {
+            agent_name: result.agent_name,
+            status: result.status,
+          }),
+          structuredContent: { ...result },
+        };
       } catch (error) {
         throw new Error(`read_agent_response failed: ${formatAgentError(error)}`);
       }
