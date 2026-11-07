@@ -23,7 +23,7 @@ pi install /absolute/path/to/pi-subagents
 | Tool                  | Purpose                                                                |
 | --------------------- | ---------------------------------------------------------------------- |
 | `spawn_agent`         | Start a fresh-context SDK session and return after task acceptance     |
-| `wait_agent`          | Block for one completion and return its final text                     |
+| `wait_agent`          | Block for one completion and return only its agent name and status     |
 | `list_agents`         | List current-session agents, or explicitly include historical sessions |
 | `read_agent_response` | Read an agent's latest final raw text response                         |
 | `send_message`        | Steer a running agent or start another turn when settled               |
@@ -132,7 +132,9 @@ A thinking level written into an `enabledModels` pattern, such as `anthropic/cla
 
 ## Completion delivery
 
-A child completion or failure is delivered automatically to its parent session after the child reaches final status. If the parent is active, the result joins the current run; if the parent is idle, it starts a continuation turn. Continue independent work instead of waiting. Use `wait_agent` only when the next action depends on that response and no useful work remains meanwhile; an active wait receives the result directly without a duplicate automatic message.
+A child completion or failure is delivered automatically to its parent session after the child reaches final status, including while `wait_agent` is active. If the parent is active, the result joins the current run; if the parent is idle, it starts a continuation turn. An active wait receives only the agent name and final status, while the notification supplies the final text or error before the natural continuation. Continue independent work instead of waiting; use `wait_agent` only when the next action depends on that result and no useful work remains meanwhile.
+
+`wait_agent` returns `{"agent_name":"/task","status":"completed"}` (or `failed` / `interrupted`), not the previous full completion event. Waiting after a notification or repeatedly waiting on a finished target does not replay its text or send another notification. Do not automatically follow every wait with a read; use `read_agent_response` only when you explicitly need to reread the latest saved result. Target filtering, one-completion waits, cancellation, and session scoping are unchanged.
 
 ## Commands and TUI
 
@@ -148,7 +150,7 @@ Cancellation is cooperative within the shared Pi process. Unresponsive tools or 
 
 ## Output limits
 
-Automatic completions, wait tools, and response tools follow Pi's standard 50 KB / 2,000-line output limit. Oversized output is truncated and the complete text is written beside the runtime data; the returned notice includes a path that can be read with Pi's `read` tool.
+Automatic completions and response tools follow Pi's standard 50 KB / 2,000-line output limit. Wait results contain only an agent name and status. Oversized output is truncated and the complete text is written beside the runtime data; the returned notice includes a path that can be read with Pi's `read` tool.
 
 ## License
 

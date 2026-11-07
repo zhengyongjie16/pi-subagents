@@ -74,6 +74,7 @@ const hostFixture = `
     const messages = [], notifications = [], widgets = [];
     const ctx = {
       cwd: process.env.PI_CODING_AGENT_DIR, mode: "tui", hasUI: true,
+      isIdle: () => true,
       isProjectTrusted: () => true,
       model: { provider: "test", id: "fake" },
       modelRegistry: { getAvailable: () => [{ provider: "test", id: "fake" }] },
@@ -272,10 +273,10 @@ test('preserves the six schemas, dynamic routing, tool arguments, and return wra
     assert.ok(!Object.hasOwn(spawned, "loadedSkillPaths"));
     const signal = new AbortController().signal;
     let waited;
-    AgentManager.prototype.waitAgent = async (...args) => { waited = args; return { message: "done", event: { status: "completed" } }; };
+    AgentManager.prototype.waitAgent = async (...args) => { waited = args; return { message: "done", event: { agentName: "/task", status: "completed", finalResponse: "must not repeat", error: "must not repeat either", parentSessionId: "parent" } }; };
     const wait = await f.call("wait_agent", { targets: [" /task "] }, f.ctx, signal);
     assert.deepEqual(waited, ["parent", ["task"], signal]);
-    assert.deepEqual(JSON.parse(wait.content[0].text), { message: "done", event: { status: "completed" } });
+    assert.deepEqual(JSON.parse(wait.content[0].text), { agent_name: "/task", status: "completed" });
     assert.deepEqual(wait.details, { message: "done" });
     let listed;
     AgentManager.prototype.listAgents = (...args) => { listed = args; return Array.from({ length: 12 }, (_, n) => ({ agent_name: "/" + n, agent_status: "completed", ...(args[2] ? { parent_session_id: "other" } : {}) })); };
@@ -461,6 +462,42 @@ test("warns when storage overlaps the current parent's custom native session dir
   );
 });
 
+test('wait tools expose only status and waiting notifications preserve natural or idle continuation', () => {
+  probe(
+    hostFixture +
+      String.raw`
+    const f = host();
+    await extension(f.pi);
+    await f.emit("session_start");
+    const event = { parentSessionId: "parent", agentName: "/task", status: "completed", finalResponse: "notification body" };
+    f.ctx.isIdle = () => false;
+    options.onCompletion(event, true);
+    assert.equal(f.messages.at(-1).delivery.triggerTurn, false);
+    assert.ok(f.messages.at(-1).message.content.includes("notification body"));
+    f.ctx.isIdle = () => true;
+    options.onCompletion(event, true);
+    assert.equal(f.messages.at(-1).delivery.triggerTurn, true, "idle parents must still wake");
+    f.ctx.isIdle = () => false;
+    options.onCompletion(event, false);
+    assert.equal(f.messages.at(-1).delivery.triggerTurn, true, "independent work keeps normal automatic delivery");
+    options.onCompletion({ ...event, parentSessionId: "other" }, true);
+    assert.equal(f.messages.length, 3);
+    for (const status of ["completed", "failed", "interrupted"]) {
+      AgentManager.prototype.waitAgent = async () => ({
+        message: "wait finished",
+        event: { ...event, status, finalResponse: "large answer".repeat(20_000), error: "large error".repeat(20_000) },
+      });
+      const waited = await f.call("wait_agent", { targets: ["task"] });
+      assert.deepEqual(JSON.parse(waited.content[0].text), { agent_name: "/task", status });
+      assert.deepEqual(waited.details, { message: "wait finished" });
+      assert.ok(waited.content[0].text.length < 100);
+    }
+    assert.ok(f.tools.get("wait_agent").description.includes("Returns only agent_name and status"));
+    await f.emit("session_shutdown", { reason: "quit" });
+  `,
+  );
+});
+
 test('keeps scoped notifications, bounded full output, and widget/shortcut integration', () => {
   probe(
     hostFixture +
@@ -479,16 +516,16 @@ test('keeps scoped notifications, bounded full output, and widget/shortcut integ
     const theme = { fg: (_color, text) => text };
     assert.ok(widget({}, theme).render(80).join("\n").includes("/task running"));
     assert.ok(widget({}, theme).render(30).join("\n").includes("/subagents"));
-    options.onUnclaimedCompletion({ parentSessionId: "other", agentName: "/ignored", status: "completed" });
+    options.onCompletion({ parentSessionId: "other", agentName: "/ignored", status: "completed" });
     assert.equal(f.messages.length, 0);
     const event = { parentSessionId: "parent", agentName: "/task", status: "completed", finalResponse: "answer" };
-    options.onUnclaimedCompletion(event);
+    options.onCompletion(event);
     assert.deepEqual(f.messages[0], { message: {
       customType: "pi-subagent-completion",
       content: "<subagent_notification>\n" + JSON.stringify({ agent_name: "/task", status: "completed", final_response: "answer" }, null, 2) + "\n</subagent_notification>",
       display: true, details: { agent_name: "/task", status: "completed" },
     }, delivery: { deliverAs: "steer", triggerTurn: true } });
-    options.onUnclaimedCompletion({ ...event, finalResponse: "x".repeat(100_000) });
+    options.onCompletion({ ...event, finalResponse: "x".repeat(100_000) });
     const large = f.messages.at(-1).message;
     assert.ok(Buffer.byteLength(large.content) <= 50 * 1024);
     assert.ok(large.content.includes("Output truncated"));
@@ -496,7 +533,7 @@ test('keeps scoped notifications, bounded full output, and widget/shortcut integ
     options.onActivityChange({ parentSessionId: "parent", agentName: "/task", active: false });
     assert.equal(f.widgets.at(-1)[1], undefined);
     await f.emit("session_shutdown", { reason: "quit" });
-    options.onUnclaimedCompletion(event);
+    options.onCompletion(event);
     assert.equal(f.messages.length, 2, "no stale delivery after shutdown");
   `,
   );
@@ -583,7 +620,8 @@ test.each(runtimes)(
       const ctx = session.extensionRunner.createContext();
       const result = await spawnTool().execute("spawn", { task_name: "multiline-child", agent_type: "multiline", message: "work" }, undefined, undefined, ctx);
       const waited = await session.getToolDefinition("wait_agent").execute("wait", { targets: ["multiline-child"] }, undefined, undefined, ctx);
-      assert.equal(JSON.parse(waited.content[0].text).event.status, "completed");
+      assert.deepEqual(JSON.parse(waited.content[0].text), { agent_name: "/multiline-child", status: "completed" });
+      await session.waitForIdle(); // The completion notification also resumes an idle parent.
       assert.equal(result.details.provider, "test");
       assert.equal(result.details.modelId, "fake");
       assert.equal(result.details.thinking, "off");
@@ -660,7 +698,7 @@ test.each(runtimes)(
         assert.equal(child.ctx.model.id, result.details.modelId);
         assert.equal(nativeThinking.at(-1), result.details.thinking);
         const waited = await session.getToolDefinition("wait_agent").execute("wait", { targets: [task_name] }, undefined, undefined, ctx);
-        assert.equal(JSON.parse(waited.content[0].text).event.status, "completed");
+        assert.deepEqual(JSON.parse(waited.content[0].text), { agent_name: "/" + task_name, status: "completed" });
         return result.details;
       };
       assert.equal(spawnTool().parameters.properties.thinking, undefined);
@@ -764,8 +802,9 @@ test.each(runtimes)(
     const config = path.join(agentDir, "pi-subagents", "config.json");
     fs.mkdirSync(path.dirname(config));
     fs.writeFileSync(config, JSON.stringify({ retentionDays: 0, defaults: { extensions: [childFixture.extension] } }));
-    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false }, steeringMode: "one-at-a-time" });
     settingsManager.setProjectTrusted(false);
+    const parentRequests = [];
     let drive, driverError, finishDriver, releaseParent;
     const driverFinished = new Promise(resolve => { finishDriver = resolve; });
     const parentHold = new Promise(resolve => { releaseParent = resolve; });
@@ -780,7 +819,8 @@ test.each(runtimes)(
             api: "host-offline", apiKey: "offline-only", baseUrl: "http://offline.invalid",
             models: [{ id: "exact/model", name: "Offline host", reasoning: false, input: ["text"],
               contextWindow: 500_000, maxTokens: 1_000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
-            streamSimple(model) {
+            streamSimple(model, context) {
+              parentRequests.push(structuredClone(context.messages));
               const stream = createAssistantMessageEventStream();
               const first = request++ === 0;
               const message = { role: "assistant", api: model.api, provider: model.provider, model: model.id,
@@ -890,23 +930,28 @@ test.each(runtimes)(
         const waiting = call("wait_agent", { targets: ["worker"] });
         await delay(5);
         fs.writeFileSync(path.join(childFixture.directory, "release-response"), "");
-        const completion = JSON.parse((await waiting).content[0].text).event;
-        assert.equal(completion.status, "completed");
-        assert.equal(completion.finalResponse, "child: steered work");
+        const completion = JSON.parse((await waiting).content[0].text);
+        assert.deepEqual(completion, { agent_name: "/worker", status: "completed" });
         await reclaimed("initial completion");
         const read = JSON.parse((await call("read_agent_response", { target: "worker" })).content[0].text);
         assert.equal(read.finalResponse, "child: steered work");
+        const finishWaiting = async () => {
+          const waiting = call("wait_agent", { targets: ["worker"] });
+          await delay(5);
+          fs.writeFileSync(path.join(childFixture.directory, "release-response"), "");
+          assert.deepEqual(JSON.parse((await waiting).content[0].text), { agent_name: "/worker", status: "completed" });
+        };
         settingsManager.setProjectTrusted(true);
+        fs.rmSync(path.join(childFixture.directory, "release-response"));
         assert.equal((await call("send_message", { target: "worker", message: "resumed work" })).details.delivery, "prompt");
-        const resumed = JSON.parse((await call("wait_agent", { targets: ["worker"] })).content[0].text);
-        assert.equal(resumed.event.finalResponse, "child: resumed work");
+        await finishWaiting();
         const events = fs.readFileSync(path.join(childFixture.directory, "sdk-events.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
         assert.deepEqual(events.filter(event => event.type === "session_start").map(event => event.trusted), [false, true]);
         await reclaimed("first resumption");
         for (let turn = 0; turn < 8; turn++) {
+          fs.rmSync(path.join(childFixture.directory, "release-response"));
           await call("send_message", { target: "worker", message: "repeat " + turn });
-          const result = JSON.parse((await call("wait_agent", { targets: ["worker"] })).content[0].text);
-          assert.equal(result.event.finalResponse, "child: repeat " + turn);
+          await finishWaiting();
           await reclaimed("repeated resumption " + turn);
           assert.equal(session.isStreaming, true);
         }
@@ -930,6 +975,28 @@ test.each(runtimes)(
       const driverResult = session.messages.find(message => message.role === "toolResult" && message.toolName === "host_driver");
       assert.ok(driverResult && !driverResult.isError);
       assert.deepEqual([...new Set(driverResult.nestedCalls.calls.map(call => call.name))].sort(), ${JSON.stringify([...toolNames].sort())});
+      assert.equal(parentRequests.length, 2, "waiting completions must share the natural continuation");
+      const textOf = message => typeof message.content === "string" ? message.content : (message.content ?? []).filter(part => part.type === "text").map(part => part.text).join("\n");
+      const notifications = messages => messages.map(textOf).filter(text => text.startsWith("<subagent_notification>"));
+      const delivered = notifications(parentRequests[1]).map(text => JSON.parse(text.replace("<subagent_notification>", "").replace("</subagent_notification>", "")));
+      assert.deepEqual(delivered.map(result => result.final_response), ["child: steered work", "child: resumed work", ...Array.from({ length: 8 }, (_, turn) => "child: repeat " + turn)]);
+      const ctx = session.extensionRunner.createContext();
+      const direct = (name, args) => session.getToolDefinition(name).execute("idle-test", args, undefined, undefined, ctx);
+      await direct("spawn_agent", { task_name: "idle", message: "idle result" });
+      fs.writeFileSync(path.join(childFixture.directory, "release-response"), "");
+      const deadline = Date.now() + 2_000;
+      while (parentRequests.length < 3 && Date.now() < deadline) await delay(5);
+      await session.waitForIdle();
+      await reclaimed("idle automatic completion");
+      assert.equal(parentRequests.length, 3, "an idle parent must still wake automatically");
+      assert.equal(notifications(parentRequests[2]).length, 11);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const waited = await direct("wait_agent", { targets: ["idle"] });
+        assert.deepEqual(JSON.parse(waited.content[0].text), { agent_name: "/idle", status: "completed" });
+      }
+      await delay(10);
+      assert.equal(parentRequests.length, 3, "late/repeated waits must not trigger another notification or turn");
+      assert.equal(JSON.parse((await direct("read_agent_response", { target: "idle" })).content[0].text).finalResponse, "child: idle result");
       assert.deepEqual(errors, []);
     } finally {
       releaseParent();
@@ -1976,6 +2043,7 @@ test('six public tools carry native usage through metadata and the detail footer
   const ctx: any = {
     mode: 'tui',
     cwd: TEST_AGENT_DIR,
+    isIdle: () => true,
     model: { provider: 'test', id: 'fake' },
     modelRegistry: { getAvailable: () => [{ provider: 'test', id: 'fake' }] },
     sessionManager: { getSessionId: () => parent },
@@ -2022,9 +2090,9 @@ test('six public tools carry native usage through metadata and the detail footer
     expect(read.content[0].text).toContain('response:sample ten');
     expect(await execute('read_agent_response', { target: 'worker' })).toEqual(read);
     expect(sent).toHaveLength(beforeRead);
-    expect((await execute('wait_agent', { targets: ['worker'] })).content[0].text).toContain(
-      'response:sample ten',
-    );
+    const wait = await execute('wait_agent', { targets: ['worker'] });
+    expect(JSON.parse(wait.content[0].text)).toEqual({ agent_name: '/worker', status: 'completed' });
+    expect(sent).toHaveLength(beforeRead);
     expect((await execute('list_agents', {})).content[0].text).not.toContain('contextUsage');
     let detailOpened = 0;
     ctx.ui.custom = async (create: any) => {
@@ -2072,7 +2140,10 @@ test('six public tools carry native usage through metadata and the detail footer
     const resumed = JSON.parse(
       (await execute('wait_agent', { targets: ['worker'] })).content[0].text,
     );
-    expect(resumed.event.finalResponse).toBe('response:sample fourteen');
+    expect(resumed).toEqual({ agent_name: '/worker', status: 'completed' });
+    expect((await execute('read_agent_response', { target: 'worker' })).content[0].text).toContain(
+      'response:sample fourteen',
+    );
     const saved = getAgent('worker', parent)!;
     expect(saved.contextUsage).toMatchObject({ tokens: 70000, contextWindow: 500000 });
     expect(saved.contextUsage!.percent!).toBeCloseTo(14);

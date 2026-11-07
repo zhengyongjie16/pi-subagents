@@ -216,7 +216,7 @@ export default async function index_(pi: ExtensionAPI) {
     }));
   };
 
-  const deliverCompletion = (event: AgentCompletionEvent) => {
+  const deliverCompletion = (event: AgentCompletionEvent, waiting = false) => {
     if (!isCurrentSession(event.parentSessionId)) return;
     const payload = JSON.stringify(
       {
@@ -240,7 +240,8 @@ export default async function index_(pi: ExtensionAPI) {
           ...(bounded.fullOutputPath ? { fullOutputPath: bounded.fullOutputPath } : {}),
         },
       },
-      { deliverAs: 'steer', triggerTurn: true },
+      // An active wait already guarantees a next turn. Append without another steering turn.
+      { deliverAs: 'steer', triggerTurn: !waiting || activeContext.isIdle() },
     );
   };
 
@@ -277,7 +278,7 @@ export default async function index_(pi: ExtensionAPI) {
         else activeAgents.delete(event.agentName);
         refreshAgentWidget();
       },
-      onUnclaimedCompletion: deliverCompletion,
+      onCompletion: deliverCompletion,
     });
     // Check storage overlap with the parent's custom session directory.
     const sessionDir = ctx.sessionManager.getSessionDir?.();
@@ -497,7 +498,7 @@ ${getAgentDefinitionsDescription()}`;
     name: 'wait_agent',
     label: 'Wait Agent',
     description:
-      'Wait for one session-owned agent completion, or for the next completion if targets is omitted. Use only when your next action depends on that response; otherwise continue working and let completion arrive automatically. Returns one final response.',
+      'Wait for one session-owned agent completion, or for the next completion if targets is omitted. Returns only agent_name and status; final text and errors arrive automatically in a completion notification. Use only when blocked on that result; otherwise continue working. Use read_agent_response only to explicitly reread a result.',
     parameters: Type.Object({
       targets: Type.Optional(
         Type.Array(Type.String(), {
@@ -519,7 +520,10 @@ ${getAgentDefinitionsDescription()}`;
           parseTargets(params.targets),
           signal,
         );
-        return boundedTextResult(JSON.stringify(result, null, 2), { message: result.message });
+        return textResult(
+          JSON.stringify({ agent_name: result.event.agentName, status: result.event.status }),
+          { message: result.message },
+        );
       } catch (error) {
         if (signal?.aborted) throw error;
         throw new Error(`wait_agent failed: ${formatAgentError(error)}`);

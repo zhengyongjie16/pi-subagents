@@ -1265,7 +1265,7 @@ describe('SDK model validation', () => {
       const parent = 'unavailable-' + randomUUID();
       const completions: any[] = [];
       const manager = new AgentManager({
-        onUnclaimedCompletion: (event) => completions.push(event),
+        onCompletion: (event) => completions.push(event),
       });
       try {
         await expect(
@@ -1365,7 +1365,7 @@ describe('SDK model validation', () => {
       const parent = 'retry-' + randomUUID();
       const completions: any[] = [];
       const manager = new AgentManager({
-        onUnclaimedCompletion: (event) => completions.push(event),
+        onCompletion: (event) => completions.push(event),
       });
       try {
         await manager.spawnAgent(
@@ -1458,7 +1458,7 @@ describe('SDK lifecycle and cancellation races', () => {
     fixture = configureCoreFixture({ responseGate: gate.promise });
     const parent = 'steer-' + randomUUID();
     const completions: any[] = [];
-    const manager = new AgentManager({ onUnclaimedCompletion: (event) => completions.push(event) });
+    const manager = new AgentManager({ onCompletion: (event) => completions.push(event) });
     try {
       await manager.spawnAgent(spawnParams(parent, 'worker', 'hold initial'));
       expect(await manager.sendMessage(parent, 'worker', 'next instruction')).toEqual({
@@ -1486,7 +1486,7 @@ describe('SDK lifecycle and cancellation races', () => {
       const parent = 'stop-reason-' + randomUUID();
       const completions: any[] = [];
       const manager = new AgentManager({
-        onUnclaimedCompletion: (event) => completions.push(event),
+        onCompletion: (event) => completions.push(event),
       });
       try {
         await manager.spawnAgent(spawnParams(parent, 'worker', command + ' now'));
@@ -1507,7 +1507,7 @@ describe('SDK lifecycle and cancellation races', () => {
   test("handled input ends with this run's empty response, never the previous answer", async () => {
     const parent = 'handled-' + randomUUID();
     const completions: any[] = [];
-    const manager = new AgentManager({ onUnclaimedCompletion: (event) => completions.push(event) });
+    const manager = new AgentManager({ onCompletion: (event) => completions.push(event) });
     try {
       await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
       const info = manager.getAgentInfo('worker', parent);
@@ -1569,7 +1569,7 @@ describe('SDK lifecycle and cancellation races', () => {
       const parent = 'cancel-' + phase + '-' + randomUUID();
       const completions: any[] = [];
       const manager = new AgentManager({
-        onUnclaimedCompletion: (event) => completions.push(event),
+        onCompletion: (event) => completions.push(event),
       });
       const pending = manager.spawnAgent(spawnParams(parent, 'worker', 'hold late')).then(
         () => undefined,
@@ -1627,7 +1627,7 @@ describe('SDK lifecycle and cancellation races', () => {
       const parent = 'startup-timeout-' + phase + '-' + randomUUID();
       const completions: any[] = [];
       const manager = new AgentManager({
-        onUnclaimedCompletion: (event) => completions.push(event),
+        onCompletion: (event) => completions.push(event),
         onError() {},
       });
       const pending = manager.spawnAgent(spawnParams(parent, 'worker', 'hold late')).then(
@@ -1701,7 +1701,7 @@ describe('SDK lifecycle and cancellation races', () => {
     const parent = 'shutdown-gate-' + randomUUID();
     const completions: any[] = [];
     const manager = new AgentManager({
-      onUnclaimedCompletion: (event) => completions.push(event),
+      onCompletion: (event) => completions.push(event),
       onError() {},
     });
     try {
@@ -1779,7 +1779,7 @@ describe('SDK lifecycle and cancellation races', () => {
       const parent = 'steer-timeout-' + randomUUID();
       const completions: any[] = [];
       const manager = new AgentManager({
-        onUnclaimedCompletion: (event) => completions.push(event),
+        onCompletion: (event) => completions.push(event),
         onError() {},
       });
       let timers: ReturnType<typeof spyOn> | undefined;
@@ -2041,7 +2041,7 @@ describe('SDK lifecycle and cancellation races', () => {
     const completions: any[] = [];
     const manager = new AgentManager({
       modelResponseTimeoutMs: 80,
-      onUnclaimedCompletion: (event) => completions.push(event),
+      onCompletion: (event) => completions.push(event),
     });
     try {
       await manager.spawnAgent(spawnParams(parent, 'worker', 'stream forever'));
@@ -2255,13 +2255,13 @@ describe('startup storage failures', () => {
 });
 
 describe('completion delivery', () => {
-  test('publishes unclaimed successful and failed completions', async () => {
+  test('publishes successful and failed completions without a waiter', async () => {
     const parentSessionId = 'completion-callbacks';
     const scope = path.join(getRunsDir(), parentScopeKey(parentSessionId));
     fs.rmSync(scope, { recursive: true, force: true });
     const completions: any[] = [];
     const manager = new AgentManager({
-      onUnclaimedCompletion: (event: any) => completions.push(event),
+      onCompletion: (event: any) => completions.push(event),
     });
     try {
       await manager.spawnAgent(spawnParams(parentSessionId, 'settled', 'first'));
@@ -2287,22 +2287,90 @@ describe('completion delivery', () => {
     }
   });
 
-  test('suppresses automatic delivery while wait_agent claims a completion', async () => {
-    const parentSessionId = 'completion-waits';
-    const scope = path.join(getRunsDir(), parentScopeKey(parentSessionId));
-    fs.rmSync(scope, { recursive: true, force: true });
-    const completions: any[] = [];
+  test.each(['completed', 'failed'] as const)(
+    'publishes %s content before waking a completion waiter',
+    async (status) => {
+      const parentSessionId = 'completion-waits-' + randomUUID();
+      const completions: any[] = [];
+      const order: string[] = [];
+      const manager = new AgentManager({
+        onCompletion: (event, waiting) => {
+          completions.push({ event, waiting });
+          order.push('notification');
+        },
+      });
+      try {
+        const waiting = manager.waitAgent(parentSessionId).then((result) => {
+          order.push('wait');
+          return result;
+        });
+        await manager.spawnAgent(
+          spawnParams(parentSessionId, 'one', status === 'failed' ? 'crash now' : 'first'),
+        );
+        const waited = await waiting;
+        expect(waited.event).toMatchObject({ agentName: '/one', status });
+        expect(completions).toEqual([{ event: waited.event, waiting: true }]);
+        expect(order).toEqual(['notification', 'wait']);
+        if (status === 'completed')
+          expect(completions[0].event.finalResponse).toBe('response:first');
+        else expect(completions[0].event.error).toContain('fixture failure');
+        await manager.waitAgent(parentSessionId, ['one']);
+        expect(completions).toHaveLength(1);
+      } finally {
+        await manager.shutdown();
+      }
+    },
+  );
+
+  test('a notification callback failure cannot strand a completion waiter', async () => {
+    const parent = 'notification-failure-' + randomUUID();
+    const errors: Error[] = [];
     const manager = new AgentManager({
-      onUnclaimedCompletion: (event: any) => completions.push(event),
+      onCompletion: () => {
+        throw new Error('notification rejected');
+      },
+      onError: (error) => errors.push(error),
     });
     try {
-      await manager.spawnAgent(spawnParams(parentSessionId, 'one', 'first'));
-      const waited = await manager.waitAgent(parentSessionId, ['one']);
-      expect(waited.event).toMatchObject({ agentName: '/one', status: 'completed' });
-      expect(completions).toEqual([]);
+      const waiting = manager.waitAgent(parent);
+      await manager.spawnAgent(spawnParams(parent, 'one', 'first'));
+      expect((await waiting).event.status).toBe('completed');
+      expect(errors.some((error) => error.message === 'notification rejected')).toBe(true);
     } finally {
       await manager.shutdown();
-      fs.rmSync(scope, { recursive: true, force: true });
+    }
+  });
+
+  test('a canceled waiter leaves later completion on the normal automatic channel', async () => {
+    const gate = deferred();
+    fixture = configureCoreFixture({ responseGate: gate.promise });
+    const parent = 'canceled-wait-notification-' + randomUUID();
+    const completions: any[] = [];
+    const manager = new AgentManager({
+      onCompletion: (event, waiting) => completions.push({ event, waiting }),
+    });
+    const controller = new AbortController();
+    try {
+      await manager.spawnAgent(spawnParams(parent, 'one', 'hold completion'));
+      const info = manager.getAgentInfo('one', parent);
+      const waiting = manager.waitAgent(parent, ['one'], controller.signal);
+      controller.abort(new Error('cancel only waiting'));
+      await expect(waiting).rejects.toThrow('cancel only waiting');
+      expect(manager.getAgentInfo('one', parent).status).toBe('running');
+      gate.resolve();
+      await released(manager, info);
+      expect(completions).toEqual([
+        {
+          event: expect.objectContaining({
+            status: 'completed',
+            finalResponse: 'response:hold completion',
+          }),
+          waiting: false,
+        },
+      ]);
+    } finally {
+      gate.resolve();
+      await manager.shutdown();
     }
   });
 
@@ -2948,7 +3016,7 @@ describe('SDK business scope, waits and resources', () => {
     const parent = 'wait-contract-' + randomUUID();
     const other = 'wait-other-' + randomUUID();
     const completions: any[] = [];
-    const manager = new AgentManager({ onUnclaimedCompletion: (event) => completions.push(event) });
+    const manager = new AgentManager({ onCompletion: (event) => completions.push(event) });
     const controller = new AbortController();
     try {
       await manager.spawnAgent(spawnParams(parent, 'one', 'first'));
@@ -3269,7 +3337,7 @@ describe('SDK native context usage and failure cleanup', () => {
     const errors: Error[] = [];
     const manager = new AgentManager({
       onError: (error) => errors.push(error),
-      onUnclaimedCompletion: (event) => completions.push(event),
+      onCompletion: (event) => completions.push(event),
     });
     try {
       await manager.spawnAgent(spawnParams(parent, 'worker', 'hold sample'));
@@ -3376,7 +3444,7 @@ describe('SDK acceptance and observer edge cases', () => {
       const parent = 'unaccepted-' + randomUUID();
       const completions: any[] = [];
       const manager = new AgentManager({
-        onUnclaimedCompletion: (event) => completions.push(event),
+        onCompletion: (event) => completions.push(event),
       });
       let prompt: ReturnType<typeof spyOn> | undefined;
       try {
@@ -3460,7 +3528,7 @@ describe('SDK acceptance and observer edge cases', () => {
     const gate = deferred();
     const parent = 'accepted-rejection-' + randomUUID();
     const completions: any[] = [];
-    const manager = new AgentManager({ onUnclaimedCompletion: (event) => completions.push(event) });
+    const manager = new AgentManager({ onCompletion: (event) => completions.push(event) });
     let prompt: ReturnType<typeof spyOn> | undefined;
     try {
       await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
@@ -3530,7 +3598,7 @@ describe('SDK acceptance and observer edge cases', () => {
     fixture = configureCoreFixture({ responseGate: gate.promise });
     const parent = 'nested-native-' + randomUUID();
     const completions: any[] = [];
-    const manager = new AgentManager({ onUnclaimedCompletion: (event) => completions.push(event) });
+    const manager = new AgentManager({ onCompletion: (event) => completions.push(event) });
     try {
       await manager.spawnAgent(spawnParams(parent, 'worker', 'hold nested'));
       await waitUntil(() => fixture.instances[0].activeStreams === 1);
@@ -3620,7 +3688,7 @@ describe('reviewed SDK lifecycle regressions', () => {
     const manager = new AgentManager({
       onError: (error) => errors.push(error),
       onActivityChange: (event) => activity.push(event.active),
-      onUnclaimedCompletion: (event) => notifications.push(event),
+      onCompletion: (event) => notifications.push(event),
     });
     const controller = new AbortController();
     const deadline = setTimeout(() => controller.abort(), 2000);
@@ -3646,7 +3714,9 @@ describe('reviewed SDK lifecycle regressions', () => {
       });
       await released(manager, info);
       expect(activity.at(-1)).toBe(false);
-      expect(notifications).toEqual([]);
+      expect(notifications).toEqual([
+        expect.objectContaining({ status: 'completed', finalResponse: 'response:hold final save' }),
+      ]);
       expect(
         errors.some((error) => error.message.includes('final status fixture save failure')),
       ).toBe(true);
@@ -3671,7 +3741,7 @@ describe('reviewed SDK lifecycle regressions', () => {
     const parent = 'resume-waiter-rollback-' + randomUUID();
     const notifications: any[] = [];
     const manager = new AgentManager({
-      onUnclaimedCompletion: (event) => notifications.push(event),
+      onCompletion: (event) => notifications.push(event),
     });
     const controller = new AbortController();
     const deadline = setTimeout(() => controller.abort(), 2000);
@@ -3759,7 +3829,7 @@ describe('reviewed SDK lifecycle regressions', () => {
       let observeRollback = false;
       let callbackWait: Promise<any> | undefined;
       const manager = new AgentManager({
-        onUnclaimedCompletion: (event) => notifications.push(event),
+        onCompletion: (event) => notifications.push(event),
         onActivityChange(event) {
           if (!observeRollback || event.parentSessionId !== parent || event.active) return;
           callbackWait = manager.waitAgent(parent, ['worker']);
@@ -3801,7 +3871,7 @@ describe('reviewed SDK lifecycle regressions', () => {
       const parent = 'consumed-rollback-' + randomUUID();
       const notifications: any[] = [];
       const manager = new AgentManager({
-        onUnclaimedCompletion: (event) => notifications.push(event),
+        onCompletion: (event) => notifications.push(event),
       });
       const controller = new AbortController();
       let resuming: Promise<unknown> | undefined;
@@ -3833,7 +3903,7 @@ describe('reviewed SDK lifecycle regressions', () => {
           finalResponse: 'response:second',
         });
         await released(manager, info);
-        expect(notifications).toHaveLength(1);
+        expect(notifications).toHaveLength(2);
       } finally {
         controller.abort();
         gate.resolve();
@@ -3963,7 +4033,7 @@ describe('reviewed SDK lifecycle regressions', () => {
     const parent = 'aborted-settled-recovery-' + randomUUID();
     const notifications: any[] = [];
     const manager = new AgentManager({
-      onUnclaimedCompletion: (event) => notifications.push(event),
+      onCompletion: (event) => notifications.push(event),
     });
     try {
       await manager.spawnAgent(spawnParams(parent, 'worker', 'hold original'));

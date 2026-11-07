@@ -201,7 +201,7 @@ export interface AgentActivityEvent {
 
 export interface AgentManagerOptions {
   onActivityChange?: (event: AgentActivityEvent) => void;
-  onUnclaimedCompletion?: (event: AgentCompletionEvent) => void;
+  onCompletion?: (event: AgentCompletionEvent, waiting: boolean) => void;
   modelResponseTimeoutMs?: number;
   projectTrusted?: (cwd: string) => boolean | undefined;
   onError?: (error: Error) => void;
@@ -1285,9 +1285,9 @@ export class AgentManager {
     }
   }
 
-  private notifyUnclaimedCompletion(event: AgentCompletionEvent): void {
+  private notifyCompletion(event: AgentCompletionEvent, waiting: boolean): void {
     try {
-      this.options.onUnclaimedCompletion?.(event);
+      this.options.onCompletion?.(event, waiting);
     } catch (error) {
       this.reportError(undefined, error);
     }
@@ -1801,11 +1801,13 @@ export class AgentManager {
     );
     if (waiterIndex !== -1) {
       const [waiter] = this.waiters.splice(waiterIndex, 1);
+      // Queue the result before waking the wait tool; it returns only status to the model.
+      if (notify) this.notifyCompletion(event, true);
       waiter.resolve(event);
       return;
     }
     this.mailbox.push(event);
-    if (notify) this.notifyUnclaimedCompletion(event);
+    if (notify) this.notifyCompletion(event, false);
   }
 
   listAgentInfos(
@@ -1881,7 +1883,7 @@ export class AgentManager {
     parentSessionId: string,
     targets?: string[],
     signal?: AbortSignal,
-  ): Promise<{ message: string; event?: AgentCompletionEvent }> {
+  ): Promise<{ message: string; event: AgentCompletionEvent }> {
     const waitSignal = signal
       ? AbortSignal.any([signal, this.shutdownController.signal])
       : this.shutdownController.signal;
