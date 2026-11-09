@@ -980,7 +980,8 @@ test.each(runtimes)(
     const childFixture = fixture("child-provider", "child");
     const config = path.join(agentDir, "pi-subagents", "config.json");
     fs.mkdirSync(path.dirname(config));
-    fs.writeFileSync(config, JSON.stringify({ retentionDays: 0, defaults: { extensions: [childFixture.extension] } }));
+    // This probe exercises actual repeated child cleanup, not hot idle retention.
+    fs.writeFileSync(config, JSON.stringify({ retentionDays: 0, maxIdleSessions: 0, defaults: { extensions: [childFixture.extension] } }));
     const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false }, steeringMode: "one-at-a-time" });
     settingsManager.setProjectTrusted(false);
     const parentRequests = [];

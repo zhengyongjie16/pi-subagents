@@ -212,7 +212,7 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
     try {
       await run(f);
     } finally {
-      for (const name of ['factory', 'startup', 'response', 'input', 'shutdown']) f.release(name);
+      for (const name of ['factory', 'startup', 'response', 'input', 'settled', 'compaction-failed', 'shutdown']) f.release(name);
       await Promise.allSettled(pending);
       await Promise.allSettled(
         [...sessions].map(async (session) => {
@@ -979,6 +979,79 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
       assert.equal(session.getLastAssistantText(), 'offline: work started by handled input');
     }));
 
+  for (const kind of ['handled', 'ordinary'] as const) {
+    test('busy-time native waitForIdle covers the early-idle settled hook: ' + kind, async () =>
+      withFixture({ settledGate: true }, async (f) => {
+        let barrier: Promise<void> | undefined;
+        let barrierFinished = false, settledEvents = 0;
+        const session = await f.create({
+          onCreated(session) {
+            session.subscribe((event) => {
+              if (event.type === 'agent_start' && !barrier) {
+                barrier = session.waitForIdle().then(() => { barrierFinished = true; });
+              }
+              if (event.type === 'agent_settled') settledEvents++;
+            });
+          },
+        });
+        const accepted = deferred<Disposition>();
+        const raw = promptChildSession(session,
+          kind === 'handled' ? 'fixture:handled-settled' : 'ordinary', accepted.resolve);
+        await f.waitFor('settled_entered');
+        assert.equal(await accepted.promise, kind === 'handled' ? 'handled' : 'started');
+        if (kind === 'handled') await raw;
+        assert.equal(session.isIdle, true);
+        await session.waitForIdle(); // A late waiter really does return before the hook exits in SDK 1.5.
+        assert.ok(barrier);
+        assert.equal(barrierFinished, false);
+        assert.equal(settledEvents, 0);
+        f.release('settled');
+        await raw;
+        await barrier;
+        assert.equal(barrierFinished, true);
+        assert.equal(settledEvents, 1);
+        await prompt(session, 'next');
+        assert.equal(session.getLastAssistantText(), 'offline: next');
+        assert.equal(settledEvents, 2);
+        assert.equal(f.events().filter((e) => e.type === 'factory').length, 1);
+        assert.deepEqual(f.errors, []);
+      }));
+  }
+
+  for (const outcome of ['cancel', 'failure'] as const) {
+    test('native idle waiter precedes public compact settlement through failed hook: ' + outcome, async () =>
+      withFixture({ compactionOutcome: outcome, compactionFailureGate: true }, async (f) => {
+        const session = await f.create();
+        await prompt(session, 'seed');
+        session.settingsManager.applyOverrides({ compaction: { enabled: false, keepRecentTokens: 0, reserveTokens: 0 } });
+        let nativeIdle: Promise<void> | undefined;
+        let compactFinished = false;
+        session.subscribe((event) => {
+          if (event.type === 'compaction_start') nativeIdle = session.waitForIdle();
+        });
+        const compacting = session.compact('summary focus').then(
+          (result) => { compactFinished = true; return { result, error: undefined }; },
+          (error: Error) => { compactFinished = true; return { result: undefined, error }; },
+        );
+        const event = await f.waitFor('compaction_failed');
+        assert.equal(event.aborted, outcome === 'cancel');
+        assert.ok(nativeIdle);
+        await nativeIdle;
+        assert.equal(session.isIdle, true);
+        await session.waitForIdle();
+        assert.equal(compactFinished, false, 'whole public operation still awaits its failed notification hook');
+        assert.equal(f.events().filter((e) => e.type === 'compaction_failed_finished').length, 0);
+        f.release('compaction-failed');
+        const result = await compacting;
+        assert.match(result.error?.message ?? '', outcome === 'cancel' ? /cancelled/ : /fixture compaction failure/);
+        assert.equal(compactFinished, true);
+        assert.equal(f.events().filter((e) => e.type === 'compaction_failed_finished').length, 1);
+        await prompt(session, 'after failed hook');
+        assert.equal(session.getLastAssistantText(), 'offline: after failed hook');
+        assert.deepEqual(f.errors, []);
+      }));
+  }
+
   test('abort idle does not cancel blocked input; caller must track raw prompt and abort late preflight', async () =>
     withFixture({ responseGate: true }, async (f) => {
       const session = await f.create();
@@ -1208,6 +1281,52 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
       );
     }));
 
+  for (const scenario of ['success', 'interrupt', 'model-error'] as const) {
+    test('native hot session reuses Session/ModelRuntime and cleans up once: ' + scenario, async () =>
+      withFixture({
+        prefix: 'hot',
+        ...(scenario === 'interrupt' ? { responseGate: true } : {}),
+        ...(scenario === 'model-error' ? { stopReason: 'error' as const } : {}),
+      }, async (f) => {
+        const { registerSessionResourceCleanup } = await import(
+          new URL('session-resources.js', import.meta.resolve('@earendil-works/pi-ai')).href
+        );
+        const session = await f.create();
+        const runtime = session.modelRuntime;
+        const id = session.sessionId;
+        let cleanupCount = 0;
+        const unregister = registerSessionResourceCleanup((sessionId: string) => {
+          if (sessionId === id) cleanupCount++;
+        });
+        try {
+          const first = prompt(session, 'first');
+          if (scenario === 'interrupt') {
+            await f.waitFor('request');
+            session.clearQueue();
+            await session.abort();
+          }
+          await first;
+          assert.equal(session.isIdle, true);
+          assert.equal(cleanupCount, 0);
+          if (scenario === 'model-error') assert.equal(assistants(session).at(-1)?.message.stopReason, 'error');
+          await prompt(session, 'second');
+          assert.equal(session.modelRuntime, runtime);
+          assert.equal(session.sessionId, id);
+          assert.equal(session.getLastAssistantText(), 'hot: second');
+          assert.equal(cleanupCount, 0);
+          for (const type of ['factory', 'session_start'])
+            assert.equal(f.events().filter((e) => e.type === type).length, 1);
+          assert.equal(f.events().filter((e) => e.type === 'session_shutdown').length, 0);
+          assert.deepEqual(f.events().filter((e) => e.type === 'request').at(-1)?.userTexts, ['first', 'second']);
+          await f.close(session);
+          assert.equal(f.events().filter((e) => e.type === 'session_shutdown').length, 1);
+          assert.equal(cleanupCount, 1);
+        } finally {
+          unregister();
+        }
+      }));
+  }
+
   test('shutdown emits explicitly once, then disposes; successful paths clear their timeout', async () =>
     withFixture({}, async (f) => {
       const session = await f.create();
@@ -1223,11 +1342,16 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
     withFixture({ shutdownGate: true }, async (f) => {
       const session = await f.create();
       const ctx = session.extensionRunner.createContext();
-      await assert.rejects(f.close(session, 20), /session_shutdown timed out after 20ms/);
+      let finished = false;
+      const closing = f.close(session, 20).finally(() => { finished = true; });
+      const result = assert.rejects(closing, /session_shutdown timed out after 20ms/);
+      await delay(60);
       assert.equal(f.events().filter((event) => event.type === 'session_shutdown').length, 1);
       assert.throws(() => ctx.isProjectTrusted(), /stale/);
+      assert.equal(finished, false, 'timed-out hook still owns its session until actual exit');
       f.release('shutdown');
       await f.waitFor('shutdown_finished');
+      await result;
     }));
 
   test('shutdown hook errors reach native onError and cannot skip disposal', async () =>
@@ -1242,6 +1366,72 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
         ),
       );
       assert.throws(() => ctx.isProjectTrusted(), /stale/);
+    }));
+
+  test('a throwing native resource cleanup cannot release ownership before a gated hook exits', async () =>
+    withFixture({ shutdownGate: true }, async (f) => {
+      const { registerSessionResourceCleanup } = await import(
+        new URL('session-resources.js', import.meta.resolve('@earendil-works/pi-ai')).href
+      );
+      const session = await f.create();
+      const ctx = session.extensionRunner.createContext();
+      let cleanups = 0;
+      let finished = false;
+      const unregister = registerSessionResourceCleanup((id: string) => {
+        if (id === session.sessionId && cleanups++ === 0)
+          throw new Error('runtime cleanup failure');
+      });
+      try {
+        const closing = f.close(session, 20).finally(() => {
+          finished = true;
+        });
+        const result = assert.rejects(closing, (error: any) => {
+          const message = String(error?.message ?? error);
+          return (
+            message.includes("session_shutdown timed out after 20ms") &&
+            message.includes("Failed to cleanup session resources")
+          );
+        });
+        await delay(60);
+        assert.equal(cleanups, 1, "native disposal must still run at the timeout point");
+        assert.equal(finished, false, "a throwing disposal must not release hook ownership");
+        assert.equal(f.events().filter((event) => event.type === 'session_shutdown').length, 1);
+        assert.equal(f.events().filter((event) => event.type === 'shutdown_finished').length, 0);
+        f.release('shutdown');
+        await f.waitFor('shutdown_finished');
+        await result;
+        assert.equal(cleanups, 1, "one session cleanup stays one");
+        assert.throws(() => ctx.isProjectTrusted(), /stale/);
+      } finally {
+        unregister();
+      }
+    }));
+
+  test('a throwing native resource cleanup surfaces the native error unchanged when the hook finished', async () =>
+    withFixture({}, async (f) => {
+      const { registerSessionResourceCleanup } = await import(
+        new URL('session-resources.js', import.meta.resolve('@earendil-works/pi-ai')).href
+      );
+      const session = await f.create();
+      let cleanups = 0;
+      const unregister = registerSessionResourceCleanup((id: string) => {
+        if (id === session.sessionId && cleanups++ === 0)
+          throw new Error('runtime cleanup failure');
+      });
+      try {
+        await assert.rejects(
+          f.close(session),
+          (error: any) =>
+            error instanceof AggregateError &&
+            error.errors.length === 1 &&
+            error.errors[0] instanceof Error &&
+            error.errors[0].message === 'runtime cleanup failure' &&
+            error.message === "Failed to cleanup session resources",
+        );
+        assert.equal(cleanups, 1);
+      } finally {
+        unregister();
+      }
     }));
 
   test('runtime never changes the host cwd or environment', async () =>

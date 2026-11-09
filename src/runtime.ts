@@ -207,16 +207,20 @@ export function promptChildSession(
 
 /**
  * Call once after initialization, submitted input, and native work have exited.
- * The timeout bounds extension shutdown.
+ * The timeout bounds native disposal, not ownership: keep tracking a timed-out
+ * hook until it actually exits. Hosts can bound their own wait without reopening JSONL.
+ * Disposal failures never skip the ownership wait; every independent failure stays visible.
  */
 export async function shutdownChildSession(
   session: AgentSession,
   timeoutMs = 5_000,
 ): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const failures: unknown[] = [];
+  const shutdown = session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
   try {
     await Promise.race([
-      session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }),
+      shutdown,
       new Promise<never>((_, reject) => {
         timer = setTimeout(
           () => reject(new Error(`Child session_shutdown timed out after ${timeoutMs}ms`)),
@@ -224,8 +228,29 @@ export async function shutdownChildSession(
         );
       }),
     ]);
+  } catch (error) {
+    failures.push(error);
   } finally {
     clearTimeout(timer);
-    session.dispose();
+    // Native disposal stays bounded even when the hook never exits.
+    try {
+      session.dispose();
+    } catch (error) {
+      failures.push(error);
+    }
   }
+  // Keep ownership until the hook actually exits; a late rejection stays visible too.
+  try {
+    await shutdown;
+  } catch (error) {
+    if (!failures.includes(error)) failures.push(error);
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1)
+    throw new AggregateError(
+      failures,
+      `Child session shutdown failed: ${failures
+        .map((failure) => (failure instanceof Error ? failure.message : String(failure)))
+        .join('; ')}`,
+    );
 }

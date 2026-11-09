@@ -96,6 +96,7 @@ export interface CoreFixtureOptions {
   responseGate?: Promise<void>;
   ignoreAbort?: boolean;
   shutdownAtStart?: boolean;
+  onLoad?: (pi: ExtensionAPI) => void;
   onStart?: (pi: ExtensionAPI, ctx: ExtensionContext) => void | Promise<void>;
   onShutdown?: () => void | Promise<void>;
   onSettled?: (aborted: boolean, pi: ExtensionAPI) => void | Promise<void>;
@@ -163,6 +164,7 @@ export default function coreSdkFixture(pi: ExtensionAPI) {
     activeTools: 0,
   };
   state.instances.push(instance);
+  state.onLoad?.(pi);
   for (const provider of new Set((state.routes ?? routes).map(([provider]) => provider))) {
     pi.registerProvider(provider, {
       api: 'core-offline-fixture',

@@ -74,7 +74,7 @@ Children discover skills through Pi's native resource loader, using their workin
 
 Automatic extension, prompt-template, theme, and context-file discovery remains disabled. `AGENTS.md` and `CLAUDE.md` files are excluded from automatic loading. Each child replaces Pi's default coding prompt with the contents of `~/.pi/agent/pi-subagents/SYSTEM.md`, and loads only explicitly configured extensions. This file is created with a minimal subagent prompt when first used and can be edited directly. If the selected model comes from an extension-registered provider, add that provider extension to the selected template or configured defaults so the child can resolve it.
 
-For the parent's working directory, each creation/resume uses the parent's current project-trust decision. Other directories follow Pi's trust store and headless policy.
+Children follow the parent's current project-trust decision for the same working directory. Other directories follow Pi's trust store and headless policy.
 
 ## Configuration
 
@@ -88,6 +88,7 @@ Optional configuration lives at:
 {
   "storageDir": "~/.local/state/pi-subagents/runs",
   "retentionDays": 7,
+  "maxIdleSessions": 4,
   "modelResponseTimeoutMs": 600000,
   "models": ["openai-codex/gpt-5.6-sol", "anthropic/claude-opus-4-6"],
   "modelsFromEnabledModels": true,
@@ -99,11 +100,13 @@ Optional configuration lives at:
 
 `storageDir` accepts an absolute path, `~/...`, or a path relative to the package configuration directory. By default runs are stored in `~/.pi/agent/pi-subagents/runs`. `retentionDays` defaults to `7`; expired runs and oversized tool outputs are removed when the agent manager initializes. Set it to `0` to disable automatic cleanup. Observer sockets remain in the operating system temporary directory and are removed on session cleanup. Keep `storageDir` separate from Pi's native session directory to keep child sessions out of `/resume`.
 
+`maxIdleSessions` is a non-negative integer (default `4`) limiting idle SDK sessions per manager, not running tasks. Excess idle sessions are closed least-recently-used first, preserving history and results. Set it to `0` to close sessions after each run.
+
 `modelResponseTimeoutMs` limits one model response, from assistant message start to completion, and defaults to 10 minutes. It does not limit tool execution or the agent's total runtime. A response that exceeds this limit is marked failed and cooperative SDK cancellation is requested. Set it to `0` to disable this guard.
 
 `shortcut` optionally binds a key to the subagent browser, for example `"shortcut": "ctrl+shift+a"`. No shortcut is assigned by default; omit it or set it to `""` to leave it unbound. Run `/reload` after changing it.
 
-Configuration is read when agents spawn, while cleanup runs when the agent manager initializes. Restart Pi after changing `storageDir` or `retentionDays` so storage lookup and cleanup use the same configuration throughout the process.
+Spawn configuration is read when agents spawn; the idle cap and cleanup policy are read when the agent manager initializes. Restart Pi after changing `storageDir`, `retentionDays`, or `maxIdleSessions`.
 
 Template extensions override configured defaults. Tool selection belongs to the template or is inherited from the parent. A `model` and `thinking` level requested by the parent override the template and the inherited values, so one task can run on another model without a template.
 
@@ -126,11 +129,13 @@ The arguments are offered only when at least one allowed model is available, and
 
 The list is resolved when a session starts: `models` entries are filtered to what is currently available, unavailable entries are reported as a warning notification, and the scoped models are merged in. Editing the configuration or the Pi setting takes effect when the next session starts. If a provider drops out mid-session, `spawn_agent` refuses that model at spawn time instead of serving a stale route.
 
-An allowed model may belong to an extension-registered provider. Load that provider extension through a template or configured defaults so the child can resolve it. Each child validates the exact provider/model pair against its own available registry before accepting a task. Resumptions reuse and revalidate the pair saved at spawn.
+An allowed model may belong to an extension-registered provider. Load that provider extension through a template or configured defaults so the child can resolve it. Each child validates the exact provider/model pair against its own available registry before accepting a task. Continuations retain the saved model pair; rebuilt sessions revalidate it.
 
 A thinking level written into an `enabledModels` pattern, such as `anthropic/claude-opus-4-6:high`, is ignored here. `thinking` stays a separate argument, and the child clamps it to what its model supports.
 
 ## Completion delivery
+
+`completed`, `failed`, and `interrupted` describe the latest run, not the SDK session's lifetime.
 
 A child completion or failure is delivered automatically to its parent session after the child reaches final status, including while `wait_agent` is active. If the parent is active, the result joins the current run; if the parent is idle, it starts a continuation turn. An active wait receives only the agent name and final status, while the notification supplies the final text or error before the natural continuation. Continue independent work instead of waiting; use `wait_agent` only when the next action depends on that result and no useful work remains meanwhile.
 
@@ -144,7 +149,9 @@ While agents are starting or running, a compact one-line indicator appears above
 
 The overlay uses the child working directory for tool rendering and synchronizes in-progress output when opened midway through a run. Tool output uses Pi's native collapsed previews. Use Left/Right to switch between agents in the current browser scope.
 
-Child SDK sessions are disposed after completion, failure, or interruption, once initialization and submitted work have exited. `send_message` creates a fresh SDK session with the persisted history and continues from there. On startup, the extension marks inactive starting or running records as interrupted.
+SDK sessions remain reusable after completion, ordinary model errors, or interruption once pending work has drained. `send_message` steers an active run or starts another on an idle session; after reclamation, it reopens the saved history in a new session. Initialization/runtime failures, timeouts, and extension shutdown requests close the session. Missing history files are reported rather than starting an empty conversation.
+
+Resources are loaded once per SDK session; reload/restart Pi to refresh them. Connections and cache warming remain managed by Pi. On startup, inactive starting or running records are marked interrupted.
 
 Cancellation is cooperative within the shared Pi process. Unresponsive tools or extensions can delay cleanup and affect the parent. Child extensions run in headless `print` mode (`hasUI: false`) and share the host's event loop and module state.
 

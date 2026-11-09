@@ -26,6 +26,9 @@ export interface OfflineFixtureConfig {
   factoryGate?: boolean;
   startupGate?: boolean;
   responseGate?: boolean;
+  settledGate?: boolean;
+  compactionOutcome?: 'cancel' | 'failure';
+  compactionFailureGate?: boolean;
   shutdownGate?: boolean;
   shutdownAtStart?: boolean;
   shutdownError?: boolean;
@@ -106,7 +109,9 @@ export default async function (pi: ExtensionAPI) {
         stream.push({ type: 'start', partial: message });
         if (config.responseGate && request === 1) await waitForRelease('response', options?.signal);
         options?.signal?.throwIfAborted();
-        if (config.stopReason) throw new Error('fixture ' + config.stopReason);
+        if (config.stopReason && request === 1) throw new Error('fixture ' + config.stopReason);
+        if (config.compactionOutcome === 'failure' && request === 2)
+          throw new Error('fixture compaction failure');
         if (config.codemodeScript && request === 1) {
           const toolCall = {
             type: 'toolCall' as const,
@@ -193,6 +198,13 @@ export default async function (pi: ExtensionAPI) {
     }
   });
   pi.on('resources_discover', () => config.resources);
+  let settledCount = 0;
+  pi.on('agent_settled', async () => {
+    if (++settledCount !== 1 || !config.settledGate) return;
+    record('settled_entered');
+    await waitForRelease('settled');
+    record('settled_finished');
+  });
   pi.on('input', async (event, ctx) => {
     record('input', {
       text: event.text,
@@ -206,14 +218,26 @@ export default async function (pi: ExtensionAPI) {
       return { action: 'handled' };
     }
     if (event.text === 'fixture:handled') return { action: 'handled' };
-    if (event.text === 'fixture:handled-run') {
+    if (event.text === 'fixture:handled-run' || event.text === 'fixture:handled-settled') {
       pi.sendUserMessage('work started by handled input');
-      while (ctx.isIdle()) await delay(1);
+      if (event.text === 'fixture:handled-settled') {
+        while (!settledCount) await delay(1);
+      } else {
+        while (ctx.isIdle()) await delay(1);
+      }
       return { action: 'handled' };
     }
   });
   pi.on('before_agent_start', (event, ctx) => {
     if (event.messageType === 'user' && event.prompt === 'fixture:abort-before-run') ctx.abort();
+  });
+  pi.on('session_before_compact', () => {
+    if (config.compactionOutcome === 'cancel') return { cancel: true };
+  });
+  pi.on('session_compact_failed', async (event) => {
+    record('compaction_failed', { aborted: event.aborted, errorMessage: event.errorMessage });
+    if (config.compactionFailureGate) await waitForRelease('compaction-failed');
+    record('compaction_failed_finished');
   });
   pi.on('session_shutdown', async () => {
     record('session_shutdown');

@@ -80,6 +80,7 @@ export interface SubagentConfig {
   models?: string[];
   modelsFromEnabledModels?: boolean;
   modelResponseTimeoutMs?: number;
+  maxIdleSessions?: number;
   defaults?: {
     extensions?: string[];
   };
@@ -158,28 +159,39 @@ export interface SpawnAgentParams {
   thinking?: ThinkingLevel;
 }
 
-interface LiveAgent {
-  info: AgentInfo;
-  session?: AgentSession;
-  initialization?: Promise<AgentSession>;
+interface RunState {
+  cancellation: AbortController;
   promptFinished?: Promise<void>;
   pendingSteers: Set<Promise<unknown>>;
-  unsubscribe?: () => void;
-  broadcaster: EventBroadcaster;
-  logger: SessionLogger;
-  cancellation: AbortController;
-  closing: boolean;
   finalizedRun: boolean;
   awaitingPrompt: boolean;
   accepted: boolean;
   /** Hidden while input is tentative; keep its identity until acceptance or rollback. */
   suspendedCompletion?: AgentCompletionEvent;
-  termination?: Promise<void>;
   candidateResponse: string;
   candidateError?: string;
   settledAborted: boolean;
-  eventError?: Error;
+  observerSettled: boolean;
   modelResponseTimer?: ReturnType<typeof setTimeout>;
+  settlement?: Promise<void>;
+}
+
+interface LiveAgent {
+  info: AgentInfo;
+  session?: AgentSession;
+  initialization?: Promise<AgentSession>;
+  /** Captured while native work is busy; a late idle query can miss settled hooks. */
+  nativeWork?: Promise<void>;
+  /** Public compact calls can outlive native idle while failure hooks finish. */
+  pendingCompactions: Set<Promise<void>>;
+  unsubscribe?: () => void;
+  broadcaster: EventBroadcaster;
+  logger: SessionLogger;
+  run?: RunState;
+  closing: boolean;
+  termination?: Promise<void>;
+  eventError?: Error;
+  lastUsedAt: number;
   lastActivityPersistedAt: number;
 }
 
@@ -290,6 +302,9 @@ function normalizeConfig(value: unknown): SubagentConfig {
     ...(models ? { models } : {}),
     ...(raw.modelsFromEnabledModels === true ? { modelsFromEnabledModels: true } : {}),
     ...(modelResponseTimeoutMs !== undefined ? { modelResponseTimeoutMs } : {}),
+    ...(Number.isSafeInteger(raw.maxIdleSessions) && (raw.maxIdleSessions as number) >= 0
+      ? { maxIdleSessions: raw.maxIdleSessions as number }
+      : {}),
     ...(extensions ? { defaults: { extensions } } : {}),
   };
 }
@@ -1246,9 +1261,11 @@ export class AgentManager {
   private waiters: Waiter[] = [];
   private readonly shutdownController = new AbortController();
   private readonly reconciliation: Promise<void>;
+  private readonly maxIdleSessions: number;
 
   constructor(private readonly options: AgentManagerOptions = {}) {
     ensureBaseDirs();
+    this.maxIdleSessions = loadSubagentConfig().maxIdleSessions ?? 4;
     pruneExpiredRuns();
     this.reconciliation = this.reconcileInactiveRuns();
     // Callers may await ready() after reconciliation has already settled.
@@ -1293,7 +1310,7 @@ export class AgentManager {
     }
   }
 
-  private reportError(live: LiveAgent | undefined, error: unknown): void {
+  private reportError(live: LiveAgent | undefined, error: unknown): Error {
     const detail = error as { extensionPath?: string; event?: string; error?: unknown } | undefined;
     const failure =
       error instanceof Error
@@ -1310,6 +1327,7 @@ export class AgentManager {
       if (this.options.onError) this.options.onError(failure);
       else console.error(`[subagents] ${formatAgentError(failure)}`);
     } catch {}
+    return failure;
   }
 
   private async reconcileInactiveRuns(): Promise<void> {
@@ -1399,7 +1417,7 @@ export class AgentManager {
       this.notifyStatusChange(info);
       const prompt = [definition?.prompt, params.message].filter(Boolean).join('\n\n');
       try {
-        await this.startLiveAgent(info, prompt, params.message);
+        await this.startLiveAgent(info, prompt, params.message, false);
       } catch (error) {
         const message = formatAgentError(error);
         if (error instanceof Error && error.message === message) throw error;
@@ -1420,6 +1438,7 @@ export class AgentManager {
     info: AgentInfo,
     message: string,
     displayMessage = message,
+    resume = true,
   ): Promise<LiveAgent> {
     throwIfAborted(this.shutdownController.signal);
     if (this.live.has(info.id))
@@ -1430,101 +1449,156 @@ export class AgentManager {
       throw new Error(
         `Agent ${info.canonicalName} is active in another host; refusing to reopen its session file.`,
       );
-    const previous = { ...info };
+    if (resume && !fs.existsSync(info.sessionFile))
+      throw new Error(
+        `Cannot resume agent ${info.canonicalName}: session history is missing: ${info.sessionFile}`,
+      );
+    // Native open initializes an existing empty file with a valid header. Even handled
+    // first inputs then have a resumable path; no metadata heuristic can prove history exists.
+    if (!resume) {
+      try {
+        fs.closeSync(fs.openSync(info.sessionFile, 'wx', 0o600));
+      } catch (error) {
+        // The persisted record and active notification were already published by the
+        // caller; record the terminal failure so nothing dangles in 'starting'.
+        const message = formatAgentError(error);
+        info.status = 'failed';
+        info.error = message;
+        info.completedAt = Date.now();
+        info.lastActivity = Date.now();
+        try {
+          saveInfo(info);
+        } catch {
+          // Keep the creation failure visible; waiters are still released below.
+        }
+        this.notifyStatusChange(info);
+        this.pushMailbox(
+          {
+            id: randomUUID(),
+            parentSessionId: info.parentSessionId,
+            agentName: info.canonicalName,
+            status: 'failed',
+            error: message,
+            createdAt: Date.now(),
+          },
+          true,
+        );
+        throw error;
+      }
+    }
     const live: LiveAgent = {
       info,
-      broadcaster: new EventBroadcaster(info.id, (error) => this.reportError(undefined, error)),
+      broadcaster: new EventBroadcaster(info.id, (error) => this.failSession(live, error)),
       logger: new SessionLogger(info.logFile, (error) => this.reportError(undefined, error)),
-      cancellation: new AbortController(),
+      pendingCompactions: new Set(),
       closing: false,
+      lastUsedAt: performance.now(),
+      lastActivityPersistedAt: info.updatedAt,
+    };
+    this.live.set(info.id, live);
+    await this.startRun(live, message, displayMessage);
+    return live;
+  }
+
+  private async startRun(live: LiveAgent, message: string, displayMessage = message): Promise<void> {
+    const previous = { ...live.info };
+    const run: RunState = {
+      cancellation: new AbortController(),
       finalizedRun: false,
       awaitingPrompt: true,
       accepted: false,
       candidateResponse: '',
       settledAborted: false,
+      observerSettled: false,
       pendingSteers: new Set(),
-      lastActivityPersistedAt: info.updatedAt,
     };
-    // Register before the first asynchronous initialization step, including session_start.
-    this.live.set(info.id, live);
+    // Claim the idle slot before initialization, awaiting preflight, or invoking observers.
+    live.run = run;
     const checkCanceled = () => {
       throwIfAborted(this.shutdownController.signal);
-      throwIfAborted(live.cancellation.signal);
+      throwIfAborted(run.cancellation.signal);
       if (live.eventError) throw live.eventError;
-      if (live.closing || this.live.get(info.id) !== live)
+      if (live.closing || this.live.get(live.info.id) !== live || live.run !== run)
         throw new Error('Child session is closing.');
     };
     const timeout = new Error(
-      `Timed out waiting for agent ${info.canonicalName} initialization or prompt acceptance.`,
+      `Timed out waiting for agent ${live.info.canonicalName} initialization or prompt acceptance.`,
     );
     try {
-      ensureSystemPromptFile();
-      live.broadcaster.start();
-      info.status = 'starting';
-      info.lastActivity = Date.now();
-      saveInfo(info);
-      this.notifyStatusChange(info);
-      live.initialization = createChildSession({
-        info,
-        systemPromptPath: SYSTEM_PROMPT_PATH,
-        projectTrusted: this.options.projectTrusted?.(info.cwd),
-        checkCanceled,
-        onCreated: (session) => {
-          live.session = session;
-          live.unsubscribe = session.subscribe((event) => {
-            // Keep listener failures local so the SDK can persist messages after dispatch.
-            try {
-              this.handleSessionEvent(live, event);
-            } catch (error) {
-              live.eventError ??=
-                error instanceof Error ? error : new Error(formatAgentError(error));
-              this.reportError(live, error);
-              this.requestAbort(live);
-            }
-          });
-        },
-        onError: (error) => this.reportError(live, error),
-        onShutdown: () => {
-          this.requestCancellation(live, new Error('Child extension requested shutdown.'));
-          try {
-            this.finalizeRun(live, 'interrupted');
-          } catch (error) {
-            this.reportError(live, error);
-          } finally {
+      checkCanceled();
+      const initializing = !live.session;
+      if (initializing) {
+        ensureSystemPromptFile();
+        live.broadcaster.start();
+        live.info.status = 'starting';
+        live.info.lastActivity = Date.now();
+        saveInfo(live.info);
+        this.notifyStatusChange(live.info);
+        live.initialization = createChildSession({
+          info: live.info,
+          systemPromptPath: SYSTEM_PROMPT_PATH,
+          projectTrusted: this.options.projectTrusted?.(live.info.cwd),
+          checkCanceled,
+          onCreated: (session) => {
+            live.session = session;
+            this.trackCompactions(live);
+            live.unsubscribe = session.subscribe((event) => {
+              // Listener failures must not escape into SDK message persistence.
+              try {
+                this.handleSessionEvent(live, event);
+              } catch (error) {
+                this.failSession(live, error);
+              }
+            });
+          },
+          onError: (error) => this.failSession(live, error),
+          onShutdown: () => {
+            // Register real termination before native abort can reenter this handler.
+            live.closing = true;
             this.scheduleTermination(live);
-          }
-        },
-        log: (text) => live.logger.info('sdk', text),
-      });
-      const startup = live.initialization.then(async () => {
-        checkCanceled();
-        await this.prompt(live, message, displayMessage);
-      });
-      await boundedWait(startup, DEFAULT_STARTUP_TIMEOUT_MS, timeout, live.cancellation.signal);
-      return live;
+            if (live.run)
+              this.requestCancellation(live, live.run, new Error('Child extension requested shutdown.'));
+            try {
+              if (live.run) this.finalizeRun(live, live.run, 'interrupted');
+            } catch (error) {
+              this.reportError(live, error);
+            }
+          },
+          log: (text) => live.logger.info('sdk', text),
+        });
+      }
+      const startup = initializing
+        ? live.initialization!.then(async () => {
+            checkCanceled();
+            await this.prompt(live, run, message, displayMessage);
+          })
+        : this.prompt(live, run, message, displayMessage);
+      await boundedWait(startup, DEFAULT_STARTUP_TIMEOUT_MS, timeout, run.cancellation.signal);
     } catch (error) {
-      if (error === timeout) this.requestCancellation(live, timeout);
+      if (error === timeout) {
+        live.closing = true;
+        this.requestCancellation(live, run, timeout);
+      }
       try {
-        // Restore a terminal result only when a resume is rejected before acceptance or cancellation.
         if (
-          live.promptFinished &&
-          !live.accepted &&
-          !live.finalizedRun &&
-          !live.cancellation.signal.aborted &&
+          run.promptFinished &&
+          !run.accepted &&
+          !run.finalizedRun &&
+          !run.cancellation.signal.aborted &&
           !this.shutdownController.signal.aborted &&
-          this.live.get(info.id) === live &&
+          this.live.get(live.info.id) === live &&
+          live.run === run &&
           FINAL_STATUSES.has(previous.status)
         ) {
           live.info = previous;
-          live.finalizedRun = true;
+          run.finalizedRun = true;
           try {
             saveInfo(previous);
           } finally {
-            const completion = live.suspendedCompletion;
-            delete live.suspendedCompletion;
+            const completion = run.suspendedCompletion;
+            delete run.suspendedCompletion;
             if (completion) this.pushMailbox(completion, false);
             else {
-              // A restored snapshot satisfies only waits targeting this agent.
               for (const waiter of this.waiters.filter(
                 (waiter) =>
                   waiter.parentSessionId === previous.parentSessionId &&
@@ -1541,22 +1615,26 @@ export class AgentManager {
                 });
               }
             }
-            // Observers may synchronously consume the restored result.
             this.notifyStatusChange(previous);
           }
-        } else if (!live.finalizedRun) {
+        } else if (!run.finalizedRun) {
           if (
-            this.shutdownController.signal.aborted ||
-            (live.cancellation.signal.aborted && error !== timeout)
+            !live.eventError &&
+            (this.shutdownController.signal.aborted ||
+              (run.cancellation.signal.aborted && error !== timeout))
           )
-            this.finalizeRun(live, 'interrupted');
-          else this.finalizeRun(live, 'failed', formatAgentError(error));
+            this.finalizeRun(live, run, 'interrupted');
+          else this.finalizeRun(live, run, 'failed', formatAgentError(live.eventError ?? error));
         }
       } catch (saveError) {
+        live.closing = true;
         this.reportError(live, saveError);
       } finally {
+        // Only explicit interruption of an initialized session is reusable here.
+        if (!run.cancellation.signal.aborted || !run.promptFinished) live.closing = true;
         try {
-          await this.waitForTermination(live);
+          if (live.closing) await this.waitForTermination(live);
+          else await this.waitForRunSettlement(live, run);
         } catch (cleanupError) {
           this.reportError(live, cleanupError);
         }
@@ -1565,9 +1643,14 @@ export class AgentManager {
     }
   }
 
-  private async prompt(live: LiveAgent, message: string, displayMessage: string): Promise<void> {
+  private async prompt(
+    live: LiveAgent,
+    run: RunState,
+    message: string,
+    displayMessage: string,
+  ): Promise<void> {
     const session = live.session!;
-    live.suspendedCompletion = consumeFirstMatchingMailboxEvent(
+    run.suspendedCompletion = consumeFirstMatchingMailboxEvent(
       this.mailbox,
       live.info.parentSessionId,
       new Set([live.info.canonicalName]),
@@ -1589,59 +1672,178 @@ export class AgentManager {
       reject: rejectAccepted,
     } = Promise.withResolvers<void>();
     throwIfAborted(this.shutdownController.signal);
-    throwIfAborted(live.cancellation.signal);
-    if (live.closing) throw new Error('Child session is closing.');
+    throwIfAborted(run.cancellation.signal);
+    if (live.closing || live.run !== run) throw new Error('Child session is closing.');
     const promptFinished = promptChildSession(session, message, () => {
-      delete live.suspendedCompletion;
-      live.accepted = true;
+      if (live.run !== run || this.live.get(live.info.id) !== live) return;
+      delete run.suspendedCompletion;
+      run.accepted = true;
       resolveAccepted();
+      if (run.cancellation.signal.aborted || live.closing) this.requestAbort(live);
     });
-    // Track the submitted prompt so cleanup can await it independently.
-    live.promptFinished = promptFinished;
-    const finished = promptFinished.then(() => session.waitForIdle());
+    run.promptFinished = promptFinished;
+    const finished = promptFinished.then(() => this.waitForNativeIdle(live));
     void finished.then(
       () => {
-        if (!live.accepted)
+        if (!run.accepted)
           rejectAccepted(new Error('Child prompt returned without an acceptance result.'));
-        else this.finishRun(live);
+        else this.finishRun(live, run);
       },
       (error) => {
         rejectAccepted(error);
-        if (live.accepted) this.finishRun(live, error);
+        if (run.accepted) this.finishRun(live, run, error);
       },
     );
     await accepted;
-    // Reapply cancellation after late acceptance; finalized runs retain their terminal state.
-    if (live.cancellation.signal.aborted || this.shutdownController.signal.aborted) {
-      this.requestAbort(live);
+    if (run.cancellation.signal.aborted || this.shutdownController.signal.aborted) {
+      if (live.run === run) this.requestAbort(live);
       throw abortError(
-        live.cancellation.signal.aborted
-          ? live.cancellation.signal
-          : this.shutdownController.signal,
+        run.cancellation.signal.aborted ? run.cancellation.signal : this.shutdownController.signal,
       );
     }
-    if (this.live.get(live.info.id) === live && !live.closing && !live.finalizedRun)
-      live.awaitingPrompt = false;
+    if (this.live.get(live.info.id) === live && live.run === run && !run.finalizedRun)
+      run.awaitingPrompt = false;
   }
 
-  private finishRun(live: LiveAgent, error?: unknown): void {
-    if (this.live.get(live.info.id) !== live) return;
-    live.closing = true;
-    this.clearModelResponseTimer(live);
+  private finishRun(live: LiveAgent, run: RunState, error?: unknown): void {
+    if (this.live.get(live.info.id) !== live || live.run !== run) return;
+    this.clearModelResponseTimer(run);
+    // Rejected execution/observer failures are not ordinary model error messages.
+    if (error !== undefined || live.eventError) live.closing = true;
     try {
       this.sampleContextUsage(live);
-      if (live.finalizedRun) return;
-      const failure =
-        live.eventError ??
-        error ??
-        live.candidateError ??
-        (live.settledAborted ? 'Agent ended with aborted.' : undefined);
-      if (failure !== undefined) this.finalizeRun(live, 'failed', formatAgentError(failure));
-      else this.finalizeRun(live, 'completed');
+      if (!run.finalizedRun) {
+        const failure =
+          live.eventError ??
+          error ??
+          run.candidateError ??
+          (run.settledAborted ? 'Agent ended with aborted.' : undefined);
+        if (failure !== undefined) this.finalizeRun(live, run, 'failed', formatAgentError(failure));
+        else this.finalizeRun(live, run, 'completed');
+      }
     } catch (error) {
+      live.closing = true;
       this.reportError(live, error);
     } finally {
+      if (live.closing) this.scheduleTermination(live);
+      else void this.settleRun(live, run).catch((error) => this.failSession(live, error));
+    }
+  }
+
+  private trackCompactions(live: LiveAgent): void {
+    const session = live.session!;
+    const compact = session.compact.bind(session);
+    // ctx.compact also calls this public instance method. Register before native
+    // abort/events can reenter; neither busy events nor another call can replace it.
+    session.compact = async (...args) => {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      live.pendingCompactions.add(promise);
+      try {
+        return await compact(...args);
+      } finally {
+        live.pendingCompactions.delete(promise);
+        resolve();
+        if (this.live.get(live.info.id) === live && !live.run && !live.closing) {
+          try {
+            this.trimIdleSessions();
+          } catch (error) {
+            this.failSession(live, error);
+          }
+        }
+      }
+    };
+  }
+
+  private trackNativeWork(live: LiveAgent): void {
+    const work = live.session!.waitForIdle();
+    live.nativeWork = work;
+    void work.then(
+      () => {
+        if (this.live.get(live.info.id) !== live || live.nativeWork !== work) return;
+        delete live.nativeWork;
+        // Manual compaction (or extension-owned work) may have no RunState to settle.
+        try {
+          if (!live.run && !live.closing) this.trimIdleSessions();
+        } catch (error) {
+          this.failSession(live, error);
+        }
+      },
+      (error) => {
+        if (live.nativeWork !== work) {
+          this.reportError(live, error);
+          return;
+        }
+        delete live.nativeWork;
+        this.failSession(live, error);
+      },
+    );
+  }
+
+  private async waitForNativeIdle(live: LiveAgent): Promise<void> {
+    const session = live.session!;
+    do {
+      await Promise.all([live.nativeWork ?? session.waitForIdle(), ...live.pendingCompactions]);
+      // Busy events or public compact reentry may register more work while awaiting.
+    } while (live.nativeWork || live.pendingCompactions.size || !session.isIdle);
+  }
+
+  private settleRun(live: LiveAgent, run: RunState): Promise<void> {
+    if (run.settlement) return run.settlement;
+    run.settlement = Promise.resolve().then(async () => {
+      await run.promptFinished?.catch(() => {});
+      // A native idle session can still have async steer input handlers in flight.
+      await Promise.allSettled(run.pendingSteers);
+      if (this.live.get(live.info.id) !== live || live.run !== run || live.closing) return;
+      const session = live.session!;
+      await this.waitForNativeIdle(live);
+      if (live.run !== run || live.closing) return;
+      session.clearQueue();
+      this.clearModelResponseTimer(run);
+      if (!run.observerSettled) {
+        live.broadcaster.broadcast({ type: 'agent_settled', aborted: run.cancellation.signal.aborted });
+        run.observerSettled = true;
+      }
+      delete live.run;
+      live.lastUsedAt = performance.now();
+      this.trimIdleSessions();
+    });
+    return run.settlement;
+  }
+
+  private waitForRunSettlement(live: LiveAgent, run: RunState): Promise<void> {
+    return boundedWait(
+      this.settleRun(live, run),
+      CLEANUP_WAIT_TIMEOUT_MS,
+      `Agent ${live.info.canonicalName} is still finishing after ${CLEANUP_WAIT_TIMEOUT_MS} ms; its session file remains locked until submitted work exits.`,
+    );
+  }
+
+  private trimIdleSessions(): void {
+    const idle = [...this.live.values()]
+      .filter(
+        (live) =>
+          !live.run && !live.closing && !live.nativeWork && !live.pendingCompactions.size && live.session?.isIdle,
+      )
+      .sort((a, b) => a.lastUsedAt - b.lastUsedAt);
+    for (const live of idle.slice(0, Math.max(0, idle.length - this.maxIdleSessions))) {
+      live.closing = true;
       this.scheduleTermination(live);
+    }
+  }
+
+  private failSession(live: LiveAgent, error: unknown): void {
+    const failure = this.reportError(live, error);
+    live.eventError ??= failure;
+    if (this.live.get(live.info.id) !== live) return;
+    live.closing = true;
+    this.scheduleTermination(live);
+    const run = live.run;
+    if (!run) return;
+    this.requestCancellation(live, run, live.eventError);
+    try {
+      this.finalizeRun(live, run, 'failed', live.eventError.message);
+    } catch (saveError) {
+      this.reportError(live, saveError);
     }
   }
 
@@ -1662,14 +1864,15 @@ export class AgentManager {
     }
   }
 
-  private clearModelResponseTimer(live: LiveAgent): void {
-    if (live.modelResponseTimer !== undefined) clearTimeout(live.modelResponseTimer);
-    delete live.modelResponseTimer;
+  private clearModelResponseTimer(run: RunState | undefined): void {
+    if (!run) return;
+    if (run.modelResponseTimer !== undefined) clearTimeout(run.modelResponseTimer);
+    delete run.modelResponseTimer;
   }
 
-  private startModelResponseTimer(live: LiveAgent): void {
-    this.clearModelResponseTimer(live);
-    if (live.closing || live.finalizedRun) return;
+  private startModelResponseTimer(live: LiveAgent, run: RunState): void {
+    this.clearModelResponseTimer(run);
+    if (live.closing || run.finalizedRun) return;
     const timeoutMs = Math.max(
       0,
       this.options.modelResponseTimeoutMs ??
@@ -1677,31 +1880,47 @@ export class AgentManager {
         DEFAULT_MODEL_RESPONSE_TIMEOUT_MS,
     );
     if (timeoutMs === 0) return;
-    live.modelResponseTimer = setTimeout(() => {
-      delete live.modelResponseTimer;
-      if (this.live.get(live.info.id) !== live || live.closing || live.finalizedRun) return;
+    run.modelResponseTimer = setTimeout(() => {
+      delete run.modelResponseTimer;
+      if (this.live.get(live.info.id) !== live || live.run !== run || live.closing || run.finalizedRun)
+        return;
       const error = `Model response exceeded ${timeoutMs} ms without completing.`;
-      this.requestCancellation(live, new Error(error));
+      live.closing = true;
+      this.requestCancellation(live, run, new Error(error));
       try {
-        this.finalizeRun(live, 'failed', error);
+        this.finalizeRun(live, run, 'failed', error);
       } catch (error) {
         this.reportError(live, error);
       } finally {
         this.scheduleTermination(live);
       }
     }, timeoutMs);
-    live.modelResponseTimer.unref?.();
+    run.modelResponseTimer.unref?.();
   }
 
   private handleSessionEvent(live: LiveAgent, event: AgentSessionEvent): void {
     if (this.live.get(live.info.id) !== live) return;
+    // Acquire the public idle waiter before observers can reenter or settled hooks expose isIdle.
+    if (
+      event.type === 'agent_start' ||
+      event.type === 'compaction_start' ||
+      event.type === 'auto_retry_start'
+    )
+      this.trackNativeWork(live);
     live.broadcaster.broadcast(toObserverEvent(event));
+    const run = live.run;
     if (
       event.type === 'agent_start' &&
-      (live.closing || live.cancellation.signal.aborted || live.eventError)
+      (live.closing || run?.cancellation.signal.aborted || live.eventError)
     )
       this.requestAbort(live);
-    if (live.finalizedRun || (live.awaitingPrompt && !live.promptFinished)) return;
+    if (!run) return;
+    if (event.type === 'agent_settled') {
+      run.observerSettled = true;
+      run.settledAborted = event.aborted;
+      this.clearModelResponseTimer(run);
+    }
+    if (run.finalizedRun || (run.awaitingPrompt && !run.promptFinished)) return;
     // Sample after persistence; message_end is dispatched before its message is appended.
     if (
       event.type === 'turn_end' ||
@@ -1711,11 +1930,7 @@ export class AgentManager {
     ) {
       this.sampleContextUsage(live);
     }
-    if (event.type === 'agent_settled') {
-      live.settledAborted = event.aborted;
-      this.clearModelResponseTimer(live);
-      return;
-    }
+    if (event.type === 'agent_settled') return;
     if (live.closing) return;
     if (event.type === 'agent_start') {
       live.info.status = 'running';
@@ -1724,7 +1939,7 @@ export class AgentManager {
       live.lastActivityPersistedAt = live.info.updatedAt;
       this.notifyStatusChange(live.info);
     } else if (event.type === 'message_start' && event.message.role === 'assistant') {
-      this.startModelResponseTimer(live);
+      this.startModelResponseTimer(live, run);
     } else if (event.type === 'message_update' || event.type === 'tool_execution_update') {
       live.info.lastActivity = Date.now();
       if (live.info.lastActivity - live.lastActivityPersistedAt >= ACTIVITY_PERSIST_INTERVAL_MS) {
@@ -1736,30 +1951,30 @@ export class AgentManager {
       saveInfo(live.info);
       live.lastActivityPersistedAt = live.info.updatedAt;
     } else if (event.type === 'message_end' && event.message.role === 'assistant') {
-      this.clearModelResponseTimer(live);
-      live.candidateResponse = extractTextFromMessage(event.message).trim();
-      live.candidateError =
+      this.clearModelResponseTimer(run);
+      run.candidateResponse = extractTextFromMessage(event.message).trim();
+      run.candidateError =
         event.message.stopReason === 'error' || event.message.stopReason === 'aborted'
           ? event.message.errorMessage || `Agent ended with ${event.message.stopReason}.`
           : undefined;
     } else if (event.type === 'auto_retry_end' && !event.success && event.finalError) {
-      live.candidateError = event.finalError;
+      run.candidateError = event.finalError;
     }
   }
 
   private finalizeRun(
     live: LiveAgent,
+    run: RunState,
     status: 'completed' | 'failed' | 'interrupted',
     error?: string,
   ): void {
-    if (this.live.get(live.info.id) !== live || live.finalizedRun) return;
-    // Close admission before persistence, callbacks, and completion publication.
-    live.closing = true;
-    live.finalizedRun = true;
-    delete live.suspendedCompletion;
-    this.clearModelResponseTimer(live);
+    if (this.live.get(live.info.id) !== live || live.run !== run || run.finalizedRun) return;
+    // Close only this run's admission before invoking reentrant callbacks.
+    run.finalizedRun = true;
+    delete run.suspendedCompletion;
+    this.clearModelResponseTimer(run);
     live.info.status = status;
-    if (status === 'completed') live.info.finalResponse = live.candidateResponse;
+    if (status === 'completed') live.info.finalResponse = run.candidateResponse;
     else delete live.info.finalResponse;
     if (error !== undefined) live.info.error = formatAgentError(error);
     else delete live.info.error;
@@ -1962,54 +2177,80 @@ export class AgentManager {
     throwIfAborted(this.shutdownController.signal);
     let info = this.getAgentInfo(target, parentSessionId);
     let live = this.live.get(info.id);
-    while (live?.closing) {
-      await this.waitForTermination(live);
+    while (live) {
+      if (live.closing) await this.waitForTermination(live);
+      else if (live.run?.finalizedRun) await this.waitForRunSettlement(live, live.run);
+      else if (
+        !live.run && !live.nativeWork && !live.pendingCompactions.size && live.session?.isIdle
+      ) {
+        const trusted = this.options.projectTrusted?.(info.cwd);
+        const model = live.session.model;
+        if (
+          (trusted === undefined || trusted === live.session.settingsManager.isProjectTrusted()) &&
+          model?.provider === info.provider &&
+          model.id === info.modelId
+        ) {
+          await this.startRun(live, message);
+          return { delivery: 'prompt' };
+        }
+        // Rebuild native resources for changed trust or selection, preserving the saved exact route.
+        live.closing = true;
+        await this.waitForTermination(live);
+      } else break;
       throwIfAborted(this.shutdownController.signal);
-      // Cleanup yielded; a competing caller might now own a different live instance.
       info = this.getAgentInfo(target, parentSessionId);
       live = this.live.get(info.id);
     }
-    if (live?.awaitingPrompt)
-      throw new Error(
-        `Agent ${info.canonicalName} is still starting. Retry after startup finishes.`,
-      );
     if (!live) {
       await this.startLiveAgent(info, message);
       return { delivery: 'prompt' };
     }
+    const run = live.run;
+    if (run?.awaitingPrompt)
+      throw new Error(
+        `Agent ${info.canonicalName} is still starting. Retry after startup finishes.`,
+      );
     const current = live;
     const session = current.session!;
-    if (current.finalizedRun || !session.isStreaming)
+    if (!run || run.finalizedRun || !session.isStreaming)
       throw new Error(`Agent ${info.canonicalName} is finishing. Retry after cleanup.`);
-    const steer = session.steer(message, undefined, { source: 'rpc' });
-    // Track submitted input until it exits so cleanup retains session ownership.
-    current.pendingSteers.add(steer);
-    void steer.then(
-      () => {
-        if (this.live.get(info.id) === current && current.cancellation.signal.aborted) {
-          // Clear late-queued input after cancellation, preserving persisted messages.
-          try {
-            session.clearQueue();
-          } catch (error) {
-            this.reportError(current, error);
-          }
-          this.requestAbort(current);
-        }
-        current.pendingSteers.delete(steer);
-      },
-      () => current.pendingSteers.delete(steer),
-    );
+    // Register before SDK steer: input handlers and observers may synchronously reenter.
+    const { promise: pending, resolve: resolvePending } = Promise.withResolvers<void>();
+    run.pendingSteers.add(pending);
+    let steer: Promise<unknown> | undefined;
     const timeout = new Error(
       `Timed out waiting for agent ${info.canonicalName} steering acceptance.`,
     );
     try {
+      steer = session.steer(message, undefined, { source: 'rpc' });
       await boundedWait(steer, DEFAULT_STARTUP_TIMEOUT_MS, timeout, this.shutdownController.signal);
+      throwIfAborted(this.shutdownController.signal);
+      if (
+        this.live.get(info.id) !== current ||
+        current.run !== run ||
+        current.closing ||
+        run.finalizedRun ||
+        !session.isStreaming
+      ) {
+        throw new Error(
+          `Agent ${info.canonicalName} ended while steering input was being processed; delivery cannot be confirmed. Retry after cleanup.`,
+        );
+      }
+      current.info.lastTaskMessage = message;
+      current.info.lastActivity = Date.now();
+      try {
+        saveInfo(current.info);
+      } catch (error) {
+        this.failSession(current, error);
+        throw error;
+      }
+      return { delivery: 'steer' };
     } catch (error) {
-      // A steering timeout cancels the run and retains JSONL ownership until input exits.
-      if (error === timeout && this.live.get(info.id) === current && !current.finalizedRun) {
-        this.requestCancellation(current, timeout);
+      if (error === timeout && this.live.get(info.id) === current && current.run === run) {
+        current.closing = true;
+        this.requestCancellation(current, run, timeout);
         try {
-          this.finalizeRun(current, 'failed', timeout.message);
+          this.finalizeRun(current, run, 'failed', timeout.message);
         } catch (saveError) {
           this.reportError(current, saveError);
         } finally {
@@ -2017,22 +2258,24 @@ export class AgentManager {
         }
       }
       throw error;
+    } finally {
+      const finish = () => {
+        if (this.live.get(info.id) === current && current.run === run) {
+          if (run.cancellation.signal.aborted || run.finalizedRun || current.closing || !session.isStreaming) {
+            try {
+              session.clearQueue();
+            } catch (error) {
+              this.failSession(current, error);
+            }
+          }
+          if (run.cancellation.signal.aborted) this.requestAbort(current);
+        }
+        run.pendingSteers.delete(pending);
+        resolvePending();
+      };
+      if (steer) void steer.then(finish, finish);
+      else finish();
     }
-    throwIfAborted(this.shutdownController.signal);
-    if (
-      this.live.get(info.id) !== current ||
-      current.closing ||
-      current.finalizedRun ||
-      !session.isStreaming
-    ) {
-      throw new Error(
-        `Agent ${info.canonicalName} ended while steering input was being processed; delivery cannot be confirmed. Retry after cleanup.`,
-      );
-    }
-    current.info.lastTaskMessage = message;
-    current.info.lastActivity = Date.now();
-    saveInfo(current.info);
-    return { delivery: 'steer' };
   }
 
   async interruptAgent(
@@ -2045,18 +2288,23 @@ export class AgentManager {
     const live = this.live.get(persisted.id);
     if (previous !== 'starting' && previous !== 'running') {
       if (live?.closing) await this.waitForTermination(live);
+      else if (live?.run?.finalizedRun) await this.waitForRunSettlement(live, live.run);
       return { previous_status: previous };
     }
-    if (live) {
-      this.requestCancellation(live, new Error('Agent interrupted.'));
+    if (live?.run) {
+      const run = live.run;
+      if (!live.session || !run.promptFinished || this.maxIdleSessions === 0) live.closing = true;
+      this.requestCancellation(live, run, new Error('Agent interrupted.'));
       let failure: unknown;
       try {
-        this.finalizeRun(live, 'interrupted');
+        this.finalizeRun(live, run, 'interrupted');
       } catch (error) {
+        live.closing = true;
         failure = error;
       } finally {
         try {
-          await this.waitForTermination(live);
+          if (live.closing) await this.waitForTermination(live);
+          else await this.waitForRunSettlement(live, run);
         } catch (error) {
           this.reportError(live, error);
           failure ??= error;
@@ -2089,10 +2337,16 @@ export class AgentManager {
     return { previous_status: previous };
   }
 
-  private requestCancellation(live: LiveAgent, reason: Error): void {
-    live.closing = true;
-    this.clearModelResponseTimer(live);
-    live.cancellation.abort(reason);
+  private requestCancellation(live: LiveAgent, run: RunState, reason: Error): void {
+    if (live.run !== run) return;
+    this.clearModelResponseTimer(run);
+    run.cancellation.abort(reason);
+    try {
+      live.session?.clearQueue();
+    } catch (error) {
+      this.reportError(live, error);
+      live.closing = true;
+    }
     this.requestAbort(live);
   }
 
@@ -2121,14 +2375,15 @@ export class AgentManager {
   private terminateSession(live: LiveAgent): Promise<void> {
     if (live.termination) return live.termination;
     live.closing = true;
-    this.clearModelResponseTimer(live);
+    const run = live.run;
+    this.clearModelResponseTimer(run);
     // abort listeners can synchronously request shutdown. Publish the shared promise first.
     live.termination = Promise.resolve().then(async () => {
       this.requestAbort(live);
       // Wait for initialization and submitted input before releasing session ownership.
       await live.initialization?.catch(() => {});
-      await live.promptFinished?.catch(() => {});
-      await Promise.allSettled(live.pendingSteers);
+      await run?.promptFinished?.catch(() => {});
+      await Promise.allSettled(run?.pendingSteers ?? []);
       const errors: unknown[] = [];
       try {
         if (live.session) {
@@ -2137,7 +2392,12 @@ export class AgentManager {
           } catch (error) {
             errors.push(error);
           }
-          await live.session.waitForIdle();
+          try {
+            await this.waitForNativeIdle(live);
+            live.session.clearQueue();
+          } catch (error) {
+            errors.push(error);
+          }
           this.sampleContextUsage(live);
           try {
             await shutdownChildSession(live.session);
@@ -2152,7 +2412,7 @@ export class AgentManager {
         } catch (error) {
           errors.push(error);
         }
-        this.clearModelResponseTimer(live);
+        this.clearModelResponseTimer(run);
         try {
           live.broadcaster.stop();
         } catch (error) {
@@ -2180,14 +2440,19 @@ export class AgentManager {
     this.shutdownController.abort(new Error('Agent manager shut down.'));
     const errors: unknown[] = [];
     const terminations = [...this.live.values()].map((live) => {
-      this.requestCancellation(live, abortError(this.shutdownController.signal));
+      live.closing = true;
+      // Register the one termination promise before abort can reenter shutdown.
+      const termination = this.waitForTermination(live);
       try {
-        if (!live.finalizedRun) this.finalizeRun(live, 'interrupted');
+        if (live.run) {
+          this.requestCancellation(live, live.run, abortError(this.shutdownController.signal));
+          this.finalizeRun(live, live.run, 'interrupted');
+        }
       } catch (error) {
         errors.push(error);
       }
       // Continue cleanup for every child when saving status fails.
-      return this.waitForTermination(live);
+      return termination;
     });
     const results = await Promise.allSettled([this.reconciliation, ...terminations]);
     for (const result of results) if (result.status === 'rejected') errors.push(result.reason);
