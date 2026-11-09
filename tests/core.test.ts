@@ -367,7 +367,7 @@ Review the requested files.`,
   });
 
   test.each(['\n', '\r\n'])(
-    'parses multiline description and hint without changing other fields (%j)',
+    'parses multiline description without changing other fields (%j)',
     (newline) => {
       const definition = parseAgentDefinitionText(
         [
@@ -381,12 +381,6 @@ Review the requested files.`,
           '',
           '    model: not-a-route',
           '  ---',
-          'hint: |-',
-          '  Give exact paths.',
-          '  - Scope:',
-          '    - One question.',
-          '  caller_hint: literal text',
-          'caller_hint: Fallback hint.',
           'provider: " template-provider "',
           'model: " template-model "',
           'thinking: off',
@@ -402,7 +396,6 @@ Review the requested files.`,
         name: 'explorer',
         description:
           'Use explorer: # literal text\n<rules>\n  <rule>Reuse & trust "results".</rule>\n</rules>\n\n  model: not-a-route\n---',
-        hint: 'Give exact paths.\n- Scope:\n  - One question.\ncaller_hint: literal text',
         provider: 'template-provider',
         model: 'template-model',
         thinking: 'off',
@@ -422,53 +415,47 @@ Review the requested files.`,
     ['>+', 'First. Second.\n\n'],
     ['|2-', 'First.\nSecond.'],
     ['>-2 # explicit indent', 'First. Second.'],
-  ])('uses native YAML block semantics for all descriptive fields: %s', (style, expected) => {
-    for (const field of ['description', 'hint', 'caller_hint']) {
-      const definition = parseAgentDefinitionText(
-        [
-          '---',
-          field + ': ' + style,
-          '  First.',
-          '  Second.',
-          '',
-          'model: fake',
-          '---',
-          'Body.',
-        ].join('\n'),
-        'fallback',
-      );
-      expect(field === 'description' ? definition.description : definition.hint).toBe(expected);
-      expect(definition.model).toBe('fake');
-      expect(definition.prompt).toBe('Body.');
-    }
+  ])('uses native YAML block semantics for description: %s', (style, expected) => {
+    const definition = parseAgentDefinitionText(
+      [
+        '---',
+        'description: ' + style,
+        '  First.',
+        '  Second.',
+        '',
+        'model: fake',
+        '---',
+        'Body.',
+      ].join('\n'),
+      'fallback',
+    );
+    expect(definition.description).toBe(expected);
+    expect(definition.model).toBe('fake');
+    expect(definition.prompt).toBe('Body.');
   });
 
   test.each(['|', '|-', '|+', '>', '>-', '>+'])(
     'preserves native block endings before another field and at the end of frontmatter: %s',
     (style) => {
-      for (const field of ['description', 'hint', 'caller_hint']) {
-        for (const blankLines of [0, 1, 2]) {
-          const block = [
-            field + ': ' + style,
-            '  First.',
-            '  Second.',
-            ...Array(blankLines).fill(''),
-          ];
-          // Keep a following key in the native reference so the SDK preserves the YAML's final newline.
-          const expected = codingAgent.parseFrontmatter(
-            ['---', ...block, 'model: fake', '---'].join('\n'),
-          ).frontmatter[field];
-          for (const newline of ['\n', '\r\n']) {
-            for (const suffix of [[], ['model: fake']]) {
-              const definition = parseAgentDefinitionText(
-                ['---', ...block, ...suffix, '---', 'Body.'].join(newline),
-                'fallback',
-              );
-              expect(field === 'description' ? definition.description : definition.hint).toBe(
-                expected,
-              );
-              expect(definition.prompt).toBe('Body.');
-            }
+      for (const blankLines of [0, 1, 2]) {
+        const block = [
+          'description: ' + style,
+          '  First.',
+          '  Second.',
+          ...Array(blankLines).fill(''),
+        ];
+        // Keep a following key in the native reference so the SDK preserves the YAML's final newline.
+        const expected = codingAgent.parseFrontmatter(
+          ['---', ...block, 'model: fake', '---'].join('\n'),
+        ).frontmatter.description;
+        for (const newline of ['\n', '\r\n']) {
+          for (const suffix of [[], ['model: fake']]) {
+            const definition = parseAgentDefinitionText(
+              ['---', ...block, ...suffix, '---', 'Body.'].join(newline),
+              'fallback',
+            );
+            expect(definition.description).toBe(expected);
+            expect(definition.prompt).toBe('Body.');
           }
         }
       }
@@ -476,30 +463,25 @@ Review the requested files.`,
   );
 
   test('normalizes block headers without changing quoted markers or duplicate-key precedence', () => {
-    for (const field of ['description', 'hint', 'caller_hint']) {
-      const read = (text: string) => {
-        const definition = parseAgentDefinitionText('---\n' + text + '\n---', 'fallback');
-        return field === 'description' ? definition.description : definition.hint;
-      };
-      expect(read(field + ':|-\n  First.\n  Second.')).toBe('First.\nSecond.');
-      expect(read(field + ': "|"')).toBe('|');
-      expect(read(field + ": '>-'")).toBe('>-');
-      expect(read(field + ': inline\n' + field + ': |-\n  First.\n  Second.')).toBe(
-        'First.\nSecond.',
-      );
-      expect(read(field + ': |-\n  First.\n  Second.\n' + field + ': inline')).toBe('inline');
-    }
+    const read = (text: string) =>
+      parseAgentDefinitionText('---\n' + text + '\n---', 'fallback').description;
+    expect(read('description:|-\n  First.\n  Second.')).toBe('First.\nSecond.');
+    expect(read('description: "|"')).toBe('|');
+    expect(read("description: '>-'")).toBe('>-');
+    expect(read('description: inline\ndescription: |-\n  First.\n  Second.')).toBe(
+      'First.\nSecond.',
+    );
+    expect(read('description: |-\n  First.\n  Second.\ndescription: inline')).toBe('inline');
   });
 
   test('preserves legacy inline values, ignored lines and last-key-wins behavior', () => {
-    const hint = String.raw`Keep \n literal and \"quotes\".`;
+    const description = String.raw`Rules: prefer # literal text. Keep \n literal and \"quotes\".`;
     expect(
       parseAgentDefinitionText(
         [
           '---',
           'name: initial',
-          'description: Rules: prefer # literal text',
-          'hint: "' + hint + '"',
+          'description: "' + description + '"',
           'provider: on',
           'model: 123',
           'tools:',
@@ -514,8 +496,7 @@ Review the requested files.`,
       ),
     ).toMatchObject({
       name: 'final',
-      description: 'Rules: prefer # literal text',
-      hint,
+      description,
       provider: 'on',
       model: '123',
       tools: '',
@@ -524,43 +505,34 @@ Review the requested files.`,
     });
     expect(
       parseAgentDefinitionText(
-        '---\ndescription: > ordinary inline text\nhint: | ordinary inline text\n---',
+        '---\ndescription: Rules: prefer # literal text\n---',
         'fallback',
-      ),
-    ).toMatchObject({ description: '> ordinary inline text', hint: '| ordinary inline text' });
+      ).description,
+    ).toBe('Rules: prefer # literal text');
+    for (const marker of ['>', '|']) {
+      expect(
+        parseAgentDefinitionText(
+          '---\ndescription: ' + marker + ' ordinary inline text\n---',
+          'fallback',
+        ),
+      ).toMatchObject({ description: marker + ' ordinary inline text' });
+    }
     expect(parseAgentDefinitionText('No frontmatter.\nBody.', 'fallback')).toMatchObject({
       name: 'fallback',
       prompt: 'No frontmatter.\nBody.',
     });
   });
 
-  test('keeps hint precedence and supports multiline caller_hint fallback', () => {
-    const fallback = 'caller_hint: |-\n  First fallback.\n  Second fallback.\n';
-    for (const hint of ['', 'hint:\n', 'hint: |-\n']) {
-      expect(parseAgentDefinitionText('---\n' + hint + fallback + '---', 'fallback').hint).toBe(
-        'First fallback.\nSecond fallback.',
-      );
-    }
-    expect(
-      parseAgentDefinitionText(
-        '---\n' + fallback + 'hint: |-\n  Preferred.\n  Hint.\n---',
-        'fallback',
-      ).hint,
-    ).toBe('Preferred.\nHint.');
-  });
-
   test('rejects malformed blocks instead of treating their markers as descriptions', () => {
-    for (const field of ['description', 'hint', 'caller_hint']) {
-      expect(() =>
-        parseAgentDefinitionText('---\n' + field + ': |0\n  Text.\n---', 'fallback'),
-      ).toThrow();
-      expect(() =>
-        parseAgentDefinitionText(
-          '---\n' + field + ': |-\n   First.\n  Bad indentation.\n---',
-          'fallback',
-        ),
-      ).toThrow();
-    }
+    expect(() =>
+      parseAgentDefinitionText('---\ndescription: |0\n  Text.\n---', 'fallback'),
+    ).toThrow();
+    expect(() =>
+      parseAgentDefinitionText(
+        '---\ndescription: |-\n   First.\n  Bad indentation.\n---',
+        'fallback',
+      ),
+    ).toThrow();
   });
 
   test('reports an invalid template path without hiding valid templates', () => {
@@ -571,7 +543,7 @@ Review the requested files.`,
     fs.mkdirSync(directory, { recursive: true });
     try {
       fs.writeFileSync(valid, '---\ndescription: |-\n  First.\n  Second.\n---');
-      fs.writeFileSync(invalid, '---\nhint: |0\n  Invalid.\n---');
+      fs.writeFileSync(invalid, '---\ndescription: |0\n  Invalid.\n---');
       const definitions = listAgentDefinitions();
       expect(definitions.find(({ name }) => name === 'valid-multiline')?.description).toBe(
         'First.\nSecond.',
@@ -586,14 +558,12 @@ Review the requested files.`,
     }
   });
 
-  test('formats multiline descriptions and hints separately from route metadata', () => {
+  test('formats multiline descriptions separately from route metadata', () => {
     const directory = path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents');
     const templates = {
-      'multiline-both':
-        'description: |\n  Explore.\n\n  <rules>\n    <rule>Reuse & trust.</rule>\n  </rules>\nhint: |\n  Give paths.\n  - Narrow scope.\nmodel: fake\nthinking: high\nextensions: @scope/tools',
-      'multiline-hint':
-        'description: Inline description.\ncaller_hint: |-\n  First hint.\n  Second hint.',
-      'single-line': 'description: Inline description.\nhint: Inline hint.\nmodel: fake',
+      multiline:
+        'description: |\n  Explore.\n\n  <rules>\n    <rule>Reuse & trust.</rule>\n  </rules>\n  Give paths.\n  - Narrow scope.\nmodel: fake\nthinking: high\nextensions: @scope/tools',
+      'single-line': 'description: Inline description.\nmodel: fake',
     };
     fs.mkdirSync(directory, { recursive: true });
     try {
@@ -603,23 +573,19 @@ Review the requested files.`,
       const description = getAgentDefinitionsDescription();
       expect(description).toContain(
         [
-          '- `multiline-both` — model: fake (inherited provider) — thinking: high — extensions: @scope/tools',
+          '- `multiline` — model: fake (inherited provider) — thinking: high — extensions: @scope/tools',
           '  Description:',
           '    Explore.',
           '    ',
           '    <rules>',
           '      <rule>Reuse & trust.</rule>',
           '    </rules>',
-          '  Caller hint:',
           '    Give paths.',
           '    - Narrow scope.',
         ].join('\n'),
       );
       expect(description).toContain(
-        '- `multiline-hint` — Inline description.\n  Caller hint:\n    First hint.\n    Second hint.',
-      );
-      expect(description).toContain(
-        '- `single-line` — Inline description. — model: fake (inherited provider)\n  Caller hint: Inline hint.',
+        '- `single-line` — Inline description. — model: fake (inherited provider)',
       );
     } finally {
       for (const name of Object.keys(templates))

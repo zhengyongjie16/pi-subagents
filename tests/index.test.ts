@@ -659,7 +659,7 @@ test.each(runtimes)(
     fs.writeFileSync(path.join(directory, "config.json"), JSON.stringify({ defaults: { extensions: [fixturePath] } }));
     const template = [
       "---", "name: multiline", "description: |-", "  First exploration line.", "  <rules>",
-      "    <rule>Reuse & trust.</rule>", "  </rules>", "hint: |-", "  Give exact paths.", "  - Narrow scope.",
+      "    <rule>Reuse & trust.</rule>", "  </rules>", "  Give exact paths.", "  - Narrow scope.",
       "provider: test", "model: fake", "thinking: off", "tools: read", "---", "Child template instructions.",
     ].join("\n");
     fs.writeFileSync(templatePath, template);
@@ -682,8 +682,7 @@ test.each(runtimes)(
       const spawnTool = () => session.getToolDefinition("spawn_agent");
       const schema = JSON.stringify(spawnTool().parameters);
       const checkDescription = (description, firstLine) => {
-        assert.ok(description.includes("  Description:\n    " + firstLine + "\n    <rules>\n      <rule>Reuse & trust.</rule>\n    </rules>"), description);
-        assert.ok(description.includes("  Caller hint:\n    Give exact paths.\n    - Narrow scope."), description);
+        assert.ok(description.includes("  Description:\n    " + firstLine + "\n    <rules>\n      <rule>Reuse & trust.</rule>\n    </rules>\n    Give exact paths.\n    - Narrow scope."), description);
         assert.ok(description.includes("model: test/fake — thinking: off"), description);
         assert.ok(!description.includes("Child template instructions."));
       };
@@ -699,7 +698,7 @@ test.each(runtimes)(
       assert.equal(result.details.modelId, "fake");
       assert.equal(result.details.thinking, "off");
       assert.equal(fixture.instances.at(-1).inputs[0].text, "Child template instructions.\n\nwork");
-      fs.writeFileSync(templatePath, template.replace("First exploration line.", "Updated exploration line.").replace("\nhint: |-", "\ncaller_hint: |-"));
+      fs.writeFileSync(templatePath, template.replace("First exploration line.", "Updated exploration line."));
       await session.extensionRunner.emit({ type: "session_start", reason: "reload" });
       assert.equal(JSON.stringify(spawnTool().parameters), schema);
       await session.prompt("Inspect refreshed template descriptions.");

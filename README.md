@@ -44,13 +44,14 @@ No templates are installed automatically. Example:
 ```md
 ---
 name: reviewer
-description: Focused read-only code review agent
+description: |-
+  Focused read-only code review agent
+  Give this reviewer exact file paths and a narrow scope.
 provider: openai-codex
 model: gpt-5.6-sol
 thinking: high
 tools: read,bash,grep,find,ls
 extensions: @scope/pi-extra-tools, ~/.pi/agent/extensions/local-helper.ts
-hint: Give this reviewer exact file paths and a narrow scope.
 ---
 
 You are a focused review subagent. Return concise findings with file paths.

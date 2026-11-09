@@ -89,7 +89,6 @@ export interface SubagentConfig {
 export interface AgentDefinition {
   name: string;
   description?: string;
-  hint?: string;
   provider?: string;
   model?: string;
   thinking?: ThinkingLevel;
@@ -630,7 +629,7 @@ export function parseAgentDefinitionText(text: string, fallbackName: string): Ag
       if (!entry) continue;
       const [, key, value] = entry;
       if (
-        ['description', 'hint', 'caller_hint'].includes(key) &&
+        key === 'description' &&
         /^[|>][0-9+-]*(?:[ \t]+#.*)?$/.test(value)
       ) {
         // Only collect the block; native YAML handles indentation, folding and chomping.
@@ -650,7 +649,6 @@ export function parseAgentDefinitionText(text: string, fallbackName: string): Ag
   return {
     name: attrs.name || fallbackName,
     description: attrs.description,
-    hint: attrs.hint || attrs.caller_hint,
     provider: attrs.provider?.trim() || undefined,
     model: attrs.model?.trim() || undefined,
     thinking: isThinkingLevel(attrs.thinking) ? attrs.thinking : undefined,
@@ -694,7 +692,6 @@ export function getAgentDefinitionsDescription(): string {
   return definitions
     .map((definition) => {
       const description = definition.description?.replace(/\n+$/, '');
-      const hint = definition.hint?.replace(/\n+$/, '');
       const multiline = description?.includes('\n');
       let line = `- \`${definition.name}\`${description && !multiline ? ` — ${description}` : ''}`;
       if (definition.model)
@@ -704,10 +701,6 @@ export function getAgentDefinitionsDescription(): string {
         line += ` — extensions: ${definition.extensions.join(', ')}`;
       if (description && multiline)
         line += '\n  Description:\n' + description.replace(/^/gm, '    ');
-      if (hint)
-        line += hint.includes('\n')
-          ? '\n  Caller hint:\n' + hint.replace(/^/gm, '    ')
-          : '\n  Caller hint: ' + hint;
       return line;
     })
     .join('\n');
