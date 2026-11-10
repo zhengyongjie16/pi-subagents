@@ -1,17 +1,39 @@
 import type { Theme } from '@earendil-works/pi-coding-agent';
 import {
-  backgroundAnsi, colorToRgb, indexedColor, parseColor, styleText, truncateToWidth,
+  backgroundAnsi,
+  colorToRgb,
+  indexedColor,
+  parseColor,
+  styleText,
+  truncateToWidth,
 } from '@earendil-works/pi-tui';
 import { stripVTControlCharacters } from 'node:util';
 
 // Claude Code's named colors, followed by the reference's Agency Agents aliases.
 const NAMED_AGENT_COLORS: Readonly<Record<string, string>> = {
-  red: '#DC2626', blue: '#6A9BCC', green: '#16A34A', yellow: '#CA8A04',
-  purple: '#827DBD', orange: '#D97757', pink: '#C46686', cyan: '#0891B2',
-  amber: '#F59E0B', teal: '#008080', indigo: '#6366F1', gold: '#EAB308',
-  'neon-green': '#10B981', 'neon-cyan': '#06B6D4', 'metallic-blue': '#3B82F6',
-  violet: '#8B5CF6', rose: '#F43F5E', lime: '#84CC16', gray: '#6B7280',
-  grey: '#6B7280', fuchsia: '#D946EF', slate: '#64748B', navy: '#1E3A8A',
+  red: '#DC2626',
+  blue: '#6A9BCC',
+  green: '#16A34A',
+  yellow: '#CA8A04',
+  purple: '#827DBD',
+  orange: '#D97757',
+  pink: '#C46686',
+  cyan: '#0891B2',
+  amber: '#F59E0B',
+  teal: '#008080',
+  indigo: '#6366F1',
+  gold: '#EAB308',
+  'neon-green': '#10B981',
+  'neon-cyan': '#06B6D4',
+  'metallic-blue': '#3B82F6',
+  violet: '#8B5CF6',
+  rose: '#F43F5E',
+  lime: '#84CC16',
+  gray: '#6B7280',
+  grey: '#6B7280',
+  fuchsia: '#D946EF',
+  slate: '#64748B',
+  navy: '#1E3A8A',
 };
 const BLACK = parseColor('#000000');
 const WHITE = parseColor('#FFFFFF');
@@ -79,5 +101,8 @@ export function paintAgentLine(
   const open = backgroundAnsi(bg, theme!.getColorMode());
   // Badge closure and native truncation resets must restore the enclosing selection,
   // not the badge foreground/background. Always close the row before the editor.
-  return theme!.style(fitted.replace(/\x1b\[(?:0|49)m/g, (reset) => reset + open), { bg });
+  return theme!.style(
+    fitted.replace(/\x1b\[(?:0|49)m/g, (reset) => reset + open),
+    { bg },
+  );
 }

@@ -1,19 +1,35 @@
 import type { ExtensionContext, Theme } from '@earendil-works/pi-coding-agent';
-import { Loader, truncateToWidth, visibleWidth, type Component, type TUI } from '@earendil-works/pi-tui';
+import {
+  Loader,
+  truncateToWidth,
+  visibleWidth,
+  type Component,
+  type TUI,
+} from '@earendil-works/pi-tui';
 import { stripVTControlCharacters } from 'node:util';
 import type { AgentWidgetSnapshot } from './core.js';
 import {
-  agentStatusColor, renderAgentBadge, resolveAgentColor, sanitizeAgentText as sanitize,
+  agentStatusColor,
+  renderAgentBadge,
+  resolveAgentColor,
+  sanitizeAgentText as sanitize,
 } from './color.js';
 
 const WIDGET_KEY = 'pi-subagents';
 const MAX_LINES = 12;
 const SUMMARY_STATUSES = ['running', 'completed', 'failed', 'interrupted'] as const;
-export type AgentStatusCounts = Readonly<Record<typeof SUMMARY_STATUSES[number], number>>;
-const EMPTY_STATUS_COUNTS: AgentStatusCounts = { running: 0, completed: 0, failed: 0, interrupted: 0 };
+export type AgentStatusCounts = Readonly<Record<(typeof SUMMARY_STATUSES)[number], number>>;
+const EMPTY_STATUS_COUNTS: AgentStatusCounts = {
+  running: 0,
+  completed: 0,
+  failed: 0,
+  interrupted: 0,
+};
 // Use the same frames and animation clock as Pi's WorkingStatusIndicator.
 class AgentSpinner extends Loader {
-  frame(): string { return this.getRenderedIndicator(); }
+  frame(): string {
+    return this.getRenderedIndicator();
+  }
 }
 // Exact Pi built-in names (including native codemode) get labels; other names stay dynamic.
 const BUILTIN_TOOL_ACTIONS = new Map([
@@ -48,38 +64,41 @@ function preview(value: string | undefined): string | undefined {
 function activity(snapshot: AgentWidgetSnapshot): string {
   if (snapshot.status === 'starting') return 'initializing…';
   if (snapshot.activeTools.length) {
-    const actions = snapshot.activeTools.map(
-      (name) => {
-        const cleanName = sanitize(name);
-        return BUILTIN_TOOL_ACTIONS.get(cleanName) ?? (cleanName || 'using tool');
-      },
-    );
+    const actions = snapshot.activeTools.map((name) => {
+      const cleanName = sanitize(name);
+      return BUILTIN_TOOL_ACTIONS.get(cleanName) ?? (cleanName || 'using tool');
+    });
     return [...new Set(actions)].join(', ') + '…';
   }
   return preview(snapshot.responsePreview) ?? 'thinking…';
 }
 
-function fit(line: string, width: number): string {
-  return truncateToWidth(line, width, '…');
-}
-
 // Native truncation can add reset escapes even to plain text; do not feed those into a theme.
 function fitText(text: string, width: number): string {
-  return stripVTControlCharacters(fit(text, width));
+  return stripVTControlCharacters(truncateToWidth(text, width, '…'));
 }
 
-function paint(theme: Theme | undefined, color: 'accent' | 'dim' | 'warning' | 'error' | 'success', text: string): string {
+function paint(
+  theme: Theme | undefined,
+  color: 'accent' | 'dim' | 'warning' | 'error' | 'success',
+  text: string,
+): string {
   return theme ? theme.fg(color, text) : text;
 }
 
-function tokenText(snapshot: AgentWidgetSnapshot, theme: Theme | undefined, compact = false): string {
+function tokenText(
+  snapshot: AgentWidgetSnapshot,
+  theme: Theme | undefined,
+  compact = false,
+): string {
   const count = snapshot.tokens;
   if (count === undefined || !Number.isFinite(count) || count <= 0) return '';
-  const amount = count >= 1_000_000
-    ? `${(count / 1_000_000).toFixed(1)}M`
-    : count >= 1_000
-      ? `${(count / 1_000).toFixed(1)}k`
-      : String(count);
+  const amount =
+    count >= 1_000_000
+      ? `${(count / 1_000_000).toFixed(1)}M`
+      : count >= 1_000
+        ? `${(count / 1_000).toFixed(1)}k`
+        : String(count);
   const annotations: string[] = [];
   const percent = snapshot.contextUsage?.percent;
   if (typeof percent === 'number' && Number.isFinite(percent) && percent >= 0) {
@@ -97,7 +116,8 @@ function tokenText(snapshot: AgentWidgetSnapshot, theme: Theme | undefined, comp
 
 function modelText(snapshot: AgentWidgetSnapshot, width: number): string {
   const base = [sanitize(snapshot.provider ?? ''), sanitize(snapshot.modelId ?? '')]
-    .filter(Boolean).join('/');
+    .filter(Boolean)
+    .join('/');
   const thinking = sanitize(snapshot.thinking ?? '');
   const suffix = thinking ? `/${thinking}` : '';
   const baseWidth = width - visibleWidth(suffix);
@@ -116,40 +136,55 @@ function agentHeader(
   const badgePadding = color ? 2 : 0;
   const thinking = sanitize(snapshot.thinking ?? '');
   const elapsed = snapshot.elapsedMs;
-  const duration = elapsed !== undefined && Number.isFinite(elapsed) && elapsed >= 0
-    ? `${Math.floor(elapsed / 1000)}s`
-    : '';
-  const tail = [
-    tokenText(snapshot, theme),
-    duration ? paint(theme, 'dim', duration) : '',
-  ].filter(Boolean).join(' · ');
+  const duration =
+    elapsed !== undefined && Number.isFinite(elapsed) && elapsed >= 0
+      ? `${Math.floor(elapsed / 1000)}s`
+      : '';
+  const tail = [tokenText(snapshot, theme), duration ? paint(theme, 'dim', duration) : '']
+    .filter(Boolean)
+    .join(' · ');
   const hasModel = Boolean(snapshot.provider || snapshot.modelId || thinking);
   const suffixWidth = thinking ? visibleWidth(`/${thinking}`) : 0;
   const fixedWidth = visibleWidth(prefix) + visibleWidth(tail) + (tail ? 3 : 0) + badgePadding;
   const nameBudget = width - fixedWidth - (hasModel ? 3 + suffixWidth : 0);
   if (nameBudget >= Math.min(visibleWidth(name), 4)) {
     // Keep statistics and /thinking intact; use only the remaining columns for the model.
-    const shownName = fitText(name, hasModel
-      ? Math.min(nameBudget, Math.max(8, Math.floor(width / 4)))
-      : nameBudget);
+    const shownName = fitText(
+      name,
+      hasModel ? Math.min(nameBudget, Math.max(8, Math.floor(width / 4))) : nameBudget,
+    );
     const modelBudget = width - fixedWidth - visibleWidth(shownName) - 3;
     const model = hasModel ? modelText(snapshot, modelBudget) : '';
-    return prefix + renderAgentBadge(shownName, theme, color)
-      + (model ? ` · ${paint(theme, 'dim', model)}` : '')
-      + (tail ? ` · ${tail}` : '');
+    return (
+      prefix +
+      renderAgentBadge(shownName, theme, color) +
+      (model ? ` · ${paint(theme, 'dim', model)}` : '') +
+      (tail ? ` · ${tail}` : '')
+    );
   }
 
   // Compact statistics still outrank the model at narrow widths.
   const compactStats = [tokenText(snapshot, theme, true), duration].filter(Boolean).join(' ');
   const compactTail = [thinking ? `/${thinking}` : '', compactStats].filter(Boolean).join(' ');
-  const compactNameBudget = width - visibleWidth(compactTail) - (compactTail ? 1 : 0) - badgePadding;
+  const compactNameBudget =
+    width - visibleWidth(compactTail) - (compactTail ? 1 : 0) - badgePadding;
   if (compactNameBudget >= Math.min(visibleWidth(name), 4)) {
     const shownName = fitText(name, compactNameBudget);
-    const modelBudget = width - visibleWidth(shownName) - badgePadding - visibleWidth(compactStats)
-      - (compactStats ? 1 : 0) - 1;
+    const modelBudget =
+      width -
+      visibleWidth(shownName) -
+      badgePadding -
+      visibleWidth(compactStats) -
+      (compactStats ? 1 : 0) -
+      1;
     const model = hasModel ? modelText(snapshot, modelBudget) : '';
-    return [renderAgentBadge(shownName, theme, color), model ? paint(theme, 'dim', model) : '', compactStats]
-      .filter(Boolean).join(' ');
+    return [
+      renderAgentBadge(shownName, theme, color),
+      model ? paint(theme, 'dim', model) : '',
+      compactStats,
+    ]
+      .filter(Boolean)
+      .join(' ');
   }
   const status = snapshot.status === 'starting' ? 'initializing' : 'running';
   return renderAgentBadge(name, theme, color) + ' ' + paint(theme, 'dim', status);
@@ -162,13 +197,14 @@ function heading(width: number, counts: AgentStatusCounts, theme?: Theme): strin
   const available = width - visibleWidth(suffix);
   if (available < visibleWidth('● Agents'))
     return paint(theme, baseColor, fitText('/subagents', width));
-  const parts = SUMMARY_STATUSES
-    .filter((status) => counts[status] > 0)
-    .map((status) => paint(theme, agentStatusColor(status), `${counts[status]} ${status}`));
-  const title = [paint(theme, baseColor, active ? '● Agents' : '○ Agents'), ...parts]
-    .join(paint(theme, baseColor, ' · '));
+  const parts = SUMMARY_STATUSES.filter((status) => counts[status] > 0).map((status) =>
+    paint(theme, agentStatusColor(status), `${counts[status]} ${status}`),
+  );
+  const title = [paint(theme, baseColor, active ? '● Agents' : '○ Agents'), ...parts].join(
+    paint(theme, baseColor, ' · '),
+  );
   // Preserve each status's ANSI color while still reserving the command hint.
-  return fit(title, available) + paint(theme, baseColor, suffix);
+  return truncateToWidth(title, available, '…') + paint(theme, baseColor, suffix);
 }
 
 /** Parent-editor widget. Snapshot sampling and its timer never run from render(). */
@@ -226,7 +262,10 @@ export class AgentSummaryWidget {
       }
       try {
         const snapshots = this.getSnapshots();
-        const counts = this.getStatusCounts?.() ?? { ...EMPTY_STATUS_COUNTS, running: snapshots.length };
+        const counts = this.getStatusCounts?.() ?? {
+          ...EMPTY_STATUS_COUNTS,
+          running: snapshots.length,
+        };
         this.snapshots = snapshots;
         this.statusCounts = { ...counts };
         this.sampleFailed = false;
@@ -256,40 +295,46 @@ export class AgentSummaryWidget {
   }
 
   private hasSummary(): boolean {
-    return this.snapshots.length > 0 || SUMMARY_STATUSES.some((status) => this.statusCounts[status] > 0);
+    return (
+      this.snapshots.length > 0 || SUMMARY_STATUSES.some((status) => this.statusCounts[status] > 0)
+    );
   }
 
   private registerWidget(): void {
     const registration = {};
     this.registration = registration;
     try {
-      this.ctx!.ui.setWidget(WIDGET_KEY, (tui, theme) => {
-        const mount: Mount = {
-          tui,
-          theme,
-          disposed: false,
-          component: {
-            render: (width) => this.render(mount, width),
-            invalidate() {}, // Rendering is stateless and always uses the current theme.
-            dispose: () => {
-              if (mount.disposed) return;
-              mount.disposed = true;
-              mount.tui = undefined;
-              mount.theme = undefined;
-              if (this.mount !== mount) return;
-              this.mount = undefined;
-              if (this.registration === registration) this.registration = undefined;
-              this.stopTimer();
+      this.ctx!.ui.setWidget(
+        WIDGET_KEY,
+        (tui, theme) => {
+          const mount: Mount = {
+            tui,
+            theme,
+            disposed: false,
+            component: {
+              render: (width) => this.render(mount, width),
+              invalidate() {}, // Rendering is stateless and always uses the current theme.
+              dispose: () => {
+                if (mount.disposed) return;
+                mount.disposed = true;
+                mount.tui = undefined;
+                mount.theme = undefined;
+                if (this.mount !== mount) return;
+                this.mount = undefined;
+                if (this.registration === registration) this.registration = undefined;
+                this.stopTimer();
+              },
             },
-          },
-        };
-        if (this.disposed || this.registration !== registration) mount.component.dispose();
-        else {
-          this.mount = mount;
-          this.syncSpinner(); // Factories may mount after the sampling timer has started.
-        }
-        return mount.component;
-      }, { placement: 'aboveEditor' });
+          };
+          if (this.disposed || this.registration !== registration) mount.component.dispose();
+          else {
+            this.mount = mount;
+            this.syncSpinner(); // Factories may mount after the sampling timer has started.
+          }
+          return mount.component;
+        },
+        { placement: 'aboveEditor' },
+      );
     } catch (error) {
       this.clearWidget();
       this.report(error);
@@ -299,17 +344,24 @@ export class AgentSummaryWidget {
   private render(mount: Mount, availableWidth: number): string[] {
     const width = Number.isFinite(availableWidth) ? Math.max(0, Math.floor(availableWidth)) : 0;
     try {
-      if (this.disposed || mount.disposed || this.ctx?.mode !== 'tui' || !this.hasSummary() || width === 0)
+      if (
+        this.disposed ||
+        mount.disposed ||
+        this.ctx?.mode !== 'tui' ||
+        !this.hasSummary() ||
+        width === 0
+      )
         return [];
       const theme = this.ctx?.ui.theme ?? mount.theme;
       const rows = mount.tui?.terminal?.rows;
       // Reserve parent editor/status space rather than consuming a short terminal.
-      const budget = typeof rows === 'number' && Number.isFinite(rows)
-        ? Math.max(1, Math.min(MAX_LINES, Math.floor(rows) - 10))
-        : MAX_LINES;
+      const budget =
+        typeof rows === 'number' && Number.isFinite(rows)
+          ? Math.max(1, Math.min(MAX_LINES, Math.floor(rows) - 10))
+          : MAX_LINES;
       const lines = [heading(width, this.statusCounts, theme)];
       if (budget === 1 || width === 1) {
-        const fitted = lines.map((line) => fit(line, width));
+        const fitted = lines.map((line) => truncateToWidth(line, width, '…'));
         this.renderFailed = false;
         return fitted;
       }
@@ -318,15 +370,17 @@ export class AgentSummaryWidget {
       const hidden = this.snapshots.length - count;
       for (let index = 0; index < count; index++) {
         const last = index === count - 1 && hidden === 0;
-        const prefix = paint(theme, 'dim', last ? '└─ ' : '├─ ')
-          + paint(theme, 'accent', this.spinner?.frame() ?? '') + ' ';
+        const prefix =
+          paint(theme, 'dim', last ? '└─ ' : '├─ ') +
+          paint(theme, 'accent', this.spinner?.frame() ?? '') +
+          ' ';
         const snapshot = this.snapshots[index];
         const color = resolveAgentColor(snapshot.color);
         lines.push(agentHeader(snapshot, width, prefix, theme, color));
         lines.push(paint(theme, 'dim', (last ? '   ' : '│  ') + '  ⎿  ' + activity(snapshot)));
       }
       if (hidden) lines.push(paint(theme, 'dim', `└─ +${hidden} more · /subagents`));
-      const fitted = lines.map((line) => fit(line, width));
+      const fitted = lines.map((line) => truncateToWidth(line, width, '…'));
       this.renderFailed = false;
       return fitted;
     } catch (error) {
@@ -335,12 +389,17 @@ export class AgentSummaryWidget {
         this.report(error);
       }
       // A bad getter/theme must not escape into the SDK render loop or poison future frames.
-      return [fit('/subagents', width)];
+      return [truncateToWidth('/subagents', width, '…')];
     }
   }
 
   private syncSpinner(): void {
-    if (!this.snapshots.length || !this.mount?.tui || this.timer === undefined || this.ctx?.mode !== 'tui') {
+    if (
+      !this.snapshots.length ||
+      !this.mount?.tui ||
+      this.timer === undefined ||
+      this.ctx?.mode !== 'tui'
+    ) {
       this.stopSpinner();
       return;
     }
@@ -350,11 +409,19 @@ export class AgentSummaryWidget {
       // An own property preserves Pi's TUI proxy. Ignore constructor/stale callbacks;
       // animation only requests a redraw and never samples SDK sessions.
       const ui: TUI = Object.create(this.mount.tui, {
-        requestRender: { value: () => {
-          if (spinner && this.spinner === spinner && this.ctx?.mode === 'tui') this.requestRender();
-        } },
+        requestRender: {
+          value: () => {
+            if (spinner && this.spinner === spinner && this.ctx?.mode === 'tui')
+              this.requestRender();
+          },
+        },
       });
-      spinner = new AgentSpinner(ui, (text) => text, (text) => text, '');
+      spinner = new AgentSpinner(
+        ui,
+        (text) => text,
+        (text) => text,
+        '',
+      );
       this.spinner = spinner;
     } catch (error) {
       this.report(error);

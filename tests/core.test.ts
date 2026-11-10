@@ -44,7 +44,6 @@ const {
 } = await import('../src/core.js');
 
 describe('observer stream reconstruction', () => {
-
   test('widget textPreview is bounded public text and never parses streaming tool arguments', () => {
     const broadcaster = new EventBroadcaster(randomUUID());
     const stream = broadcaster['assistantStream'];
@@ -70,7 +69,10 @@ describe('observer stream reconstruction', () => {
       });
       for (let index = 0; index < 5; index++) {
         expect(stream.textPreview).toBe(publicText.slice(0, 180));
-        expect(broadcaster.getWidgetActivity()).toEqual({ activeTools: [], responsePreview: stream.textPreview });
+        expect(broadcaster.getWidgetActivity()).toEqual({
+          activeTools: [],
+          responsePreview: stream.textPreview,
+        });
         expect(stream.textPreview).not.toMatch(/PRIVATE_|not the preview/);
       }
       expect(stream.snapshotToolArguments()).toEqual(raw);
@@ -95,7 +97,10 @@ describe('observer stream reconstruction', () => {
       emit(type, 'b', { parentToolCallId: 'a' });
     }
     const activity = broadcaster.getWidgetActivity();
-    expect(activity).toEqual({ activeTools: ['codemode', 'codemode', 'read'], responsePreview: undefined });
+    expect(activity).toEqual({
+      activeTools: ['codemode', 'codemode', 'read'],
+      responsePreview: undefined,
+    });
     (activity.activeTools as string[]).pop();
     expect(broadcaster.getWidgetActivity().activeTools).toEqual(['codemode', 'codemode', 'read']);
     emit('tool_execution_end', 'a', { result: { content: [] }, isError: true });
@@ -103,11 +108,17 @@ describe('observer stream reconstruction', () => {
     expect(broadcaster['activeTools']).toBe(active);
     expect(active.get('a')).toMatchObject({ result: { content: [] }, isError: true });
     expect(active.size).toBe(3); // Observer results survive until toolResult message_end.
-    broadcaster.broadcast({ type: 'message_end', message: { role: 'toolResult', toolCallId: 'a' } });
+    broadcaster.broadcast({
+      type: 'message_end',
+      message: { role: 'toolResult', toolCallId: 'a' },
+    });
     emit('tool_execution_end', 'b', { result: { content: [] } });
     expect(broadcaster.getWidgetActivity().activeTools).toEqual(['read']);
     broadcaster.broadcast({ type: 'agent_settled' });
-    expect(broadcaster.getWidgetActivity()).toEqual({ activeTools: [], responsePreview: undefined });
+    expect(broadcaster.getWidgetActivity()).toEqual({
+      activeTools: [],
+      responsePreview: undefined,
+    });
     expect(active.size).toBe(0);
   });
 
@@ -125,10 +136,19 @@ describe('observer stream reconstruction', () => {
     broadcaster.broadcast({ type: 'message_end', message: final });
     expect(broadcaster['assistantStream'].textPreview).toBeUndefined();
     expect(broadcaster.getWidgetActivity().responsePreview).toBe(preview);
-    broadcaster.broadcast({ type: 'message_end', message: { role: 'toolResult', toolCallId: 'call-0' } });
-    broadcaster.broadcast({ type: 'message_start', message: assistant([{ type: 'thinking', thinking: 'PRIVATE_THINKING' }]) });
+    broadcaster.broadcast({
+      type: 'message_end',
+      message: { role: 'toolResult', toolCallId: 'call-0' },
+    });
+    broadcaster.broadcast({
+      type: 'message_start',
+      message: assistant([{ type: 'thinking', thinking: 'PRIVATE_THINKING' }]),
+    });
     expect(broadcaster.getWidgetActivity().responsePreview).toBe(preview);
-    broadcaster.broadcast({ type: 'message_start', message: { role: 'user', content: 'next task' } });
+    broadcaster.broadcast({
+      type: 'message_start',
+      message: { role: 'user', content: 'next task' },
+    });
     expect(broadcaster.getWidgetActivity().responsePreview).toBeUndefined();
     broadcaster.broadcast({ type: 'message_end', message: final });
     expect(broadcaster.getWidgetActivity().responsePreview).toBe(preview);
@@ -424,8 +444,12 @@ describe('agent templates', () => {
     ['color:', undefined],
     ['', undefined],
   ])('parses optional badge configuration %s without changing the template', (field, color) => {
-    expect(parseAgentDefinitionText('---\nname: reviewer\n' + field + '\nmodel: fake\n---\nInstructions.', 'fallback'))
-      .toMatchObject({ name: 'reviewer', color, model: 'fake', prompt: 'Instructions.' });
+    expect(
+      parseAgentDefinitionText(
+        '---\nname: reviewer\n' + field + '\nmodel: fake\n---\nInstructions.',
+        'fallback',
+      ),
+    ).toMatchObject({ name: 'reviewer', color, model: 'fake', prompt: 'Instructions.' });
   });
 
   test('template listing initializes only the templates directory', () => {
@@ -611,10 +635,8 @@ Review the requested files.`,
       prompt: 'Body.',
     });
     expect(
-      parseAgentDefinitionText(
-        '---\ndescription: Rules: prefer # literal text\n---',
-        'fallback',
-      ).description,
+      parseAgentDefinitionText('---\ndescription: Rules: prefer # literal text\n---', 'fallback')
+        .description,
     ).toBe('Rules: prefer # literal text');
     for (const marker of ['>', '|']) {
       expect(
@@ -1226,74 +1248,120 @@ const activeMarker = (id: string) => path.join(markerDir, id + '.active.json');
 const peekMarker = (id: string) => path.join(markerDir, id + '.peek.json');
 
 describe('widget snapshots', () => {
-  test.each([4, 0])('captures template color for repeated instances, persistence and warm/cold continuation (idle cap %s)', async (cap) => {
-    writeConfig({ maxIdleSessions: cap });
-    const parent = 'configured-color-' + randomUUID();
-    const directory = path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents');
-    fs.mkdirSync(directory, { recursive: true });
-    const templates = [
-      ['badge-valid', 'color: " ReD "', '#DC2626'],
-      ['badge-absent', '', undefined],
-      ['badge-invalid', 'color: "not-a-color"', undefined],
-    ] as const;
-    for (const [name, field] of templates)
-      fs.writeFileSync(path.join(directory, name + '.md'), '---\nname: ' + name + '\n' + field + '\n---\nhold instructions.');
-    const manager = new AgentManager();
-    try {
-      const agents = [...templates, templates[0]].map(([type, , color], index) => ({ type, color, name: 'worker-' + index }));
-      for (const { type, color, name } of agents) {
-        expect(await manager.spawnAgent({ ...spawnParams(parent, name, 'hold first'), agent_type: type }))
-          .toEqual({ task_name: '/' + name, nickname: null });
-        const info = manager.getAgentInfo(name, parent);
-        expect(info.color).toBe(color);
-        expect(JSON.parse(fs.readFileSync(info.infoFile, 'utf8')).color).toBe(color);
-      }
-      expect(manager.listAgentInfos(undefined, parent).map((info) => info.color).sort())
-        .toEqual(agents.map((agent) => agent.color).sort());
-      const firstSession = manager['live'].get(manager.getAgentInfo('worker-0', parent).id)!.session;
-      const reads = spyOn(fs, 'readFileSync'), scans = spyOn(fs, 'readdirSync'), writes = spyOn(fs, 'writeFileSync');
+  test.each([4, 0])(
+    'captures template color for repeated instances, persistence and warm/cold continuation (idle cap %s)',
+    async (cap) => {
+      writeConfig({ maxIdleSessions: cap });
+      const parent = 'configured-color-' + randomUUID();
+      const directory = path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents');
+      fs.mkdirSync(directory, { recursive: true });
+      const templates = [
+        ['badge-valid', 'color: " ReD "', '#DC2626'],
+        ['badge-absent', '', undefined],
+        ['badge-invalid', 'color: "not-a-color"', undefined],
+      ] as const;
+      for (const [name, field] of templates)
+        fs.writeFileSync(
+          path.join(directory, name + '.md'),
+          '---\nname: ' + name + '\n' + field + '\n---\nhold instructions.',
+        );
+      const manager = new AgentManager();
       try {
-        for (let frame = 0; frame < 5; frame++) {
-          const snapshots = manager.getWidgetSnapshot(parent);
-          expect(snapshots.map((snapshot) => snapshot.color)).toEqual(agents.map((agent) => agent.color));
-          (snapshots[0] as any).color = '#FFFFFF';
+        const agents = [...templates, templates[0]].map(([type, , color], index) => ({
+          type,
+          color,
+          name: 'worker-' + index,
+        }));
+        for (const { type, color, name } of agents) {
+          expect(
+            await manager.spawnAgent({
+              ...spawnParams(parent, name, 'hold first'),
+              agent_type: type,
+            }),
+          ).toEqual({ task_name: '/' + name, nickname: null });
+          const info = manager.getAgentInfo(name, parent);
+          expect(info.color).toBe(color);
+          expect(JSON.parse(fs.readFileSync(info.infoFile, 'utf8')).color).toBe(color);
         }
-        expect(reads).not.toHaveBeenCalled();
-        expect(scans).not.toHaveBeenCalled();
-        expect(writes).not.toHaveBeenCalled();
-      } finally {
-        reads.mockRestore(); scans.mockRestore(); writes.mockRestore();
-      }
-      for (const { name } of agents) {
-        const info = manager.getAgentInfo(name, parent);
-        await manager.interruptAgent(parent, name);
-        await settled(manager, info);
-      }
-      // The effective presentation value belongs to the original instance, not today's template.
-      for (const [name] of templates)
-        fs.writeFileSync(path.join(directory, name + '.md'), '---\nname: ' + name + '\ncolor: blue\n---\nChanged instructions.');
-      const readsOnResume = spyOn(fs, 'readFileSync');
-      try {
-        for (const { name, color } of agents) {
-          expect(await manager.sendMessage(parent, name, 'hold continuation')).toEqual({ delivery: 'prompt' });
-          expect(manager.getAgentInfo(name, parent).color).toBe(color);
-          expect(manager.getWidgetSnapshot(parent).find((snapshot) => snapshot.canonicalName === '/' + name)?.color).toBe(color);
-          expect(manager.readAgentResponse(name, parent)).not.toHaveProperty('color');
+        expect(
+          manager
+            .listAgentInfos(undefined, parent)
+            .map((info) => info.color)
+            .sort(),
+        ).toEqual(agents.map((agent) => agent.color).sort());
+        const firstSession = manager['live'].get(
+          manager.getAgentInfo('worker-0', parent).id,
+        )!.session;
+        const reads = spyOn(fs, 'readFileSync'),
+          scans = spyOn(fs, 'readdirSync'),
+          writes = spyOn(fs, 'writeFileSync');
+        try {
+          for (let frame = 0; frame < 5; frame++) {
+            const snapshots = manager.getWidgetSnapshot(parent);
+            expect(snapshots.map((snapshot) => snapshot.color)).toEqual(
+              agents.map((agent) => agent.color),
+            );
+            (snapshots[0] as any).color = '#FFFFFF';
+          }
+          expect(reads).not.toHaveBeenCalled();
+          expect(scans).not.toHaveBeenCalled();
+          expect(writes).not.toHaveBeenCalled();
+        } finally {
+          reads.mockRestore();
+          scans.mockRestore();
+          writes.mockRestore();
         }
-        expect(readsOnResume.mock.calls.some(([file]) => String(file).startsWith(directory + path.sep))).toBe(false);
+        for (const { name } of agents) {
+          const info = manager.getAgentInfo(name, parent);
+          await manager.interruptAgent(parent, name);
+          await settled(manager, info);
+        }
+        // The effective presentation value belongs to the original instance, not today's template.
+        for (const [name] of templates)
+          fs.writeFileSync(
+            path.join(directory, name + '.md'),
+            '---\nname: ' + name + '\ncolor: blue\n---\nChanged instructions.',
+          );
+        const readsOnResume = spyOn(fs, 'readFileSync');
+        try {
+          for (const { name, color } of agents) {
+            expect(await manager.sendMessage(parent, name, 'hold continuation')).toEqual({
+              delivery: 'prompt',
+            });
+            expect(manager.getAgentInfo(name, parent).color).toBe(color);
+            expect(
+              manager
+                .getWidgetSnapshot(parent)
+                .find((snapshot) => snapshot.canonicalName === '/' + name)?.color,
+            ).toBe(color);
+            expect(manager.readAgentResponse(name, parent)).not.toHaveProperty('color');
+          }
+          expect(
+            readsOnResume.mock.calls.some(([file]) =>
+              String(file).startsWith(directory + path.sep),
+            ),
+          ).toBe(false);
+        } finally {
+          readsOnResume.mockRestore();
+        }
+        const resumedSession = manager['live'].get(
+          manager.getAgentInfo('worker-0', parent).id,
+        )!.session;
+        if (cap) expect(resumedSession).toBe(firstSession);
+        else expect(resumedSession).not.toBe(firstSession);
+        for (const entry of manager.listAgents(undefined, parent))
+          expect(Object.keys(entry).sort()).toEqual([
+            'agent_name',
+            'agent_status',
+            'last_task_message',
+          ]);
       } finally {
-        readsOnResume.mockRestore();
+        await manager.shutdown();
+        for (const [name] of templates)
+          fs.rmSync(path.join(directory, name + '.md'), { force: true });
       }
-      const resumedSession = manager['live'].get(manager.getAgentInfo('worker-0', parent).id)!.session;
-      if (cap) expect(resumedSession).toBe(firstSession);
-      else expect(resumedSession).not.toBe(firstSession);
-      for (const entry of manager.listAgents(undefined, parent))
-        expect(Object.keys(entry).sort()).toEqual(['agent_name', 'agent_status', 'last_task_message']);
-    } finally {
-      await manager.shutdown();
-      for (const [name] of templates) fs.rmSync(path.join(directory, name + '.md'), { force: true });
-    }
-  });
+    },
+  );
 
   test('old and malformed saved colors resume as plain even when the current template has a color', async () => {
     writeConfig({ maxIdleSessions: 0 });
@@ -1303,7 +1371,10 @@ describe('widget snapshots', () => {
     fs.writeFileSync(template, '---\nname: old-badge\ncolor: cyan\n---\n');
     const manager = new AgentManager();
     try {
-      await manager.spawnAgent({ ...spawnParams(parent, 'worker', 'first'), agent_type: 'old-badge' });
+      await manager.spawnAgent({
+        ...spawnParams(parent, 'worker', 'first'),
+        agent_type: 'old-badge',
+      });
       const first = manager.getAgentInfo('worker', parent);
       await settled(manager, first);
       for (const color of [undefined, null, {}, ['red'], 123, 'toString', '__proto__', '#GGGGGG']) {
@@ -1314,7 +1385,9 @@ describe('widget snapshots', () => {
         const original = fs.readFileSync(first.infoFile, 'utf8');
         expect(readInfoFile(first.infoFile)?.color).toBeUndefined();
         expect(fs.readFileSync(first.infoFile, 'utf8')).toBe(original); // Reading is not a migration.
-        expect(await manager.sendMessage(parent, 'worker', 'hold old continuation')).toEqual({ delivery: 'prompt' });
+        expect(await manager.sendMessage(parent, 'worker', 'hold old continuation')).toEqual({
+          delivery: 'prompt',
+        });
         expect(manager.getWidgetSnapshot(parent)[0].color).toBeUndefined();
         expect(manager.getAgentInfo('worker', parent).color).toBeUndefined();
         await manager.interruptAgent(parent, 'worker');
@@ -1328,7 +1401,8 @@ describe('widget snapshots', () => {
 
   test('lifecycle notifications expose exact statuses, including interrupted without a completion notification', async () => {
     const parent = 'widget-statuses-' + randomUUID();
-    const activity: Array<{ agentName: string; active: boolean; status?: AgentInfo['status'] }> = [];
+    const activity: Array<{ agentName: string; active: boolean; status?: AgentInfo['status'] }> =
+      [];
     const completions: string[] = [];
     const manager = new AgentManager({
       onActivityChange: (event) => activity.push(event),
@@ -1347,8 +1421,12 @@ describe('widget snapshots', () => {
       );
       for (const event of activity)
         expect(event.active).toBe(event.status === 'starting' || event.status === 'running');
-      expect(activity.filter((event) => !event.active).map((event) => [event.agentName, event.status])).toEqual([
-        ['/success', 'completed'], ['/failure', 'failed'], ['/cancelled', 'interrupted'],
+      expect(
+        activity.filter((event) => !event.active).map((event) => [event.agentName, event.status]),
+      ).toEqual([
+        ['/success', 'completed'],
+        ['/failure', 'failed'],
+        ['/cancelled', 'interrupted'],
       ]);
       expect(completions).toEqual(['/success', '/failure']);
       expect(manager.readAgentResponse('cancelled', parent).status).toBe('interrupted');
@@ -1369,37 +1447,82 @@ describe('widget snapshots', () => {
       const info = manager.getAgentInfo('worker', parent);
       const live = manager['live'].get(info.id)!;
       const other = manager['live'].get(manager.getAgentInfo('replacement', parent).id)!;
-      const source = live.session!, replacement = other.session!;
-      const store = source.sessionManager, otherStore = replacement.sessionManager;
+      const source = live.session!,
+        replacement = other.session!;
+      const store = source.sessionManager,
+        otherStore = replacement.sessionManager;
       const base = structuredClone(fixture.instances[0].requests[0].message);
-      const usage = { ...base.usage, input: 10, output: 2, cacheWrite: 3, cacheRead: 10000, totalTokens: 99999 };
+      const usage = {
+        ...base.usage,
+        input: 10,
+        output: 2,
+        cacheWrite: 3,
+        cacheRead: 10000,
+        totalTokens: 99999,
+      };
       const first = store.appendMessage({ ...base, stopReason: 'stop', usage });
       store.appendContextEdit(first, null); // Raw historical usage still counts after projection omits it.
-      store.appendMessage({ ...base, stopReason: 'error', usage: { ...usage, input: 7, output: 4, cacheWrite: 5 } });
-      store.appendMessage({ ...base, stopReason: 'aborted', usage: { ...usage, input: 11, output: 6, cacheWrite: 8 } });
-      store.appendMessage({ role: 'user', content: 'not assistant usage', timestamp: Date.now(), usage } as any);
-      store.appendMessage({ role: 'toolResult', toolCallId: 'nested', toolName: 'read', content: [], isError: false, timestamp: Date.now(), usage });
+      store.appendMessage({
+        ...base,
+        stopReason: 'error',
+        usage: { ...usage, input: 7, output: 4, cacheWrite: 5 },
+      });
+      store.appendMessage({
+        ...base,
+        stopReason: 'aborted',
+        usage: { ...usage, input: 11, output: 6, cacheWrite: 8 },
+      });
+      store.appendMessage({
+        role: 'user',
+        content: 'not assistant usage',
+        timestamp: Date.now(),
+        usage,
+      } as any);
+      store.appendMessage({
+        role: 'toolResult',
+        toolCallId: 'nested',
+        toolName: 'read',
+        content: [],
+        isError: false,
+        timestamp: Date.now(),
+        usage,
+      });
       store.appendUsage('cache_warm', 'test', 'fake', usage);
       store.appendCompaction('summary with separate usage', null, 100000, undefined, false, usage);
       store.appendCompaction('another compaction', null, 100000);
-      otherStore.appendMessage({ ...base, usage: { ...usage, input: 9, output: 0, cacheWrite: 0 } });
-      while (otherStore.getEntryCount() < store.getEntryCount()) otherStore.appendCustomEntry('padding');
+      otherStore.appendMessage({
+        ...base,
+        usage: { ...usage, input: 9, output: 0, cacheWrite: 0 },
+      });
+      while (otherStore.getEntryCount() < store.getEntryCount())
+        otherStore.appendCustomEntry('padding');
       expect(otherStore.getEntryCount()).toBe(store.getEntryCount());
       live.info.contextUsage = { tokens: 22, contextWindow: 500000, percent: 0.0044 };
-      const before = structuredClone(live.info), otherBefore = structuredClone(other.info);
+      const before = structuredClone(live.info),
+        otherBefore = structuredClone(other.info);
       const mailbox = structuredClone(manager['mailbox']);
       expect(mailbox).toHaveLength(1);
       const savedInfo = fs.readFileSync(info.infoFile, 'utf8');
       const savedSession = fs.readFileSync(info.sessionFile, 'utf8');
-      const scan = spyOn(store, 'getEntries'), otherScan = spyOn(otherStore, 'getEntries');
+      const scan = spyOn(store, 'getEntries'),
+        otherScan = spyOn(otherStore, 'getEntries');
       const sample = spyOn(source, 'getContextUsage');
       const io = [
-        spyOn(fs, 'readFileSync'), spyOn(fs, 'writeFileSync'), spyOn(fs, 'appendFileSync'),
-        spyOn(fs, 'renameSync'), spyOn(fs, 'readdirSync'), spyOn(fs, 'statSync'), spyOn(fs, 'existsSync'),
+        spyOn(fs, 'readFileSync'),
+        spyOn(fs, 'writeFileSync'),
+        spyOn(fs, 'appendFileSync'),
+        spyOn(fs, 'renameSync'),
+        spyOn(fs, 'readdirSync'),
+        spyOn(fs, 'statSync'),
+        spyOn(fs, 'existsSync'),
       ];
       try {
         const snapshot = manager.getWidgetSnapshot(parent)[0];
-        expect(snapshot).toMatchObject({ tokens: 56, compactionCount: 2, contextUsage: before.contextUsage });
+        expect(snapshot).toMatchObject({
+          tokens: 56,
+          compactionCount: 2,
+          contextUsage: before.contextUsage,
+        });
         expect(snapshot.contextUsage).not.toBe(live.info.contextUsage);
         snapshot.contextUsage!.tokens = 999;
         for (let index = 0; index < 5; index++)
@@ -1439,60 +1562,78 @@ describe('widget snapshots', () => {
     }
   });
 
-  test.each([4, 0])('restores historical tokens/compactions on real resume, resetting only the display clock (idle cap %s)', async (cap) => {
-    writeConfig({ maxIdleSessions: cap });
-    const gate = deferred(), next = deferred();
-    fixture.responseGate = gate.promise;
-    fixture.tokens = (text) => text === 'first' ? 50 : 70;
-    const parent = 'widget-resume-' + randomUUID();
-    const manager = new AgentManager();
-    try {
-      await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
-      const info = manager.getAgentInfo('worker', parent);
-      const firstLive = manager['live'].get(info.id)!;
-      const firstSession = firstLive.session!;
-      const firstClock = firstLive.run!.displayStartedAt;
-      const startedAt = info.startedAt;
-      await settled(manager, info);
-      const history = cap ? firstSession.sessionManager : codingAgent.SessionManager.open(
-        info.sessionFile, path.dirname(info.sessionFile), info.cwd,
-      );
-      history.appendCompaction('historical widget compaction', null, 50);
-      await manager.sendMessage(parent, 'worker', 'hold second');
-      await waitUntil(() => fixture.instances.at(-1)!.activeStreams === 1);
-      const live = manager['live'].get(info.id)!;
-      if (cap) expect(live.session).toBe(firstSession);
-      else expect(live.session).not.toBe(firstSession);
-      const run = live.run!, resumedAt = run.displayStartedAt;
-      expect(resumedAt).toBeGreaterThan(firstClock);
-      const clock = spyOn(Date, 'now').mockReturnValue(run.displayStartedAt + 1234);
+  test.each([4, 0])(
+    'restores historical tokens/compactions on real resume, resetting only the display clock (idle cap %s)',
+    async (cap) => {
+      writeConfig({ maxIdleSessions: cap });
+      const gate = deferred(),
+        next = deferred();
+      fixture.responseGate = gate.promise;
+      fixture.tokens = (text) => (text === 'first' ? 50 : 70);
+      const parent = 'widget-resume-' + randomUUID();
+      const manager = new AgentManager();
       try {
-        expect(manager.getWidgetSnapshot(parent)[0]).toMatchObject({ tokens: 50, compactionCount: 1, elapsedMs: 1234 });
-        expect(manager.getWidgetSnapshot(parent)[0].elapsedMs).toBe(1234);
+        await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
+        const info = manager.getAgentInfo('worker', parent);
+        const firstLive = manager['live'].get(info.id)!;
+        const firstSession = firstLive.session!;
+        const firstClock = firstLive.run!.displayStartedAt;
+        const startedAt = info.startedAt;
+        await settled(manager, info);
+        const history = cap
+          ? firstSession.sessionManager
+          : codingAgent.SessionManager.open(
+              info.sessionFile,
+              path.dirname(info.sessionFile),
+              info.cwd,
+            );
+        history.appendCompaction('historical widget compaction', null, 50);
+        await manager.sendMessage(parent, 'worker', 'hold second');
+        await waitUntil(() => fixture.instances.at(-1)!.activeStreams === 1);
+        const live = manager['live'].get(info.id)!;
+        if (cap) expect(live.session).toBe(firstSession);
+        else expect(live.session).not.toBe(firstSession);
+        const run = live.run!,
+          resumedAt = run.displayStartedAt;
+        expect(resumedAt).toBeGreaterThan(firstClock);
+        const clock = spyOn(Date, 'now').mockReturnValue(run.displayStartedAt + 1234);
+        try {
+          expect(manager.getWidgetSnapshot(parent)[0]).toMatchObject({
+            tokens: 50,
+            compactionCount: 1,
+            elapsedMs: 1234,
+          });
+          expect(manager.getWidgetSnapshot(parent)[0].elapsedMs).toBe(1234);
+        } finally {
+          clock.mockRestore();
+        }
+        expect(await manager.sendMessage(parent, 'worker', 'hold steered')).toEqual({
+          delivery: 'steer',
+        });
+        manager.getWidgetSnapshot(parent);
+        expect(live.run).toBe(run);
+        expect(live.run!.displayStartedAt).toBe(resumedAt);
+        expect(live.info.startedAt).toBe(startedAt);
+        expect(readInfoFile(info.infoFile)?.startedAt).toBe(startedAt);
+        gate.resolve();
+        await settled(manager, info);
+        expect(manager.getWidgetSnapshot(parent)).toEqual([]);
+        fixture.responseGate = next.promise;
+        await manager.sendMessage(parent, 'worker', 'hold third');
+        expect(manager.getWidgetSnapshot(parent)[0]).toMatchObject({
+          tokens: 190,
+          compactionCount: 1,
+        });
+        expect(manager.getAgentInfo('worker', parent).startedAt).toBe(startedAt);
+        expect(readInfoFile(info.infoFile)?.startedAt).toBe(startedAt);
+        expect(fixture.instances).toHaveLength(cap ? 1 : 3);
       } finally {
-        clock.mockRestore();
+        gate.resolve();
+        next.resolve();
+        await manager.shutdown();
       }
-      expect(await manager.sendMessage(parent, 'worker', 'hold steered')).toEqual({ delivery: 'steer' });
-      manager.getWidgetSnapshot(parent);
-      expect(live.run).toBe(run);
-      expect(live.run!.displayStartedAt).toBe(resumedAt);
-      expect(live.info.startedAt).toBe(startedAt);
-      expect(readInfoFile(info.infoFile)?.startedAt).toBe(startedAt);
-      gate.resolve();
-      await settled(manager, info);
-      expect(manager.getWidgetSnapshot(parent)).toEqual([]);
-      fixture.responseGate = next.promise;
-      await manager.sendMessage(parent, 'worker', 'hold third');
-      expect(manager.getWidgetSnapshot(parent)[0]).toMatchObject({ tokens: 190, compactionCount: 1 });
-      expect(manager.getAgentInfo('worker', parent).startedAt).toBe(startedAt);
-      expect(readInfoFile(info.infoFile)?.startedAt).toBe(startedAt);
-      expect(fixture.instances).toHaveLength(cap ? 1 : 3);
-    } finally {
-      gate.resolve();
-      next.resolve();
-      await manager.shutdown();
-    }
-  });
+    },
+  );
 
   test('does not reset elapsed time for steer, native retry, or repeated reads', async () => {
     const gate = deferred();
@@ -1511,16 +1652,24 @@ describe('widget snapshots', () => {
       await waitUntil(() => fixture.instances[0].activeStreams === 1);
       const info = manager.getAgentInfo('worker', parent);
       const live = manager['live'].get(info.id)!;
-      const run = live.run!, started = run.displayStartedAt;
-      live.session!.settingsManager.applyOverrides({ retry: { enabled: true, maxRetries: 1, baseDelayMs: 300, maxAgentDelayMs: 300 } });
+      const run = live.run!,
+        started = run.displayStartedAt;
+      live.session!.settingsManager.applyOverrides({
+        retry: { enabled: true, maxRetries: 1, baseDelayMs: 300, maxAgentDelayMs: 300 },
+      });
       const before = manager.getWidgetSnapshot(parent)[0].elapsedMs!;
-      expect(await manager.sendMessage(parent, 'worker', 'fail retry')).toEqual({ delivery: 'steer' });
+      expect(await manager.sendMessage(parent, 'worker', 'fail retry')).toEqual({
+        delivery: 'steer',
+      });
       expect(manager.getWidgetSnapshot(parent)[0].elapsedMs).toBeGreaterThanOrEqual(before);
       expect(live.run!.displayStartedAt).toBe(started);
       gate.resolve();
       await waitUntil(() => live.session!.isRetrying);
       for (let index = 0; index < 3; index++)
-        expect(manager.getWidgetSnapshot(parent)[0]).toMatchObject({ tokens: 40, compactionCount: 0 });
+        expect(manager.getWidgetSnapshot(parent)[0]).toMatchObject({
+          tokens: 40,
+          compactionCount: 0,
+        });
       expect(live.run).toBe(run);
       expect(live.run!.displayStartedAt).toBe(started);
       await settled(manager, info);
@@ -1533,7 +1682,8 @@ describe('widget snapshots', () => {
   });
 
   test('isolates parent scopes, includes starting/running memory only, and omits every final status', async () => {
-    const parent = 'widget-scope-' + randomUUID(), foreign = 'widget-foreign-' + randomUUID();
+    const parent = 'widget-scope-' + randomUUID(),
+      foreign = 'widget-foreign-' + randomUUID();
     const startup = deferred();
     const manager = new AgentManager();
     let starting: Promise<unknown> | undefined;
@@ -1541,7 +1691,9 @@ describe('widget snapshots', () => {
       await manager.spawnAgent(spawnParams(parent, 'worker', 'hold local'));
       await manager.spawnAgent(spawnParams(foreign, 'worker', 'hold foreign'));
       for (const [task, command, status] of [
-        ['done', 'done', 'completed'], ['failed', 'fail now', 'failed'], ['stopped', 'hold interrupted', 'interrupted'],
+        ['done', 'done', 'completed'],
+        ['failed', 'fail now', 'failed'],
+        ['stopped', 'hold interrupted', 'interrupted'],
       ]) {
         await manager.spawnAgent(spawnParams(parent, task, command));
         const info = manager.getAgentInfo(task, parent);
@@ -1554,11 +1706,20 @@ describe('widget snapshots', () => {
       fixture.startupGate = startup.promise;
       const instances = fixture.instances.length;
       starting = manager.spawnAgent(spawnParams(parent, 'starting', 'hold startup'));
-      await waitUntil(() => fixture.instances[instances]?.events.includes('session_start') ?? false);
-      expect(manager.getWidgetSnapshot(parent).map(({ canonicalName, status }) => [canonicalName, status])).toEqual([
-        ['/worker', 'running'], ['/starting', 'starting'],
+      await waitUntil(
+        () => fixture.instances[instances]?.events.includes('session_start') ?? false,
+      );
+      expect(
+        manager
+          .getWidgetSnapshot(parent)
+          .map(({ canonicalName, status }) => [canonicalName, status]),
+      ).toEqual([
+        ['/worker', 'running'],
+        ['/starting', 'starting'],
       ]);
-      expect(manager.getWidgetSnapshot(foreign).map(({ canonicalName }) => canonicalName)).toEqual(['/worker']);
+      expect(manager.getWidgetSnapshot(foreign).map(({ canonicalName }) => canonicalName)).toEqual([
+        '/worker',
+      ]);
       expect(manager.getWidgetSnapshot('unrelated-parent')).toEqual([]);
       startup.resolve();
       await starting;
@@ -1575,21 +1736,32 @@ describe('widget snapshots', () => {
     const parent = 'widget-native-model-' + randomUUID();
     const manager = new AgentManager();
     try {
-      await manager.spawnAgent({ ...spawnParams(parent, 'worker', 'hold model'), thinking: 'xhigh' });
+      await manager.spawnAgent({
+        ...spawnParams(parent, 'worker', 'hold model'),
+        thinking: 'xhigh',
+      });
       const info = manager.getAgentInfo('worker', parent);
       const live = manager['live'].get(info.id)!;
       const session = live.session!;
-      await session.setModel(fixture.instances[0].ctx!.modelRegistry.find('template-provider', 'template-model')!);
+      await session.setModel(
+        fixture.instances[0].ctx!.modelRegistry.find('template-provider', 'template-model')!,
+      );
       session.setThinkingLevel('xhigh');
       expect(session.thinkingLevel).toBe('high');
       expect(manager.getWidgetSnapshot(parent)[0]).toMatchObject({
-        provider: 'template-provider', modelId: 'template-model', thinking: 'high',
+        provider: 'template-provider',
+        modelId: 'template-model',
+        thinking: 'high',
       });
       expect(live.info).toMatchObject({ provider: 'test', modelId: 'fake', thinking: 'xhigh' });
       live.session = undefined;
       try {
         expect(manager.getWidgetSnapshot(parent)[0]).toMatchObject({
-          provider: 'test', modelId: 'fake', thinking: 'xhigh', tokens: undefined, compactionCount: undefined,
+          provider: 'test',
+          modelId: 'fake',
+          thinking: 'xhigh',
+          tokens: undefined,
+          compactionCount: undefined,
         });
       } finally {
         live.session = session;
@@ -1599,68 +1771,91 @@ describe('widget snapshots', () => {
     }
   });
 
-  test.each(['completed', 'failed'] as const)('display getter failures cannot change %s results, completion delivery, waits or cleanup', async (status) => {
-    writeConfig({ maxIdleSessions: 0 });
-    const gate = deferred();
-    fixture.responseGate = gate.promise;
-    const parent = 'widget-fault-' + randomUUID();
-    const notices: any[] = [], errors: Error[] = [];
-    const manager = new AgentManager({ onCompletion: (event) => notices.push(event), onError: (error) => errors.push(error) });
-    const spies: Array<ReturnType<typeof spyOn>> = [];
-    fixture.onLoad = (pi) => {
-      pi.on('message_end', (event) => {
-        if (event.message.role === 'assistant' && status === 'failed') {
-          event.message.stopReason = 'error';
-          event.message.errorMessage = 'original model failure';
-        }
+  test.each(['completed', 'failed'] as const)(
+    'display getter failures cannot change %s results, completion delivery, waits or cleanup',
+    async (status) => {
+      writeConfig({ maxIdleSessions: 0 });
+      const gate = deferred();
+      fixture.responseGate = gate.promise;
+      const parent = 'widget-fault-' + randomUUID();
+      const notices: any[] = [],
+        errors: Error[] = [];
+      const manager = new AgentManager({
+        onCompletion: (event) => notices.push(event),
+        onError: (error) => errors.push(error),
       });
-    };
-    try {
-      await manager.spawnAgent(spawnParams(parent, 'worker', 'hold outcome'));
-      const info = manager.getAgentInfo('worker', parent);
-      const live = manager['live'].get(info.id)!;
-      const session = live.session!, store = session.sessionManager;
-      const fail = () => { throw new Error('display getter failure'); };
-      spies.push(spyOn(live.broadcaster, 'getWidgetActivity').mockImplementation(fail));
-      spies.push(spyOn(store, 'getEntries').mockImplementationOnce(fail));
-      expect(manager.getWidgetSnapshot(parent)[0]).toMatchObject({ tokens: undefined, compactionCount: undefined, activeTools: [] });
-      const count = spyOn(store, 'getEntryCount').mockImplementationOnce(fail);
-      spies.push(count);
-      expect(manager.getWidgetSnapshot(parent)[0].tokens).toBeUndefined();
-      Object.defineProperty(session, 'model', { configurable: true, get: fail });
+      const spies: Array<ReturnType<typeof spyOn>> = [];
+      fixture.onLoad = (pi) => {
+        pi.on('message_end', (event) => {
+          if (event.message.role === 'assistant' && status === 'failed') {
+            event.message.stopReason = 'error';
+            event.message.errorMessage = 'original model failure';
+          }
+        });
+      };
       try {
-        expect(manager.getWidgetSnapshot(parent)[0]).toMatchObject({ provider: 'test', modelId: 'fake', tokens: 0 });
-      } finally {
-        delete (session as any).model;
-      }
-      const unsubscribe = session.subscribe((event) => {
-        if (event.type === 'message_end' && event.message.role === 'assistant') {
-          count.mockImplementationOnce(fail);
-          expect(manager.getWidgetSnapshot(parent)[0].tokens).toBeUndefined();
+        await manager.spawnAgent(spawnParams(parent, 'worker', 'hold outcome'));
+        const info = manager.getAgentInfo('worker', parent);
+        const live = manager['live'].get(info.id)!;
+        const session = live.session!,
+          store = session.sessionManager;
+        const fail = () => {
+          throw new Error('display getter failure');
+        };
+        spies.push(spyOn(live.broadcaster, 'getWidgetActivity').mockImplementation(fail));
+        spies.push(spyOn(store, 'getEntries').mockImplementationOnce(fail));
+        expect(manager.getWidgetSnapshot(parent)[0]).toMatchObject({
+          tokens: undefined,
+          compactionCount: undefined,
+          activeTools: [],
+        });
+        const count = spyOn(store, 'getEntryCount').mockImplementationOnce(fail);
+        spies.push(count);
+        expect(manager.getWidgetSnapshot(parent)[0].tokens).toBeUndefined();
+        Object.defineProperty(session, 'model', { configurable: true, get: fail });
+        try {
+          expect(manager.getWidgetSnapshot(parent)[0]).toMatchObject({
+            provider: 'test',
+            modelId: 'fake',
+            tokens: 0,
+          });
+        } finally {
+          delete (session as any).model;
         }
-      });
-      const waiting = manager.waitAgent(parent, ['worker']);
-      gate.resolve();
-      const { event } = await waiting;
-      await settled(manager, info);
-      unsubscribe();
-      expect(event).toMatchObject({ status, ...(status === 'completed' ? { finalResponse: 'response:hold outcome' } : { error: 'original model failure' }) });
-      expect(notices).toHaveLength(1);
-      expect(notices[0].id).toBe(event.id);
-      expect(errors).toEqual([]);
-      expect(manager.getAgentInfo('worker', parent).status).toBe(status);
-      expect(manager['mailbox']).toEqual([]);
-      expect(manager['waiters']).toEqual([]);
-      expect(manager['live'].has(info.id)).toBe(false);
-      expect(fixture.instances[0].shutdowns).toBe(1);
-      expect(fs.existsSync(activeMarker(info.id))).toBe(false);
-      expect(manager.getWidgetSnapshot(parent)).toEqual([]);
-    } finally {
-      gate.resolve();
-      for (const spy of spies) spy.mockRestore();
-      await manager.shutdown();
-    }
-  });
+        const unsubscribe = session.subscribe((event) => {
+          if (event.type === 'message_end' && event.message.role === 'assistant') {
+            count.mockImplementationOnce(fail);
+            expect(manager.getWidgetSnapshot(parent)[0].tokens).toBeUndefined();
+          }
+        });
+        const waiting = manager.waitAgent(parent, ['worker']);
+        gate.resolve();
+        const { event } = await waiting;
+        await settled(manager, info);
+        unsubscribe();
+        expect(event).toMatchObject({
+          status,
+          ...(status === 'completed'
+            ? { finalResponse: 'response:hold outcome' }
+            : { error: 'original model failure' }),
+        });
+        expect(notices).toHaveLength(1);
+        expect(notices[0].id).toBe(event.id);
+        expect(errors).toEqual([]);
+        expect(manager.getAgentInfo('worker', parent).status).toBe(status);
+        expect(manager['mailbox']).toEqual([]);
+        expect(manager['waiters']).toEqual([]);
+        expect(manager['live'].has(info.id)).toBe(false);
+        expect(fixture.instances[0].shutdowns).toBe(1);
+        expect(fs.existsSync(activeMarker(info.id))).toBe(false);
+        expect(manager.getWidgetSnapshot(parent)).toEqual([]);
+      } finally {
+        gate.resolve();
+        for (const spy of spies) spy.mockRestore();
+        await manager.shutdown();
+      }
+    },
+  );
 });
 
 describe('spawn model and thinking resolution', () => {
@@ -1925,14 +2120,23 @@ describe('native hot session lifecycle', () => {
     test.each(['send', 'interrupt', 'shutdown'] as const)(
       'native settled barrier protects ' + kind + ' work during %s',
       async (action) => {
-        const entered = deferred(), gate = deferred();
-        const notices: any[] = [], errors: Error[] = [];
-        const manager = new AgentManager({ onCompletion: (e) => notices.push(e), onError: (e) => errors.push(e) });
+        const entered = deferred(),
+          gate = deferred();
+        const notices: any[] = [],
+          errors: Error[] = [];
+        const manager = new AgentManager({
+          onCompletion: (e) => notices.push(e),
+          onError: (e) => errors.push(e),
+        });
         const parent = 'settled-barrier-' + randomUUID();
         let api: Parameters<NonNullable<CoreFixtureState['onStart']>>[0];
-        let hookExited = false, hooks = 0, operationFinished = false;
+        let hookExited = false,
+          hooks = 0,
+          operationFinished = false;
         let operation: Promise<unknown> | undefined;
-        fixture.onStart = (pi) => { api = pi; };
+        fixture.onStart = (pi) => {
+          api = pi;
+        };
         fixture.input = async (event) => {
           if (event.text !== 'delegate native work') return;
           api.sendUserMessage('inner native work');
@@ -1946,8 +2150,13 @@ describe('native hot session lifecycle', () => {
           hookExited = true;
         };
         try {
-          await manager.spawnAgent(spawnParams(parent, 'worker',
-            kind === 'handled' ? 'delegate native work' : 'ordinary native work'));
+          await manager.spawnAgent(
+            spawnParams(
+              parent,
+              'worker',
+              kind === 'handled' ? 'delegate native work' : 'ordinary native work',
+            ),
+          );
           const info = manager.getAgentInfo('worker', parent);
           const live = manager['live'].get(info.id)!;
           const session = live.session!;
@@ -1965,10 +2174,16 @@ describe('native hot session lifecycle', () => {
           expect(live.nativeWork).toBeDefined();
           expect(notices).toHaveLength(0);
           if (action === 'send') {
-            await expect(manager.sendMessage(parent, 'worker', 'must not defer')).rejects.toThrow(/finishing/);
+            await expect(manager.sendMessage(parent, 'worker', 'must not defer')).rejects.toThrow(
+              /finishing/,
+            );
           } else {
-            operation = (action === 'interrupt' ? manager.interruptAgent(parent, 'worker') : manager.shutdown())
-              .then((value) => { operationFinished = true; return value; });
+            operation = (
+              action === 'interrupt' ? manager.interruptAgent(parent, 'worker') : manager.shutdown()
+            ).then((value) => {
+              operationFinished = true;
+              return value;
+            });
             await new Promise((resolve) => setTimeout(resolve, 40));
             expect(operationFinished).toBe(false);
           }
@@ -1986,21 +2201,26 @@ describe('native hot session lifecycle', () => {
             expect(notices).toHaveLength(0);
           } else {
             await settled(manager, info);
-            expect(manager.readAgentResponse('worker', parent).status)
-              .toBe(action === 'interrupt' ? 'interrupted' : 'completed');
+            expect(manager.readAgentResponse('worker', parent).status).toBe(
+              action === 'interrupt' ? 'interrupted' : 'completed',
+            );
             await manager.sendMessage(parent, 'worker', 'clean continuation');
             await settled(manager, info);
             expect(manager['live'].get(info.id)!.session).toBe(session);
             expect(fixture.instances).toHaveLength(1);
-            expect(manager.readAgentResponse('worker', parent).finalResponse).toBe('response:clean continuation');
+            expect(manager.readAgentResponse('worker', parent).finalResponse).toBe(
+              'response:clean continuation',
+            );
             expect(notices).toHaveLength(action === 'interrupt' ? 1 : 2);
             expect(fixture.instances[0].requests.map((r) => r.text)).toEqual([
-              kind === 'handled' ? 'inner native work' : 'ordinary native work', 'clean continuation',
+              kind === 'handled' ? 'inner native work' : 'ordinary native work',
+              'clean continuation',
             ]);
           }
           expect(hookExited).toBe(true);
-          expect(broadcast.mock.calls.filter(([event]) => event.type === 'agent_settled'))
-            .toHaveLength(action === 'shutdown' ? 1 : 2);
+          expect(
+            broadcast.mock.calls.filter(([event]) => event.type === 'agent_settled'),
+          ).toHaveLength(action === 'shutdown' ? 1 : 2);
           expect(errors).toEqual([]);
         } finally {
           gate.resolve();
@@ -2012,12 +2232,20 @@ describe('native hot session lifecycle', () => {
   }
 
   test('native settled barrier retains a run while late steer preflight exits and clears its old queue', async () => {
-    const response = deferred(), entered = deferred(), gate = deferred(), input = deferred();
+    const response = deferred(),
+      entered = deferred(),
+      gate = deferred(),
+      input = deferred();
     fixture.responseGate = response.promise;
-    fixture.input = async (event) => { if (event.text === 'late steer') await input.promise; };
+    fixture.input = async (event) => {
+      if (event.text === 'late steer') await input.promise;
+    };
     let hooks = 0;
     fixture.onSettled = async () => {
-      if (++hooks === 1) { entered.resolve(); await gate.promise; }
+      if (++hooks === 1) {
+        entered.resolve();
+        await gate.promise;
+      }
     };
     const manager = new AgentManager();
     const parent = 'settled-late-steer-' + randomUUID();
@@ -2044,51 +2272,77 @@ describe('native hot session lifecycle', () => {
       await manager.sendMessage(parent, 'worker', 'next run');
       await settled(manager, info);
       expect(fixture.instances).toHaveLength(1);
-      expect(fixture.instances[0].requests.map((r) => r.text)).toEqual(['hold original', 'next run']);
-      expect(sessionMessages(info).some((m) => JSON.stringify(m).includes('late steer'))).toBe(false);
+      expect(fixture.instances[0].requests.map((r) => r.text)).toEqual([
+        'hold original',
+        'next run',
+      ]);
+      expect(sessionMessages(info).some((m) => JSON.stringify(m).includes('late steer'))).toBe(
+        false,
+      );
     } finally {
-      response.resolve(); input.resolve(); gate.resolve();
+      response.resolve();
+      input.resolve();
+      gate.resolve();
       await steering;
       await manager.shutdown();
     }
   });
 
-  for (const [provider, modelId] of [['test', 'template-model'], ['template-provider', 'fake']]) {
-    test.each([4, 0])('native selection drift restores saved exact route ' + provider + '/' + modelId + ' (cap %s)', async (cap) => {
-      writeConfig({ maxIdleSessions: cap });
-      let switched = false;
-      fixture = configureCoreFixture({
-        routes: [['test', 'fake'], ['test', 'template-model'], ['template-provider', 'fake']],
-        async onSettled(_aborted, pi) {
-          if (switched) return;
-          switched = true;
-          const model = fixture.instances[0].ctx!.modelRegistry.find(provider, modelId)!;
-          if (!await pi.setModel(model)) throw new Error('offline model switch rejected');
-        },
-      });
-      const manager = new AgentManager();
-      const parent = 'native-selection-drift-' + randomUUID();
-      try {
-        await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
-        const info = manager.getAgentInfo('worker', parent);
-        await settled(manager, info);
-        const first = manager['live'].get(info.id)?.session;
-        if (cap) expect(first!.model).toMatchObject({ provider, id: modelId });
-        await manager.sendMessage(parent, 'worker', 'second');
-        await settled(manager, info);
-        expect(fixture.instances).toHaveLength(2);
-        expect(fixture.instances[0].shutdowns).toBe(1);
-        expect(fixture.instances.flatMap((i) => i.requests.map((r) => [r.message.provider, r.message.model])))
-          .toEqual([['test', 'fake'], ['test', 'fake']]);
-        expect(manager.getAgentInfo('worker', parent)).toMatchObject({
-          provider: 'test', modelId: 'fake', sessionFile: info.sessionFile, messageCount: 2,
+  for (const [provider, modelId] of [
+    ['test', 'template-model'],
+    ['template-provider', 'fake'],
+  ]) {
+    test.each([4, 0])(
+      'native selection drift restores saved exact route ' + provider + '/' + modelId + ' (cap %s)',
+      async (cap) => {
+        writeConfig({ maxIdleSessions: cap });
+        let switched = false;
+        fixture = configureCoreFixture({
+          routes: [
+            ['test', 'fake'],
+            ['test', 'template-model'],
+            ['template-provider', 'fake'],
+          ],
+          async onSettled(_aborted, pi) {
+            if (switched) return;
+            switched = true;
+            const model = fixture.instances[0].ctx!.modelRegistry.find(provider, modelId)!;
+            if (!(await pi.setModel(model))) throw new Error('offline model switch rejected');
+          },
         });
-        if (cap) expect(manager['live'].get(info.id)!.session).not.toBe(first);
-        expect(sessionMessages(info).filter((m) => m.role === 'user')).toHaveLength(2);
-      } finally {
-        await manager.shutdown();
-      }
-    });
+        const manager = new AgentManager();
+        const parent = 'native-selection-drift-' + randomUUID();
+        try {
+          await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
+          const info = manager.getAgentInfo('worker', parent);
+          await settled(manager, info);
+          const first = manager['live'].get(info.id)?.session;
+          if (cap) expect(first!.model).toMatchObject({ provider, id: modelId });
+          await manager.sendMessage(parent, 'worker', 'second');
+          await settled(manager, info);
+          expect(fixture.instances).toHaveLength(2);
+          expect(fixture.instances[0].shutdowns).toBe(1);
+          expect(
+            fixture.instances.flatMap((i) =>
+              i.requests.map((r) => [r.message.provider, r.message.model]),
+            ),
+          ).toEqual([
+            ['test', 'fake'],
+            ['test', 'fake'],
+          ]);
+          expect(manager.getAgentInfo('worker', parent)).toMatchObject({
+            provider: 'test',
+            modelId: 'fake',
+            sessionFile: info.sessionFile,
+            messageCount: 2,
+          });
+          if (cap) expect(manager['live'].get(info.id)!.session).not.toBe(first);
+          expect(sessionMessages(info).filter((m) => m.role === 'user')).toHaveLength(2);
+        } finally {
+          await manager.shutdown();
+        }
+      },
+    );
   }
 
   test('native selection drift cannot fall back when the saved exact route is unavailable on rebuild', async () => {
@@ -2105,12 +2359,20 @@ describe('native hot session lifecycle', () => {
       const info = manager.getAgentInfo('worker', parent);
       await settled(manager, info);
       fixture.routes = [['test', 'template-model']];
-      await expect(manager.sendMessage(parent, 'worker', 'must not fall back')).rejects.toThrow(/not available: test\/fake/);
+      await expect(manager.sendMessage(parent, 'worker', 'must not fall back')).rejects.toThrow(
+        /not available: test\/fake/,
+      );
       await released(manager, info);
-      expect(manager.getAgentInfo('worker', parent)).toMatchObject({ provider: 'test', modelId: 'fake', status: 'failed' });
+      expect(manager.getAgentInfo('worker', parent)).toMatchObject({
+        provider: 'test',
+        modelId: 'fake',
+        status: 'failed',
+      });
       expect(fixture.instances).toHaveLength(2);
       expect(fixture.instances[0].shutdowns).toBe(1);
-      expect(fixture.instances.flatMap((i) => i.requests.map((r) => r.message.model))).toEqual(['fake']);
+      expect(fixture.instances.flatMap((i) => i.requests.map((r) => r.message.model))).toEqual([
+        'fake',
+      ]);
       expect(sessionMessages(info).filter((m) => m.role === 'user')).toHaveLength(1);
     } finally {
       await manager.shutdown();
@@ -2118,19 +2380,28 @@ describe('native hot session lifecycle', () => {
   });
 
   test('native virtual selection is retained when its physical route changes provider/model', async () => {
-    fixture.onLoad = (pi) => pi.registerVirtualModel({
-      provider: 'offline-router', id: 'selected', name: 'Offline router',
-      route(request, ctx) {
-        const second = request.messages.filter((m) => m.role === 'user').length > 1;
-        return { model: ctx.modelRegistry.find(second ? 'template-provider' : 'test',
-          second ? 'template-model' : 'fake')! };
-      },
-    });
+    fixture.onLoad = (pi) =>
+      pi.registerVirtualModel({
+        provider: 'offline-router',
+        id: 'selected',
+        name: 'Offline router',
+        route(request, ctx) {
+          const second = request.messages.filter((m) => m.role === 'user').length > 1;
+          return {
+            model: ctx.modelRegistry.find(
+              second ? 'template-provider' : 'test',
+              second ? 'template-model' : 'fake',
+            )!,
+          };
+        },
+      });
     const manager = new AgentManager();
     const parent = 'virtual-selection-' + randomUUID();
     try {
-      await manager.spawnAgent({ ...spawnParams(parent, 'worker', 'first'),
-        model: { provider: 'offline-router', modelId: 'selected' } });
+      await manager.spawnAgent({
+        ...spawnParams(parent, 'worker', 'first'),
+        model: { provider: 'offline-router', modelId: 'selected' },
+      });
       const info = manager.getAgentInfo('worker', parent);
       await settled(manager, info);
       const session = manager['live'].get(info.id)!.session!;
@@ -2139,9 +2410,16 @@ describe('native hot session lifecycle', () => {
       expect(manager['live'].get(info.id)!.session).toBe(session);
       expect(session.model).toMatchObject({ provider: 'offline-router', id: 'selected' });
       expect(fixture.instances).toHaveLength(1);
-      expect(fixture.instances[0].requests.map((r) => [r.message.provider, r.message.model]))
-        .toEqual([['test', 'fake'], ['template-provider', 'template-model']]);
-      expect(manager.getAgentInfo('worker', parent)).toMatchObject({ provider: 'offline-router', modelId: 'selected' });
+      expect(
+        fixture.instances[0].requests.map((r) => [r.message.provider, r.message.model]),
+      ).toEqual([
+        ['test', 'fake'],
+        ['template-provider', 'template-model'],
+      ]);
+      expect(manager.getAgentInfo('worker', parent)).toMatchObject({
+        provider: 'offline-router',
+        modelId: 'selected',
+      });
     } finally {
       await manager.shutdown();
     }
@@ -2151,15 +2429,21 @@ describe('native hot session lifecycle', () => {
     'native compaction returns to safe idle and trims the existing Map after %s',
     async (outcome) => {
       writeConfig({ maxIdleSessions: 1 });
-      const entered = deferred(), gate = deferred();
+      const entered = deferred(),
+        gate = deferred();
       fixture.onStart = (pi) => {
         if (fixture.instances.length !== 1) return;
         pi.on('session_before_compact', async (event) => {
           entered.resolve();
           await gate.promise;
           if (outcome === 'cancel') return { cancel: true };
-          return { compaction: { summary: 'native offline summary',
-            firstKeptEntryId: event.preparation.firstKeptEntryId, tokensBefore: event.preparation.tokensBefore } };
+          return {
+            compaction: {
+              summary: 'native offline summary',
+              firstKeptEntryId: event.preparation.firstKeptEntryId,
+              tokensBefore: event.preparation.tokensBefore,
+            },
+          };
         });
       };
       const notices: any[] = [];
@@ -2175,14 +2459,19 @@ describe('native hot session lifecycle', () => {
         const lastUsedAt = live.lastUsedAt;
         const before = manager.readAgentResponse('a', parent);
         const session = live.session!;
-        session.settingsManager.applyOverrides({ compaction: { enabled: false, keepRecentTokens: 0, reserveTokens: 0 } });
+        session.settingsManager.applyOverrides({
+          compaction: { enabled: false, keepRecentTokens: 0, reserveTokens: 0 },
+        });
         if (outcome === 'failure') {
           // Real SDK lifecycle, with only its public persistence boundary fault-injected.
           persist = spyOn(session.sessionManager, 'appendCompaction').mockImplementationOnce(() => {
             throw new Error('native compaction persistence failure');
           });
         }
-        compacting = session.compact().then((result) => ({ result }), (error) => ({ error }));
+        compacting = session.compact().then(
+          (result) => ({ result }),
+          (error) => ({ error }),
+        );
         await entered.promise;
         expect(live.run).toBeUndefined();
         expect(session.isIdle).toBe(false);
@@ -2191,11 +2480,16 @@ describe('native hot session lifecycle', () => {
         expect(manager['live'].get(a.id)).toBe(live);
         expect(live.closing).toBe(false);
         expect(fixture.instances.map((i) => i.shutdowns)).toEqual([0, 0]);
-        await expect(manager.sendMessage(parent, 'a', 'busy must not prompt')).rejects.toThrow(/finishing/);
+        await expect(manager.sendMessage(parent, 'a', 'busy must not prompt')).rejects.toThrow(
+          /finishing/,
+        );
         gate.resolve();
         const result = await compacting;
         if (outcome === 'success') expect(result.result.summary).toBe('native offline summary');
-        else expect(result.error.message).toContain(outcome === 'cancel' ? 'cancelled' : 'persistence failure');
+        else
+          expect(result.error.message).toContain(
+            outcome === 'cancel' ? 'cancelled' : 'persistence failure',
+          );
         await released(manager, a);
         expect(manager['live'].size).toBe(1);
         expect(fixture.instances.map((i) => i.shutdowns)).toEqual([1, 0]);
@@ -2215,13 +2509,18 @@ describe('native hot session lifecycle', () => {
       'public compact failed-hook drain protects ' + outcome + ' during %s',
       async (action) => {
         if (action === 'trim') writeConfig({ maxIdleSessions: 1 });
-        const beforeEntered = deferred(), beforeGate = deferred();
-        const failedEntered = deferred(), failedGate = deferred();
+        const beforeEntered = deferred(),
+          beforeGate = deferred();
+        const failedEntered = deferred(),
+          failedGate = deferred();
         const callback = Promise.withResolvers<{ error?: Error; result?: unknown }>();
-        let hookExited = false, callbackCount = 0, stopped = false;
+        let hookExited = false,
+          callbackCount = 0,
+          stopped = false;
         let failedEvent: any;
         fixture.tokens = (text) => {
-          if (text.includes('ordinary-summary-failure')) throw new Error('ordinary native summary failure');
+          if (text.includes('ordinary-summary-failure'))
+            throw new Error('ordinary native summary failure');
           return 60000;
         };
         fixture.onStart = (pi) => {
@@ -2238,8 +2537,12 @@ describe('native hot session lifecycle', () => {
             hookExited = true;
           });
         };
-        const notices: any[] = [], errors: Error[] = [];
-        const manager = new AgentManager({ onCompletion: (e) => notices.push(e), onError: (e) => errors.push(e) });
+        const notices: any[] = [],
+          errors: Error[] = [];
+        const manager = new AgentManager({
+          onCompletion: (e) => notices.push(e),
+          onError: (e) => errors.push(e),
+        });
         const parent = 'public-compact-drain-' + randomUUID();
         let stopping: Promise<void> | undefined;
         try {
@@ -2250,12 +2553,20 @@ describe('native hot session lifecycle', () => {
           const live = manager['live'].get(a.id)!;
           const session = live.session!;
           const dispose = spyOn(session, 'dispose');
-          session.settingsManager.applyOverrides({ compaction: { enabled: false, keepRecentTokens: 0, reserveTokens: 0 } });
+          session.settingsManager.applyOverrides({
+            compaction: { enabled: false, keepRecentTokens: 0, reserveTokens: 0 },
+          });
           // Public ExtensionContext entry point, not a direct session.compact call.
           fixture.instances[0].ctx!.compact({
             customInstructions: 'ordinary-summary-failure',
-            onComplete(result) { callbackCount++; callback.resolve({ result }); },
-            onError(error) { callbackCount++; callback.resolve({ error }); },
+            onComplete(result) {
+              callbackCount++;
+              callback.resolve({ result });
+            },
+            onError(error) {
+              callbackCount++;
+              callback.resolve({ error });
+            },
           });
           await beforeEntered.promise;
           expect(session.isIdle).toBe(false);
@@ -2278,9 +2589,13 @@ describe('native hot session lifecycle', () => {
           expect(dispose).not.toHaveBeenCalled();
           const requests = fixture.instances[0].requests.length;
           if (action === 'send') {
-            await expect(manager.sendMessage(parent, 'a', 'must not enter old failed hook')).rejects.toThrow(/finishing/);
+            await expect(
+              manager.sendMessage(parent, 'a', 'must not enter old failed hook'),
+            ).rejects.toThrow(/finishing/);
           } else if (action === 'shutdown') {
-            stopping = manager.shutdown().then(() => { stopped = true; });
+            stopping = manager.shutdown().then(() => {
+              stopped = true;
+            });
             await new Promise((resolve) => setTimeout(resolve, 40));
             expect(stopped).toBe(false);
           }
@@ -2292,7 +2607,9 @@ describe('native hot session lifecycle', () => {
           expect(notices).toHaveLength(action === 'trim' ? 2 : 1);
           failedGate.resolve();
           const result = await callback.promise;
-          expect(result.error?.message).toContain(outcome === 'cancel' ? 'cancelled' : 'ordinary native summary failure');
+          expect(result.error?.message).toContain(
+            outcome === 'cancel' ? 'cancelled' : 'ordinary native summary failure',
+          );
           expect(callbackCount).toBe(1);
           expect(hookExited).toBe(true);
           await stopping;
@@ -2305,16 +2622,21 @@ describe('native hot session lifecycle', () => {
           } else {
             expect(manager.readAgentResponse('a', parent)).toEqual(before);
             expect(notices).toHaveLength(1);
-            expect(await manager.sendMessage(parent, 'a', 'after failed hook exit')).toEqual({ delivery: 'prompt' });
+            expect(await manager.sendMessage(parent, 'a', 'after failed hook exit')).toEqual({
+              delivery: 'prompt',
+            });
             await settled(manager, a);
             expect(manager['live'].get(a.id)!.session).toBe(session);
-            expect(manager.readAgentResponse('a', parent).finalResponse).toBe('response:after failed hook exit');
+            expect(manager.readAgentResponse('a', parent).finalResponse).toBe(
+              'response:after failed hook exit',
+            );
             expect(fixture.instances).toHaveLength(1);
             expect(notices).toHaveLength(2);
           }
           expect(errors).toEqual([]);
         } finally {
-          beforeGate.resolve(); failedGate.resolve();
+          beforeGate.resolve();
+          failedGate.resolve();
           await callback.promise;
           await stopping;
           await manager.shutdown();
@@ -2325,10 +2647,12 @@ describe('native hot session lifecycle', () => {
 
   test('public compact reentry registers first and each overlapping failed hook keeps its own drain', async () => {
     writeConfig({ maxIdleSessions: 1 });
-    const entered = [deferred(), deferred()], gates = [deferred(), deferred()];
+    const entered = [deferred(), deferred()],
+      gates = [deferred(), deferred()];
     const callbacks = [deferred(), deferred()];
     const observed: number[] = [];
-    let failedHooks = 0, reentered = false;
+    let failedHooks = 0,
+      reentered = false;
     fixture.onStart = (pi) => {
       if (fixture.instances.length !== 1) return;
       pi.on('session_before_compact', () => ({ cancel: true }));
@@ -2338,8 +2662,12 @@ describe('native hot session lifecycle', () => {
         await gates[index].promise;
       });
     };
-    const notices: any[] = [], errors: Error[] = [];
-    const manager = new AgentManager({ onCompletion: (e) => notices.push(e), onError: (e) => errors.push(e) });
+    const notices: any[] = [],
+      errors: Error[] = [];
+    const manager = new AgentManager({
+      onCompletion: (e) => notices.push(e),
+      onError: (e) => errors.push(e),
+    });
     const parent = 'compact-reentry-drain-' + randomUUID();
     let unsubscribe: (() => void) | undefined;
     try {
@@ -2350,7 +2678,9 @@ describe('native hot session lifecycle', () => {
       const before = manager.readAgentResponse('a', parent);
       const session = live.session!;
       const ctx = fixture.instances[0].ctx!;
-      session.settingsManager.applyOverrides({ compaction: { enabled: false, keepRecentTokens: 0, reserveTokens: 0 } });
+      session.settingsManager.applyOverrides({
+        compaction: { enabled: false, keepRecentTokens: 0, reserveTokens: 0 },
+      });
       unsubscribe = session.subscribe((event) => {
         if (event.type !== 'compaction_start' || reentered) return;
         reentered = true;
@@ -2370,7 +2700,9 @@ describe('native hot session lifecycle', () => {
       expect(manager['live'].get(a.id)).toBe(live);
       expect(live.closing).toBe(false);
       expect(fs.existsSync(activeMarker(a.id))).toBe(true);
-      await expect(manager.sendMessage(parent, 'a', 'must not pass second hook')).rejects.toThrow(/finishing/);
+      await expect(manager.sendMessage(parent, 'a', 'must not pass second hook')).rejects.toThrow(
+        /finishing/,
+      );
       gates[1].resolve();
       await callbacks[1].promise;
       await released(manager, a);
@@ -2389,20 +2721,32 @@ describe('native hot session lifecycle', () => {
 
   test('an old native barrier cannot clear newer no-run work or trim inside its settled hook', async () => {
     writeConfig({ maxIdleSessions: 1 });
-    const oldDelivery = deferred(), entered = deferred(), gate = deferred();
+    const oldDelivery = deferred(),
+      entered = deferred(),
+      gate = deferred();
     let backgroundStarted = false;
     fixture.onStart = (pi) => {
       if (fixture.instances.length !== 1) return;
-      pi.on('session_before_compact', (event) => ({ compaction: {
-        summary: 'offline summary', firstKeptEntryId: event.preparation.firstKeptEntryId,
-        tokensBefore: event.preparation.tokensBefore,
-      } }));
+      pi.on('session_before_compact', (event) => ({
+        compaction: {
+          summary: 'offline summary',
+          firstKeptEntryId: event.preparation.firstKeptEntryId,
+          tokensBefore: event.preparation.tokensBefore,
+        },
+      }));
       pi.on('agent_settled', async () => {
-        if (backgroundStarted) { entered.resolve(); await gate.promise; }
+        if (backgroundStarted) {
+          entered.resolve();
+          await gate.promise;
+        }
       });
     };
-    const notices: any[] = [], errors: Error[] = [];
-    const manager = new AgentManager({ onCompletion: (e) => notices.push(e), onError: (e) => errors.push(e) });
+    const notices: any[] = [],
+      errors: Error[] = [];
+    const manager = new AgentManager({
+      onCompletion: (e) => notices.push(e),
+      onError: (e) => errors.push(e),
+    });
     const parent = 'native-barrier-identity-' + randomUUID();
     let background: Promise<void> | undefined;
     let waiter: ReturnType<typeof spyOn> | undefined;
@@ -2413,7 +2757,9 @@ describe('native hot session lifecycle', () => {
       const before = manager.readAgentResponse('a', parent);
       const live = manager['live'].get(a.id)!;
       const session = live.session!;
-      session.settingsManager.applyOverrides({ compaction: { enabled: false, keepRecentTokens: 0, reserveTokens: 0 } });
+      session.settingsManager.applyOverrides({
+        compaction: { enabled: false, keepRecentTokens: 0, reserveTokens: 0 },
+      });
       const nativeWait = session.waitForIdle.bind(session);
       let delayed = false;
       waiter = spyOn(session, 'waitForIdle').mockImplementation(() => {
@@ -2427,7 +2773,10 @@ describe('native hot session lifecycle', () => {
       const old = live.nativeWork;
       expect(old).toBeDefined();
       backgroundStarted = true;
-      background = session.sendCustomMessage({ customType: 'background', content: 'native work', display: false }, { triggerTurn: true });
+      background = session.sendCustomMessage(
+        { customType: 'background', content: 'native work', display: false },
+        { triggerTurn: true },
+      );
       await entered.promise;
       const current = live.nativeWork;
       expect(current).toBeDefined();
@@ -2451,7 +2800,8 @@ describe('native hot session lifecycle', () => {
       expect(notices).toHaveLength(2);
       expect(errors).toEqual([]);
     } finally {
-      oldDelivery.resolve(); gate.resolve();
+      oldDelivery.resolve();
+      gate.resolve();
       await background;
       waiter?.mockRestore();
       await manager.shutdown();
@@ -2470,8 +2820,17 @@ describe('native hot session lifecycle', () => {
       let cleanups = 0;
       let unregister = () => {};
       try {
-        await manager.spawnAgent(spawnParams(parent, 'worker',
-          scenario === 'interrupt' ? 'hold first' : scenario === 'model-error' ? 'fail first' : 'first'));
+        await manager.spawnAgent(
+          spawnParams(
+            parent,
+            'worker',
+            scenario === 'interrupt'
+              ? 'hold first'
+              : scenario === 'model-error'
+                ? 'fail first'
+                : 'first',
+          ),
+        );
         const info = manager.getAgentInfo('worker', parent);
         const live = manager['live'].get(info.id)!;
         const session = live.session!;
@@ -2485,7 +2844,12 @@ describe('native hot session lifecycle', () => {
         }
         await settled(manager, info);
         expect(manager.getAgentInfo('worker', parent).status).toBe(
-          scenario === 'interrupt' ? 'interrupted' : scenario === 'model-error' ? 'failed' : 'completed');
+          scenario === 'interrupt'
+            ? 'interrupted'
+            : scenario === 'model-error'
+              ? 'failed'
+              : 'completed',
+        );
         expect(manager['live'].get(info.id)).toBe(live);
         expect(cleanups).toBe(0);
         expect(fixture.instances[0].shutdowns).toBe(0);
@@ -2494,10 +2858,12 @@ describe('native hot session lifecycle', () => {
         expect(manager['live'].get(info.id)!.session).toBe(session);
         expect(session.modelRuntime).toBe(runtime);
         expect(fixture.instances).toHaveLength(1);
-        expect(fixture.instances[0].events.filter((e) => e === 'factory' || e === 'session_start'))
-          .toEqual(['factory', 'session_start']);
+        expect(
+          fixture.instances[0].events.filter((e) => e === 'factory' || e === 'session_start'),
+        ).toEqual(['factory', 'session_start']);
         expect(manager.readAgentResponse('worker', parent)).toMatchObject({
-          status: 'completed', finalResponse: 'response:second',
+          status: 'completed',
+          finalResponse: 'response:second',
         });
         expect(manager.getAgentInfo('worker', parent).error).toBeUndefined();
         expect(cleanups).toBe(0);
@@ -2514,26 +2880,33 @@ describe('native hot session lifecycle', () => {
     },
   );
 
-  test.each([0, 1, 4])('keeps at most %s reusable idle sessions (4 is the default)', async (cap) => {
-    if (cap !== 4) writeConfig({ maxIdleSessions: cap });
-    const manager = new AgentManager();
-    const parent = 'idle-cap-' + randomUUID();
-    try {
-      for (let index = 0; index < cap + 2; index++) {
-        await manager.spawnAgent(spawnParams(parent, 'worker-' + index, 'work ' + index));
-        await settled(manager, manager.getAgentInfo('worker-' + index, parent));
+  test.each([0, 1, 4])(
+    'keeps at most %s reusable idle sessions (4 is the default)',
+    async (cap) => {
+      if (cap !== 4) writeConfig({ maxIdleSessions: cap });
+      const manager = new AgentManager();
+      const parent = 'idle-cap-' + randomUUID();
+      try {
+        for (let index = 0; index < cap + 2; index++) {
+          await manager.spawnAgent(spawnParams(parent, 'worker-' + index, 'work ' + index));
+          await settled(manager, manager.getAgentInfo('worker-' + index, parent));
+        }
+        await waitUntil(() => [...manager['live'].values()].every((live) => !live.closing));
+        expect(manager['live'].size).toBe(cap);
+        expect(
+          [...manager['live'].values()].every((live) => !live.run && live.session!.isIdle),
+        ).toBe(true);
+        expect(fixture.instances.filter((i) => i.shutdowns === 1)).toHaveLength(2);
+        expect(
+          manager.listAgents(undefined, parent).every((i) => i.agent_status === 'completed'),
+        ).toBe(true);
+        await manager.shutdown();
+        expect(fixture.instances.every((i) => i.shutdowns === 1)).toBe(true);
+      } finally {
+        await manager.shutdown();
       }
-      await waitUntil(() => [...manager['live'].values()].every((live) => !live.closing));
-      expect(manager['live'].size).toBe(cap);
-      expect([...manager['live'].values()].every((live) => !live.run && live.session!.isIdle)).toBe(true);
-      expect(fixture.instances.filter((i) => i.shutdowns === 1)).toHaveLength(2);
-      expect(manager.listAgents(undefined, parent).every((i) => i.agent_status === 'completed')).toBe(true);
-      await manager.shutdown();
-      expect(fixture.instances.every((i) => i.shutdowns === 1)).toBe(true);
-    } finally {
-      await manager.shutdown();
-    }
-  });
+    },
+  );
 
   test('reads and validates the idle cap only when the manager initializes', async () => {
     for (const invalid of [-1, 1.5, '1', null, Number.MAX_SAFE_INTEGER + 1]) {
@@ -2574,9 +2947,16 @@ describe('native hot session lifecycle', () => {
       await manager.spawnAgent(spawnParams(parent, 'e', 'fifth'));
       await settled(manager, manager.getAgentInfo('e', parent));
       await released(manager, b);
-      expect([...manager['live'].values()].map((l) => l.info.taskName).sort()).toEqual(['a', 'c', 'd', 'e']);
+      expect([...manager['live'].values()].map((l) => l.info.taskName).sort()).toEqual([
+        'a',
+        'c',
+        'd',
+        'e',
+      ]);
       expect(manager.getAgentInfo('b', parent)).toMatchObject({
-        status: bFinal.status, finalResponse: bFinal.finalResponse, completedAt: bFinal.completedAt,
+        status: bFinal.status,
+        finalResponse: bFinal.finalResponse,
+        completedAt: bFinal.completedAt,
       });
       expect(notices.filter((n) => n.agentName === '/b')).toHaveLength(1);
       expect(fixture.instances).toHaveLength(5);
@@ -2607,7 +2987,9 @@ describe('native hot session lifecycle', () => {
       expect(manager['live'].has(busy.id)).toBe(true);
       expect(manager.getAgentInfo('active', parent).status).toBe('running');
       expect(fixture.instances[0].shutdowns).toBe(0);
-      await expect(manager.sendMessage(parent, 'busy', 'must not prompt')).rejects.toThrow(/finishing/);
+      await expect(manager.sendMessage(parent, 'busy', 'must not prompt')).rejects.toThrow(
+        /finishing/,
+      );
     } finally {
       if (busySession) delete busySession.isIdle;
       await manager.shutdown();
@@ -2647,10 +3029,13 @@ describe('native hot session lifecycle', () => {
       expect(manager['live'].get(a.id)!.session).not.toBe(old.session);
       expect(dispose).toHaveBeenCalledTimes(1);
       expect(fixture.instances).toHaveLength(3);
-      expect(sessionMessages(a).filter((m) => m.role === 'user')
-        .map((m) => typeof m.content === 'string' ? m.content : m.content.map((c: any) => c.text).join(''))).toEqual([
-        'first', 'reentered after real close',
-      ]);
+      expect(
+        sessionMessages(a)
+          .filter((m) => m.role === 'user')
+          .map((m) =>
+            typeof m.content === 'string' ? m.content : m.content.map((c: any) => c.text).join(''),
+          ),
+      ).toEqual(['first', 'reentered after real close']);
     } finally {
       gate.resolve();
       await reentered;
@@ -2667,7 +3052,9 @@ describe('native hot session lifecycle', () => {
       await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
       const info = manager.getAgentInfo('worker', parent);
       await settled(manager, info);
-      fixture.input = async (event) => { if (event.text === 'new round') await gate.promise; };
+      fixture.input = async (event) => {
+        if (event.text === 'new round') await gate.promise;
+      };
       first = manager.sendMessage(parent, 'worker', 'new round');
       const second = manager.sendMessage(parent, 'worker', 'concurrent duplicate');
       await expect(second).rejects.toThrow(/starting/);
@@ -2744,7 +3131,9 @@ describe('native hot session lifecycle', () => {
         if (String(to) === info.infoFile) throw new Error('steer persistence failed');
         return rename(from, to);
       });
-      await expect(manager.sendMessage(parent, 'worker', 'new instruction')).rejects.toThrow('steer persistence failed');
+      await expect(manager.sendMessage(parent, 'worker', 'new instruction')).rejects.toThrow(
+        'steer persistence failed',
+      );
       save.mockRestore();
       await released(manager, info);
       expect(fixture.instances[0].shutdowns).toBe(1);
@@ -2760,7 +3149,11 @@ describe('native hot session lifecycle', () => {
     fixture.responseGate = gate.promise;
     const callbacks: Array<() => void> = [];
     const original = globalThis.setTimeout;
-    const timers = spyOn(globalThis, 'setTimeout').mockImplementation(((callback: any, ms: number, ...args: any[]) => {
+    const timers = spyOn(globalThis, 'setTimeout').mockImplementation(((
+      callback: any,
+      ms: number,
+      ...args: any[]
+    ) => {
       if (ms === 1000) callbacks.push(callback);
       return original(callback, ms, ...args);
     }) as typeof setTimeout);
@@ -2788,7 +3181,8 @@ describe('native hot session lifecycle', () => {
       gate.resolve();
       await settled(manager, info);
       expect(manager.readAgentResponse('worker', parent)).toMatchObject({
-        status: 'completed', finalResponse: 'response:hold second',
+        status: 'completed',
+        finalResponse: 'response:hold second',
       });
     } finally {
       timers.mockRestore();
@@ -2830,10 +3224,23 @@ describe('native hot session lifecycle', () => {
       await waitUntil(() => events.filter((e) => e.type === 'agent_settled').length === 4);
       expect(socket.destroyed).toBe(false);
       expect(events.filter((e) => e.type === 'sync')).toHaveLength(1);
-      expect(events.filter((e) => e.type === 'message_end' && e.message.role === 'assistant' && e.message.stopReason === 'stop')
-        .map((e) => e.message.content[0].text)).toEqual(['response:hold first', 'response:third']);
+      expect(
+        events
+          .filter(
+            (e) =>
+              e.type === 'message_end' &&
+              e.message.role === 'assistant' &&
+              e.message.stopReason === 'stop',
+          )
+          .map((e) => e.message.content[0].text),
+      ).toEqual(['response:hold first', 'response:third']);
       const [sync] = await readSocketEvents(getSocketPath(info.id), 1);
-      expect(sync).toMatchObject({ status: 'done', partialMessage: null, userMessage: null, activeTools: [] });
+      expect(sync).toMatchObject({
+        status: 'done',
+        partialMessage: null,
+        userMessage: null,
+        activeTools: [],
+      });
       expect(fixture.instances).toHaveLength(1);
     } finally {
       socket?.destroy();
@@ -2848,11 +3255,17 @@ describe('native hot session lifecycle', () => {
     const gate = deferred();
     const errors: Error[] = [];
     const completions: any[] = [];
-    const manager = new AgentManager({ onError: (e) => errors.push(e), onCompletion: (e) => completions.push(e) });
+    const manager = new AgentManager({
+      onError: (e) => errors.push(e),
+      onCompletion: (e) => completions.push(e),
+    });
     const parent = 'mixed-shutdown-' + randomUUID();
     let hook = 0;
     fixture.onShutdown = async () => {
-      if (++hook === 1) { await gate.promise; throw new Error('mixed hook failure'); }
+      if (++hook === 1) {
+        await gate.promise;
+        throw new Error('mixed hook failure');
+      }
     };
     let save: ReturnType<typeof spyOn> | undefined;
     let stopping: Promise<unknown> | undefined;
@@ -2879,7 +3292,9 @@ describe('native hot session lifecycle', () => {
       expect(manager['live'].size).toBe(0);
       expect(fixture.instances.map((i) => i.shutdowns)).toEqual([1, 1, 1]);
       expect(manager.getAgentInfo('idle', parent)).toMatchObject({
-        status: 'completed', finalResponse: idleFinal.finalResponse, completedAt: idleFinal.completedAt,
+        status: 'completed',
+        finalResponse: idleFinal.finalResponse,
+        completedAt: idleFinal.completedAt,
       });
       expect(manager.getAgentInfo('closing', parent).status).toBe('completed');
       expect(completions).toHaveLength(2);
@@ -2893,28 +3308,31 @@ describe('native hot session lifecycle', () => {
     }
   });
 
-  test.each([false, true])('a changed parent trust decision rebuilds idle resources (was %s)', async (initial) => {
-    let trusted = initial;
-    const manager = new AgentManager({ projectTrusted: () => trusted });
-    const parent = 'hot-trust-' + randomUUID();
-    try {
-      await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
-      const info = manager.getAgentInfo('worker', parent);
-      await settled(manager, info);
-      const first = manager['live'].get(info.id)!.session!;
-      expect(first.settingsManager.isProjectTrusted()).toBe(initial);
-      trusted = !initial;
-      await manager.sendMessage(parent, 'worker', 'second');
-      await settled(manager, info);
-      const second = manager['live'].get(info.id)!.session!;
-      expect(second).not.toBe(first);
-      expect(second.settingsManager.isProjectTrusted()).toBe(!initial);
-      expect(fixture.instances.map((i) => i.shutdowns)).toEqual([1, 0]);
-      expect(sessionMessages(info).filter((m) => m.role === 'user')).toHaveLength(2);
-    } finally {
-      await manager.shutdown();
-    }
-  });
+  test.each([false, true])(
+    'a changed parent trust decision rebuilds idle resources (was %s)',
+    async (initial) => {
+      let trusted = initial;
+      const manager = new AgentManager({ projectTrusted: () => trusted });
+      const parent = 'hot-trust-' + randomUUID();
+      try {
+        await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
+        const info = manager.getAgentInfo('worker', parent);
+        await settled(manager, info);
+        const first = manager['live'].get(info.id)!.session!;
+        expect(first.settingsManager.isProjectTrusted()).toBe(initial);
+        trusted = !initial;
+        await manager.sendMessage(parent, 'worker', 'second');
+        await settled(manager, info);
+        const second = manager['live'].get(info.id)!.session!;
+        expect(second).not.toBe(first);
+        expect(second.settingsManager.isProjectTrusted()).toBe(!initial);
+        expect(fixture.instances.map((i) => i.shutdowns)).toEqual([1, 0]);
+        expect(sessionMessages(info).filter((m) => m.role === 'user')).toHaveLength(2);
+      } finally {
+        await manager.shutdown();
+      }
+    },
+  );
 
   test('an idle child remains exclusively owned by its manager, not a cross-parent/host cache', async () => {
     const owner = new AgentManager();
@@ -2925,7 +3343,9 @@ describe('native hot session lifecycle', () => {
       const info = owner.getAgentInfo('worker', parent);
       await settled(owner, info);
       await expect(other.sendMessage(parent, 'worker', 'takeover')).rejects.toThrow(/another host/);
-      await expect(owner.sendMessage('another-parent', 'worker', 'takeover')).rejects.toThrow(/not found/);
+      await expect(owner.sendMessage('another-parent', 'worker', 'takeover')).rejects.toThrow(
+        /not found/,
+      );
       expect(fixture.instances).toHaveLength(1);
       expect(fs.existsSync(activeMarker(info.id))).toBe(true);
     } finally {
@@ -2944,7 +3364,9 @@ describe('native hot session lifecycle', () => {
       await released(manager, info);
       const before = manager.getAgentInfo('worker', parent);
       fs.unlinkSync(info.sessionFile);
-      await expect(manager.sendMessage(parent, 'worker', 'must not start empty')).rejects.toThrow(/history is missing/);
+      await expect(manager.sendMessage(parent, 'worker', 'must not start empty')).rejects.toThrow(
+        /history is missing/,
+      );
       expect(manager.getAgentInfo('worker', parent)).toEqual(before);
       expect(fixture.instances).toHaveLength(1);
       expect(completions).toHaveLength(1);
@@ -2963,7 +3385,9 @@ describe('native hot session lifecycle', () => {
       const info = manager.getAgentInfo('worker', parent);
       await released(manager, info);
       expect(sessionMessages(info)).toEqual([]);
-      expect(JSON.parse(fs.readFileSync(info.sessionFile, 'utf8').split('\n')[0]).type).toBe('session');
+      expect(JSON.parse(fs.readFileSync(info.sessionFile, 'utf8').split('\n')[0]).type).toBe(
+        'session',
+      );
       await manager.sendMessage(parent, 'worker', 'second');
       await released(manager, info);
       expect(manager.readAgentResponse('worker', parent).finalResponse).toBe('response:second');
@@ -2994,7 +3418,9 @@ describe('native hot session lifecycle', () => {
       await manager.sendMessage(parent, 'worker', 'third');
       await settled(manager, info);
       expect(fixture.instances).toHaveLength(2);
-      expect(JSON.stringify(fixture.instances[1].requests[0].context)).toContain('SECOND_COLD_SYSTEM');
+      expect(JSON.stringify(fixture.instances[1].requests[0].context)).toContain(
+        'SECOND_COLD_SYSTEM',
+      );
     } finally {
       fs.writeFileSync(file, original);
       await manager.shutdown();
@@ -3014,7 +3440,9 @@ describe('native hot session lifecycle', () => {
       const info = manager.getAgentInfo('worker', parent);
       await settled(manager, info);
       await manager.waitAgent(parent, ['worker']);
-      fixture.input = async (event) => { if (event.text === 'unaccepted') await gate.promise; };
+      fixture.input = async (event) => {
+        if (event.text === 'unaccepted') await gate.promise;
+      };
       pending = manager.sendMessage(parent, 'worker', 'unaccepted').catch((e) => e);
       await waitUntil(() => fixture.instances[0].inputs.length === 2);
       const session = manager['live'].get(info.id)!.session!;
@@ -3024,7 +3452,10 @@ describe('native hot session lifecycle', () => {
       const targeted = manager.waitAgent(parent, ['worker'], controller.signal);
       gate.resolve();
       expect(await pending).toBeInstanceOf(Error);
-      expect((await targeted).event).toMatchObject({ status: 'completed', finalResponse: 'response:first' });
+      expect((await targeted).event).toMatchObject({
+        status: 'completed',
+        finalResponse: 'response:first',
+      });
       await released(manager, info);
       expect(manager['waiters']).toHaveLength(1);
       expect(manager['mailbox']).toEqual([]);
@@ -3049,13 +3480,23 @@ describe('native hot session lifecycle', () => {
       await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
       const info = manager.getAgentInfo('worker', parent);
       await settled(manager, info);
-      fixture.input = async (event) => { if (event.text === 'hold late') await gate.promise; };
+      fixture.input = async (event) => {
+        if (event.text === 'hold late') await gate.promise;
+      };
       const original = globalThis.setTimeout;
-      timers = spyOn(globalThis, 'setTimeout').mockImplementation(((callback: any, ms: number, ...args: any[]) =>
+      timers = spyOn(globalThis, 'setTimeout').mockImplementation(((
+        callback: any,
+        ms: number,
+        ...args: any[]
+      ) =>
         original(callback, ms === 15000 || ms === 2000 ? 80 : ms, ...args)) as typeof setTimeout);
-      await expect(manager.sendMessage(parent, 'worker', 'hold late')).rejects.toThrow(/prompt acceptance/);
+      await expect(manager.sendMessage(parent, 'worker', 'hold late')).rejects.toThrow(
+        /prompt acceptance/,
+      );
       expect(manager['live'].get(info.id)!.closing).toBe(true);
-      await expect(manager.sendMessage(parent, 'worker', 'must not reopen')).rejects.toThrow(/closing/);
+      await expect(manager.sendMessage(parent, 'worker', 'must not reopen')).rejects.toThrow(
+        /closing/,
+      );
       expect(fixture.instances).toHaveLength(1);
       gate.resolve();
       await released(manager, info);
@@ -3063,7 +3504,10 @@ describe('native hot session lifecycle', () => {
       await manager.sendMessage(parent, 'worker', 'recovered');
       await settled(manager, info);
       expect(fixture.instances).toHaveLength(2);
-      expect(fixture.instances.flatMap((i) => i.requests.map((r) => r.text))).toEqual(['first', 'recovered']);
+      expect(fixture.instances.flatMap((i) => i.requests.map((r) => r.text))).toEqual([
+        'first',
+        'recovered',
+      ]);
       expect(manager.readAgentResponse('worker', parent).finalResponse).toBe('response:recovered');
     } finally {
       timers?.mockRestore();
@@ -3442,8 +3886,13 @@ describe('SDK lifecycle and cancellation races', () => {
       await manager.sendMessage(parent, 'worker', 'clean next round');
       await settled(manager, info);
       expect(fixture.instances).toHaveLength(1);
-      expect(fixture.instances[0].requests.map((r) => r.text)).toEqual(['hold initial', 'clean next round']);
-      expect(sessionMessages(info).some((m) => JSON.stringify(m).includes('late steer'))).toBe(false);
+      expect(fixture.instances[0].requests.map((r) => r.text)).toEqual([
+        'hold initial',
+        'clean next round',
+      ]);
+      expect(sessionMessages(info).some((m) => JSON.stringify(m).includes('late steer'))).toBe(
+        false,
+      );
     } finally {
       response.resolve();
       input.resolve();
@@ -3954,9 +4403,15 @@ describe('startup storage failures', () => {
       onActivityChange: (event) => activity.push(event.active),
     });
     const original = fs.openSync;
-    const open = spyOn(fs, 'openSync').mockImplementation(((file: any, flags: any, ...args: any[]) => {
+    const open = spyOn(fs, 'openSync').mockImplementation(((
+      file: any,
+      flags: any,
+      ...args: any[]
+    ) => {
       if (String(file).endsWith('.jsonl') && flags === 'wx') {
-        const error = new Error('EACCES: permission denied, open ' + String(file)) as NodeJS.ErrnoException;
+        const error = new Error(
+          'EACCES: permission denied, open ' + String(file),
+        ) as NodeJS.ErrnoException;
         error.code = 'EACCES';
         throw error;
       }
@@ -4917,7 +5372,10 @@ describe('SDK business scope, waits and resources', () => {
       fixture.onStart = (pi) => {
         active.push(pi.getActiveTools());
       };
-      writeConfig({ maxIdleSessions: 0, ...(source === 'defaults' ? { defaults: { extensions } } : {}) });
+      writeConfig({
+        maxIdleSessions: 0,
+        ...(source === 'defaults' ? { defaults: { extensions } } : {}),
+      });
       const manager = new AgentManager();
       try {
         await manager.spawnAgent({
@@ -6008,12 +6466,21 @@ describe('SDK cleanup ownership regressions', () => {
       const info = manager.getAgentInfo('worker', parent);
       const live = manager['live'].get(info.id)!;
       const mkdirWhileOpen = spyOn(fs, 'mkdirSync');
+      const stderr = spyOn(console, 'error').mockImplementation(() => {});
+      const previousDebug = process.env.PI_SUBAGENT_DEBUG;
       try {
+        delete process.env.PI_SUBAGENT_DEBUG;
         live.logger.info('regression', 'normal write');
         expect(mkdirWhileOpen).toHaveBeenCalledTimes(1);
+        expect(stderr).not.toHaveBeenCalled();
+        process.env.PI_SUBAGENT_DEBUG = '1';
         live.logger.info('regression', 'same stream write');
         expect(mkdirWhileOpen).toHaveBeenCalledTimes(1);
+        expect(stderr.mock.calls).toEqual([['[INFO] regression: same stream write', '']]);
       } finally {
+        if (previousDebug === undefined) delete process.env.PI_SUBAGENT_DEBUG;
+        else process.env.PI_SUBAGENT_DEBUG = previousDebug;
+        stderr.mockRestore();
         mkdirWhileOpen.mockRestore();
       }
       expect(tracked.streams).toHaveLength(1);
@@ -6051,14 +6518,18 @@ describe('SDK cleanup ownership regressions', () => {
       expect(mkdirCalls).toBe(0);
       expect(tracked.streams).toHaveLength(2);
       expect(tracked.streams.every((stream) => stream.closed)).toBe(true);
-      const messages = fs
+      const entries = fs
         .readFileSync(info.logFile, 'utf8')
         .trim()
         .split('\n')
         .map((line) => JSON.parse(line))
-        .filter((entry) => entry.category === 'regression')
-        .map((entry) => entry.message);
-      expect(messages).toEqual([
+        .filter((entry) => entry.category === 'regression');
+      for (const entry of entries) {
+        expect(entry.level).toBe('INFO');
+        expect(Number.isNaN(Date.parse(entry.ts))).toBe(false);
+        expect(Object.keys(entry).sort()).toEqual(['category', 'level', 'message', 'ts']);
+      }
+      expect(entries.map((entry) => entry.message)).toEqual([
         'normal write',
         'same stream write',
         'closing write',
@@ -6152,7 +6623,9 @@ describe('SDK cleanup ownership regressions', () => {
         expect(manager['live'].get(info.id)).toBe(live);
         expect(fs.existsSync(activeMarker(info.id))).toBe(true);
         expect(original.writableEnded).toBe(false);
-        await expect(manager.sendMessage(parent, 'worker', 'must not reopen')).rejects.toThrow(/closing/);
+        await expect(manager.sendMessage(parent, 'worker', 'must not reopen')).rejects.toThrow(
+          /closing/,
+        );
         expect(fixture.instances).toHaveLength(1);
         gate.resolve();
         await released(manager, info);
@@ -6198,9 +6671,11 @@ describe('SDK cleanup ownership regressions', () => {
     });
     const hostErrors: string[] = [];
     const originalTimeout = globalThis.setTimeout;
-    const timers = spyOn(globalThis, "setTimeout").mockImplementation((
-      (callback: any, ms: number, ...args: any[]) =>
-        originalTimeout(callback, ms === 5000 ? 100 : ms, ...args)) as typeof setTimeout);
+    const timers = spyOn(globalThis, 'setTimeout').mockImplementation(((
+      callback: any,
+      ms: number,
+      ...args: any[]
+    ) => originalTimeout(callback, ms === 5000 ? 100 : ms, ...args)) as typeof setTimeout);
     writeConfig({ maxIdleSessions: 0 }); // This contract exercises actual cold disposal/reopening.
     const manager = new AgentManager({ onError: (error) => hostErrors.push(error.message) });
     const parent = 'throwing-cleanup-owner-' + randomUUID();
@@ -6213,7 +6688,7 @@ describe('SDK cleanup ownership regressions', () => {
       let cleanups = 0;
       unregister = registerSessionResourceCleanup((id: string) => {
         if (id === sessionId && cleanups++ === 0)
-          throw new Error("independent resource cleanup failure");
+          throw new Error('independent resource cleanup failure');
       });
       // The real native dispose runs at the timeout point and throws the registered failure.
       await waitUntil(() => cleanups === 1, 9000);
@@ -6242,13 +6717,15 @@ describe('SDK cleanup ownership regressions', () => {
       expect(fs.existsSync(activeMarker(info.id))).toBe(false);
       expect(cleanups).toBe(1);
       await waitUntil(() =>
-        hostErrors.some((message) => message.includes("Failed to cleanup session resources")),
+        hostErrors.some((message) => message.includes('Failed to cleanup session resources')),
       );
       expect(manager.readAgentResponse('worker', parent).status).toBe('completed');
       fixture = configureCoreFixture();
       await manager.sendMessage(parent, 'worker', 'after recovery');
       await settled(manager, info);
-      expect(manager.readAgentResponse('worker', parent).finalResponse).toBe('response:after recovery');
+      expect(manager.readAgentResponse('worker', parent).finalResponse).toBe(
+        'response:after recovery',
+      );
       // The reopened session derives the same sessionId from its JSONL and is disposed
       // exactly once on its own close; the throwing callback fires only for the first call.
       expect(cleanups).toBe(2);

@@ -6,7 +6,14 @@ import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { stripVTControlCharacters } from 'node:util';
-import { backgroundAnsi, parseColor, TuiAltScreen, TuiMainScreen, visibleWidth, type Terminal } from '@earendil-works/pi-tui';
+import {
+  backgroundAnsi,
+  parseColor,
+  TuiAltScreen,
+  TuiMainScreen,
+  visibleWidth,
+  type Terminal,
+} from '@earendil-works/pi-tui';
 import { renderAgentBadge, resolveAgentColor } from '../src/color.js';
 import { nativeTheme } from './fixtures/ui-theme.js';
 import { AgentSummaryWidget } from '../src/widget.js';
@@ -316,7 +323,7 @@ test('preserves the six schemas, dynamic routing, tool arguments, and return wra
 test('exposes validated structured data without changing text, pagination or response truncation', () => {
   probe(
     hostFixture +
-      `const { Value } = await import(${JSON.stringify(import.meta.resolve("typebox/value"))});` +
+      `const { Value } = await import(${JSON.stringify(import.meta.resolve('typebox/value'))});` +
       String.raw`
     const f = host();
     await extension(f.pi);
@@ -819,52 +826,100 @@ test.each(['regular', 'fullscreen'] as const)(
   'native %s summary redraws and resizes without taking editor focus',
   async (mode) => {
     const { AgentSummaryWidget } = await import('../src/widget.js');
-    let rows = [{
-      canonicalName: '/review', status: 'running' as const, provider: 'openai-codex',
-      modelId: 'gpt-6.1-sol', thinking: 'max' as const, tokens: 33800,
-      elapsedMs: 12300, activeTools: ['read'],
-    }];
+    let rows = [
+      {
+        canonicalName: '/review',
+        status: 'running' as const,
+        provider: 'openai-codex',
+        modelId: 'gpt-6.1-sol',
+        thinking: 'max' as const,
+        tokens: 33800,
+        elapsedMs: 12300,
+        activeTools: ['read'],
+      },
+    ];
     let input = (_data: string) => {};
     let resize = () => {};
     const writes: string[] = [];
     const terminal: Terminal & { columns: number; rows: number } = {
-      columns: 140, rows: 40, kittyProtocolActive: false,
-      start(onInput, onResize) { input = onInput; resize = onResize; },
-      stop() {}, async drainInput() {}, write(data) { writes.push(data); },
-      moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {},
-      clearFromCursor() {}, clearScreen() {}, setTitle() {}, setProgress() {}, setProgramStatus() {},
+      columns: 140,
+      rows: 40,
+      kittyProtocolActive: false,
+      start(onInput, onResize) {
+        input = onInput;
+        resize = onResize;
+      },
+      stop() {},
+      async drainInput() {},
+      write(data) {
+        writes.push(data);
+      },
+      moveBy() {},
+      hideCursor() {},
+      showCursor() {},
+      clearLine() {},
+      clearFromCursor() {},
+      clearScreen() {},
+      setTitle() {},
+      setProgress() {},
+      setProgramStatus() {},
     };
     const tui = mode === 'regular' ? new TuiMainScreen(terminal) : new TuiAltScreen(terminal);
     let component: any;
     let mounts = 0;
     const errors: unknown[] = [];
-    const widget = new AgentSummaryWidget(() => rows, (error) => {
-      errors.push(error);
-      // Native notify() adds a chat component and requests another render.
-      tui.addChild({ render: () => ['summary warning'], invalidate() {} });
-      tui.requestRender();
-    });
+    const widget = new AgentSummaryWidget(
+      () => rows,
+      (error) => {
+        errors.push(error);
+        // Native notify() adds a chat component and requests another render.
+        tui.addChild({ render: () => ['summary warning'], invalidate() {} });
+        tui.requestRender();
+      },
+    );
     let brokenTheme = false;
-    const theme = { fg: (_color: string, text: string) => {
-      if (brokenTheme) throw new Error('broken summary theme');
-      return text;
-    } };
+    const theme = {
+      fg: (_color: string, text: string) => {
+        if (brokenTheme) throw new Error('broken summary theme');
+        return text;
+      },
+    };
     const ctx: any = {
-      mode: 'tui', sessionManager: { getSessionId: () => 'summary-native' },
-      ui: { theme, setWidget(_key: string, content: any) {
-        if (component) { tui.removeChild(component); component.dispose(); }
-        component = content?.(tui, theme);
-        if (component) { mounts++; tui.addChild(component); }
-      } },
+      mode: 'tui',
+      sessionManager: { getSessionId: () => 'summary-native' },
+      ui: {
+        theme,
+        setWidget(_key: string, content: any) {
+          if (component) {
+            tui.removeChild(component);
+            component.dispose();
+          }
+          component = content?.(tui, theme);
+          if (component) {
+            mounts++;
+            tui.addChild(component);
+          }
+        },
+      },
     };
     widget.attach(ctx);
     widget.refresh();
     const typed: string[] = [];
-    const editor = { render: (width: number) => ['> '.slice(0, width)], invalidate() {}, handleInput(data: string) { typed.push(data); } };
+    const editor = {
+      render: (width: number) => ['> '.slice(0, width)],
+      invalidate() {},
+      handleInput(data: string) {
+        typed.push(data);
+      },
+    };
     tui.addChild(editor);
     tui.setFocus(editor);
     tui.start();
-    const draw = () => { writes.length = 0; tui.renderNow(true); return stripVTControlCharacters(writes.join('')); };
+    const draw = () => {
+      writes.length = 0;
+      tui.renderNow(true);
+      return stripVTControlCharacters(writes.join(''));
+    };
     try {
       expect(draw()).toContain('openai-codex/gpt-6.1-sol/max');
       rows = [{ ...rows[0], tokens: 40000 }];
@@ -875,7 +930,9 @@ test.each(['regular', 'fullscreen'] as const)(
         terminal.columns = width;
         resize();
         draw();
-        expect(component.render(width).every((line: string) => visibleWidth(line) <= width)).toBe(true);
+        expect(component.render(width).every((line: string) => visibleWidth(line) <= width)).toBe(
+          true,
+        );
       }
       input('x');
       expect(typed).toEqual(['x']);
@@ -1142,17 +1199,17 @@ test.each(runtimes)(
     import assert from "node:assert/strict";
     import * as fs from "node:fs";
     import * as path from "node:path";
-    const { Value } = await import(${JSON.stringify(import.meta.resolve("typebox/value"))});
+    const { Value } = await import(${JSON.stringify(import.meta.resolve('typebox/value'))});
     const { createAgentSessionServices, createAgentSessionFromServices, createCodemodeExtension, SessionManager, SettingsManager } = await import(${JSON.stringify(sdkUrl)});
     const agentDir = process.env.PI_CODING_AGENT_DIR;
-    const fixtureSource = ${JSON.stringify(path.join(packageDir, "tests", "fixtures", "sdk-offline-extension.ts"))};
+    const fixtureSource = ${JSON.stringify(path.join(packageDir, 'tests', 'fixtures', 'sdk-offline-extension.ts'))};
     const fixture = (name, config) => {
       const directory = path.join(agentDir, name);
       fs.mkdirSync(directory);
       const extension = path.join(directory, "extension.ts");
       fs.copyFileSync(fixtureSource, extension);
       fs.writeFileSync(path.join(directory, "sdk-fixture.json"), JSON.stringify(config));
-      return { directory, extension };
+      return { extension };
     };
     const child = fixture("child-provider", { prefix: "child" });
     const script = [
@@ -1986,79 +2043,118 @@ describe('extension completion delivery and TUI', () => {
           .find((line: string) => stripVTControlCharacters(line).startsWith('› ')) ?? '',
       );
 
-    test.each(['dark', 'light'] as const)('native %s browser uses configured name badges and independent two-line selection', async (appearance) => {
-      await withBrowser(async (f) => {
-        // Keep all-session fixtures newer than unrelated history in this shared directory.
-        const now = Date.now() + 1000;
-        const review = f.put('review', { color: 'red', agentType: 'reviewer', createdAt: now + 500, status: 'failed', lastTaskMessage: 'review preview 中文😀 '.repeat(20) });
-        f.put('tests', { color: '#dc2626', agentType: 'reviewer', createdAt: now + 400, lastTaskMessage: 'tests preview' });
-        f.put('plain', { createdAt: now + 300, lastTaskMessage: 'plain preview' });
-        f.put('invalid', { color: 'invalid', createdAt: now + 200, lastTaskMessage: 'invalid preview' });
-        f.put('bad-record', { color: {} as any, createdAt: now + 100, lastTaskMessage: 'malformed preview' });
-        const other = f.put('review', { color: 'red', agentType: 'reviewer', createdAt: now + 600 }, f.otherId);
-        for (const mode of ['truecolor', '256color'] as const) {
-          const theme = nativeTheme(appearance, mode);
-          f.theme = theme;
-          f.ctx.ui.theme = theme;
-          await f.open((browser: any) => {
-            const selectedBg = backgroundAnsi(theme.colors.selectedBg, mode);
-            const badgeBg = backgroundAnsi(parseColor('#DC2626'), mode);
-            const checkRow = (name: string, color: string | undefined, selected: boolean, width = 120) => {
-              const lines = browser.render(width);
-              const index = lines.findIndex((line: string) => stripVTControlCharacters(line).includes(name));
-              if (resolveAgentColor(color)) expect(lines[index]).toContain(badgeBg);
-              else if (!selected) expect(lines[index]).not.toMatch(/\x1b\[48;/);
-              expect(lines[index]).not.toContain('\x1b[7m');
-              expect(lines[index + 1]).not.toContain(badgeBg);
-              for (const line of [lines[index], lines[index + 1]]) {
-                if (selected) {
-                  expect(line).toStartWith(selectedBg);
-                  expect(visibleWidth(line)).toBe(width);
-                  expect(line).toEndWith('\x1b[49m');
-                  // Badge resets and clipping must immediately restore selection.
-                  for (const reset of line.matchAll(/\x1b\[(?:0|49)m/g)) {
-                    const end = reset.index! + reset[0].length;
-                    if (end < line.length) expect(line.slice(end)).toStartWith(selectedBg);
-                  }
-                } else {
-                  expect(line).not.toStartWith(selectedBg);
-                }
-              }
-              return lines;
-            };
-            const first = checkRow('/review', 'red', true);
-            expect(first.join('')).toContain(theme.fg('error', 'failed'.padEnd(11)));
-            checkRow('/tests', 'red', false);
-            checkRow('/plain', undefined, false);
-            checkRow('/invalid', undefined, false);
-            checkRow('/bad-record', undefined, false);
-            const reads = f.list.mock.calls.length;
-            expect(browser.render(120)).toBe(first);
-            expect(f.list).toHaveBeenCalledTimes(reads);
-            browser.handleInput('j');
-            checkRow('/review', 'red', false);
-            checkRow('/tests', 'red', true);
-            browser.handleInput('j');
-            checkRow('/plain', undefined, true); // Selection also works without an identity color.
-            for (const width of [0, 1, 2, 32, 38, 50, 80, 120])
-              expect(browser.render(width).every((line: string) => visibleWidth(line) <= width)).toBe(true);
-            browser.handleInput('\t');
-            const all = browser.render(120);
-            const otherLine = all.find((line: string) => stripVTControlCharacters(line).includes(other.parentSessionId.slice(-8)));
-            expect(otherLine).toContain(badgeBg);
-            // Theme invalidation changes selection/text, not explicit configured identity RGB.
-            const replacement = nativeTheme(appearance === 'dark' ? 'light' : 'dark', mode);
-            f.ctx.ui.theme = replacement;
-            browser.invalidate();
-            const chosen = browser.render(120).find((line: string) => stripVTControlCharacters(line).startsWith('› '));
-            expect(chosen).toStartWith(backgroundAnsi(replacement.colors.selectedBg, mode));
-            expect(chosen).toContain(badgeBg);
-            browser.handleInput('q');
+    test.each(['dark', 'light'] as const)(
+      'native %s browser uses configured name badges and independent two-line selection',
+      async (appearance) => {
+        await withBrowser(async (f) => {
+          // Keep all-session fixtures newer than unrelated history in this shared directory.
+          const now = Date.now() + 1000;
+          const review = f.put('review', {
+            color: 'red',
+            agentType: 'reviewer',
+            createdAt: now + 500,
+            status: 'failed',
+            lastTaskMessage: 'review preview 中文😀 '.repeat(20),
           });
-        }
-        expect(JSON.parse(fs.readFileSync(review.infoFile, 'utf8')).status).toBe('failed');
-      });
-    });
+          f.put('tests', {
+            color: '#dc2626',
+            agentType: 'reviewer',
+            createdAt: now + 400,
+            lastTaskMessage: 'tests preview',
+          });
+          f.put('plain', { createdAt: now + 300, lastTaskMessage: 'plain preview' });
+          f.put('invalid', {
+            color: 'invalid',
+            createdAt: now + 200,
+            lastTaskMessage: 'invalid preview',
+          });
+          f.put('bad-record', {
+            color: {} as any,
+            createdAt: now + 100,
+            lastTaskMessage: 'malformed preview',
+          });
+          const other = f.put(
+            'review',
+            { color: 'red', agentType: 'reviewer', createdAt: now + 600 },
+            f.otherId,
+          );
+          for (const mode of ['truecolor', '256color'] as const) {
+            const theme = nativeTheme(appearance, mode);
+            f.theme = theme;
+            f.ctx.ui.theme = theme;
+            await f.open((browser: any) => {
+              const selectedBg = backgroundAnsi(theme.colors.selectedBg, mode);
+              const badgeBg = backgroundAnsi(parseColor('#DC2626'), mode);
+              const checkRow = (
+                name: string,
+                color: string | undefined,
+                selected: boolean,
+                width = 120,
+              ) => {
+                const lines = browser.render(width);
+                const index = lines.findIndex((line: string) =>
+                  stripVTControlCharacters(line).includes(name),
+                );
+                if (resolveAgentColor(color)) expect(lines[index]).toContain(badgeBg);
+                else if (!selected) expect(lines[index]).not.toMatch(/\x1b\[48;/);
+                expect(lines[index]).not.toContain('\x1b[7m');
+                expect(lines[index + 1]).not.toContain(badgeBg);
+                for (const line of [lines[index], lines[index + 1]]) {
+                  if (selected) {
+                    expect(line).toStartWith(selectedBg);
+                    expect(visibleWidth(line)).toBe(width);
+                    expect(line).toEndWith('\x1b[49m');
+                    // Badge resets and clipping must immediately restore selection.
+                    for (const reset of line.matchAll(/\x1b\[(?:0|49)m/g)) {
+                      const end = reset.index! + reset[0].length;
+                      if (end < line.length) expect(line.slice(end)).toStartWith(selectedBg);
+                    }
+                  } else {
+                    expect(line).not.toStartWith(selectedBg);
+                  }
+                }
+                return lines;
+              };
+              const first = checkRow('/review', 'red', true);
+              expect(first.join('')).toContain(theme.fg('error', 'failed'.padEnd(11)));
+              checkRow('/tests', 'red', false);
+              checkRow('/plain', undefined, false);
+              checkRow('/invalid', undefined, false);
+              checkRow('/bad-record', undefined, false);
+              const reads = f.list.mock.calls.length;
+              expect(browser.render(120)).toBe(first);
+              expect(f.list).toHaveBeenCalledTimes(reads);
+              browser.handleInput('j');
+              checkRow('/review', 'red', false);
+              checkRow('/tests', 'red', true);
+              browser.handleInput('j');
+              checkRow('/plain', undefined, true); // Selection also works without an identity color.
+              for (const width of [0, 1, 2, 32, 38, 50, 80, 120])
+                expect(
+                  browser.render(width).every((line: string) => visibleWidth(line) <= width),
+                ).toBe(true);
+              browser.handleInput('\t');
+              const all = browser.render(120);
+              const otherLine = all.find((line: string) =>
+                stripVTControlCharacters(line).includes(other.parentSessionId.slice(-8)),
+              );
+              expect(otherLine).toContain(badgeBg);
+              // Theme invalidation changes selection/text, not explicit configured identity RGB.
+              const replacement = nativeTheme(appearance === 'dark' ? 'light' : 'dark', mode);
+              f.ctx.ui.theme = replacement;
+              browser.invalidate();
+              const chosen = browser
+                .render(120)
+                .find((line: string) => stripVTControlCharacters(line).startsWith('› '));
+              expect(chosen).toStartWith(backgroundAnsi(replacement.colors.selectedBg, mode));
+              expect(chosen).toContain(badgeBg);
+              browser.handleInput('q');
+            });
+          }
+          expect(JSON.parse(fs.readFileSync(review.infoFile, 'utf8')).status).toBe('failed');
+        });
+      },
+    );
 
     test('template colors flow through real spawn metadata and snapshots to the widget and browser without template IO', async () => {
       await withBrowser(async (f) => {
@@ -2070,27 +2166,41 @@ describe('extension completion delivery and TUI', () => {
         ] as const;
         fs.mkdirSync(directory, { recursive: true });
         for (const [name, field] of templates)
-          fs.writeFileSync(path.join(directory, name + '.md'), '---\nname: ' + name + '\n' + field + '\n---\n');
+          fs.writeFileSync(
+            path.join(directory, name + '.md'),
+            '---\nname: ' + name + '\n' + field + '\n---\n',
+          );
         const manager = new AgentManager();
         const theme = nativeTheme('dark', '256color');
         f.theme = f.ctx.ui.theme = theme;
         let component: any;
-        const widget = new AgentSummaryWidget(() => manager.getWidgetSnapshot(f.parentId), (error) => { throw error; });
+        const widget = new AgentSummaryWidget(
+          () => manager.getWidgetSnapshot(f.parentId),
+          (error) => {
+            throw error;
+          },
+        );
         f.ctx.ui.setWidget = (_key: string, content: any) => {
           if (typeof content === 'function') component = content(f.tui, theme);
         };
         try {
           for (const [name, , color] of templates) {
             await manager.spawnAgent({
-              task_name: name, message: 'hold end-to-end', agent_type: name, parentSessionId: f.parentId,
-              cwd: TEST_AGENT_DIR, inheritedProvider: 'test', inheritedModelId: 'fake',
+              task_name: name,
+              message: 'hold end-to-end',
+              agent_type: name,
+              parentSessionId: f.parentId,
+              cwd: TEST_AGENT_DIR,
+              inheritedProvider: 'test',
+              inheritedModelId: 'fake',
             });
             expect(manager.getAgentInfo(name, f.parentId).color).toBe(color);
           }
           // Rendering must not rediscover types; their definitions can be gone now.
           for (const [name] of templates) fs.rmSync(path.join(directory, name + '.md'));
           widget.attach(f.ctx);
-          const reads = spyOn(fs, 'readFileSync'), scans = spyOn(fs, 'readdirSync');
+          const reads = spyOn(fs, 'readFileSync'),
+            scans = spyOn(fs, 'readdirSync');
           try {
             const summary = component.render(140);
             expect(summary[1]).toContain(renderAgentBadge('/e2e-colored', theme, 'cyan'));
@@ -2102,22 +2212,32 @@ describe('extension completion delivery and TUI', () => {
             expect(scans).not.toHaveBeenCalled();
             await f.open((browser: any) => {
               const lines = browser.render(120);
-              expect(lines.find((line: string) => stripVTControlCharacters(line).includes('/e2e-colored')))
-                .toContain(renderAgentBadge('/e2e-colored', theme, 'cyan'));
+              expect(
+                lines.find((line: string) =>
+                  stripVTControlCharacters(line).includes('/e2e-colored'),
+                ),
+              ).toContain(renderAgentBadge('/e2e-colored', theme, 'cyan'));
               expect(lines.join('')).toContain('/e2e-invalid');
               expect(lines.join('')).toContain('/e2e-plain');
               browser.handleInput('q');
             });
-            expect(reads.mock.calls.some(([file]) => String(file).startsWith(directory + path.sep))).toBe(false);
+            expect(
+              reads.mock.calls.some(([file]) => String(file).startsWith(directory + path.sep)),
+            ).toBe(false);
             expect(scans.mock.calls.some(([file]) => String(file) === directory)).toBe(false);
           } finally {
-            reads.mockRestore(); scans.mockRestore();
+            reads.mockRestore();
+            scans.mockRestore();
           }
         } finally {
           widget.dispose();
           await manager.shutdown();
-          for (const [name] of templates) fs.rmSync(path.join(directory, name + '.md'), { force: true });
-          fs.rmSync(path.join(getRunsDir(), parentScopeKey(f.parentId)), { recursive: true, force: true });
+          for (const [name] of templates)
+            fs.rmSync(path.join(directory, name + '.md'), { force: true });
+          fs.rmSync(path.join(getRunsDir(), parentScopeKey(f.parentId)), {
+            recursive: true,
+            force: true,
+          });
         }
       });
     });
@@ -2126,7 +2246,8 @@ describe('extension completion delivery and TUI', () => {
       await withBrowser(async (f) => {
         f.put('unsafe', {
           canonicalName: '\x1b[31m/工人😀\x1b[0m\nworker\x07',
-          color: '#0077cc', modelId: '\x1b[31mmodel\x1b[0m\t中文',
+          color: '#0077cc',
+          modelId: '\x1b[31mmodel\x1b[0m\t中文',
           lastTaskMessage: '\x1b]8;;https://unsafe.invalid\x07public preview\x1b]8;;\x07\nmore\x9f',
         });
         f.theme = f.ctx.ui.theme = nativeTheme('light', '256color');
@@ -2722,7 +2843,10 @@ test('six public tools carry native usage through metadata and the detail footer
     expect(await execute('read_agent_response', { target: 'worker' })).toEqual(read);
     expect(sent).toHaveLength(beforeRead);
     const wait = await execute('wait_agent', { targets: ['worker'] });
-    expect(JSON.parse(wait.content[0].text)).toEqual({ agent_name: '/worker', status: 'completed' });
+    expect(JSON.parse(wait.content[0].text)).toEqual({
+      agent_name: '/worker',
+      status: 'completed',
+    });
     expect(sent).toHaveLength(beforeRead);
     expect((await execute('list_agents', {})).content[0].text).not.toContain('contextUsage');
     let detailOpened = 0;

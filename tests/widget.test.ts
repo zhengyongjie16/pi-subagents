@@ -1,6 +1,17 @@
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
-import { InteractiveMode, type ExtensionContext, type Theme } from '@earendil-works/pi-coding-agent';
-import { backgroundAnsi, Loader, parseColor, visibleWidth, type Component, type TUI } from '@earendil-works/pi-tui';
+import {
+  InteractiveMode,
+  type ExtensionContext,
+  type Theme,
+} from '@earendil-works/pi-coding-agent';
+import {
+  backgroundAnsi,
+  Loader,
+  parseColor,
+  visibleWidth,
+  type Component,
+  type TUI,
+} from '@earendil-works/pi-tui';
 import { stripVTControlCharacters } from 'node:util';
 import * as fs from 'node:fs';
 import type { AgentWidgetSnapshot } from '../src/core.js';
@@ -30,7 +41,9 @@ function controlledTimers() {
     timers.delete(handle);
   }) as any);
   return {
-    timers, set, clear,
+    timers,
+    set,
+    clear,
     tick(delay = 200) {
       for (const timer of [...timers.values()]) if (timer.delay === delay) timer.callback();
     },
@@ -42,7 +55,9 @@ function controlledTimers() {
   };
 }
 
-beforeEach(() => { clock = controlledTimers(); });
+beforeEach(() => {
+  clock = controlledTimers();
+});
 afterEach(() => {
   for (const widget of controllers.splice(0)) widget.dispose();
   clock?.restore();
@@ -63,9 +78,15 @@ function controller(
   return widget;
 }
 
-function host(options: { mode?: ExtensionContext['mode']; parentId?: string; rows?: number; theme?: Theme } = {}) {
+function host(
+  options: {
+    mode?: ExtensionContext['mode'];
+    parentId?: string;
+    rows?: number;
+    theme?: Theme;
+  } = {},
+) {
   let component: Widget | undefined;
-  let factory: Factory | undefined;
   const factoryTheme = options.theme ?? plainTheme;
   const requestRender = mock(() => {});
   const tui = { terminal: { rows: options.rows ?? 50 }, requestRender } as unknown as TUI;
@@ -74,27 +95,44 @@ function host(options: { mode?: ExtensionContext['mode']; parentId?: string; row
     component?.dispose?.();
     component = undefined;
     if (typeof content === 'function') {
-      factory = content;
       component = content(tui, factoryTheme);
     }
   });
   const ui = { theme: factoryTheme as Theme | undefined, setWidget };
   const ctx = {
-    mode: options.mode ?? 'tui', hasUI: true, ui,
+    mode: options.mode ?? 'tui',
+    hasUI: true,
+    ui,
     sessionManager: { getSessionId: () => options.parentId ?? 'parent' },
   } as unknown as ExtensionContext;
   return {
-    ctx, ui, tui, setWidget, requestRender, factoryTheme,
-    get component() { return component!; },
-    get factory() { return factory!; },
-    render(width = 140) { return component?.render(width) ?? []; },
-    text(width = 140) { return this.render(width).map(stripVTControlCharacters).join('\n'); },
+    ctx,
+    ui,
+    tui,
+    setWidget,
+    requestRender,
+    factoryTheme,
+    get component() {
+      return component!;
+    },
+    render(width = 140) {
+      return component?.render(width) ?? [];
+    },
+    text(width = 140) {
+      return this.render(width).map(stripVTControlCharacters).join('\n');
+    },
   };
 }
 
 function trackingTheme(accent = 36) {
   const calls: { color: string; text: string }[] = [];
-  const colors: Record<string, number> = { accent, dim: accent + 1, warning: 33, error: 31, success: 32 };
+  const colors: Record<string, number> = {
+    accent,
+    dim: accent + 1,
+    warning: 33,
+    error: 31,
+    success: 32,
+  };
   const theme = {
     fg(color: string, text: string) {
       calls.push({ color, text });
@@ -117,33 +155,44 @@ function expectFit(lines: string[], width: number) {
 
 describe('configured summary badges', () => {
   for (const appearance of ['dark', 'light'] as const) {
-    test.each(['truecolor', '256color'] as const)(`${appearance} name badges fit and keep statistics in %s without row tint`, (mode) => {
-      const theme = nativeTheme(appearance, mode);
-      const f = host({ theme });
-      controller(() => [snapshot({
-        color: 'blue', provider: 'openai-codex', modelId: 'long-model/'.repeat(12), thinking: 'max',
-        tokens: 1000, contextUsage: usage(86), compactionCount: 1, elapsedMs: 12_345,
-        responsePreview: '中文😀'.repeat(100),
-      })]).attach(f.ctx);
-      const open = backgroundAnsi(parseColor('#6A9BCC'), mode);
-      for (const width of [2, 9, 32, 38, 50, 80, 120]) {
-        const lines = f.render(width);
-        expectFit(lines, width);
-        expect(lines).toHaveLength(3);
-        expect(lines[2]).not.toMatch(/\x1b\[48;/);
-        if (width >= 32) {
-          const text = stripVTControlCharacters(lines[1]);
-          for (const stat of ['/max', '1.0k', '86%', '↓1', '12s']) expect(text).toContain(stat);
-          expect(lines[1]).toContain(theme.fg('error', '86%'));
-          expect(lines[1]).toContain(open);
-          expect(lines[1]).not.toContain('\x1b[7m');
+    test.each(['truecolor', '256color'] as const)(
+      `${appearance} name badges fit and keep statistics in %s without row tint`,
+      (mode) => {
+        const theme = nativeTheme(appearance, mode);
+        const f = host({ theme });
+        controller(() => [
+          snapshot({
+            color: 'blue',
+            provider: 'openai-codex',
+            modelId: 'long-model/'.repeat(12),
+            thinking: 'max',
+            tokens: 1000,
+            contextUsage: usage(86),
+            compactionCount: 1,
+            elapsedMs: 12_345,
+            responsePreview: '中文😀'.repeat(100),
+          }),
+        ]).attach(f.ctx);
+        const open = backgroundAnsi(parseColor('#6A9BCC'), mode);
+        for (const width of [2, 9, 32, 38, 50, 80, 120]) {
+          const lines = f.render(width);
+          expectFit(lines, width);
+          expect(lines).toHaveLength(3);
+          expect(lines[2]).not.toMatch(/\x1b\[48;/);
+          if (width >= 32) {
+            const text = stripVTControlCharacters(lines[1]);
+            for (const stat of ['/max', '1.0k', '86%', '↓1', '12s']) expect(text).toContain(stat);
+            expect(lines[1]).toContain(theme.fg('error', '86%'));
+            expect(lines[1]).toContain(open);
+            expect(lines[1]).not.toContain('\x1b[7m');
+          }
         }
-      }
-      expect(f.render(0)).toEqual([]);
-      expect(f.render(1)).toHaveLength(1);
-      expect(clock!.timers.size).toBe(2);
-      expect(f.setWidget).toHaveBeenCalledTimes(1);
-    });
+        expect(f.render(0)).toEqual([]);
+        expect(f.render(1)).toHaveLength(1);
+        expect(clock!.timers.size).toBe(2);
+        expect(f.setWidget).toHaveBeenCalledTimes(1);
+      },
+    );
   }
 
   test('shared template colors survive removal and theme invalidation without sampling, IO or remounting', () => {
@@ -171,7 +220,8 @@ describe('configured summary badges', () => {
     expect(getSnapshots).toHaveBeenCalledTimes(samples);
     expect(f.setWidget).toHaveBeenCalledTimes(1);
     expect(clock!.timers.size).toBe(2);
-    const reads = spyOn(fs, 'readFileSync'), scans = spyOn(fs, 'readdirSync');
+    const reads = spyOn(fs, 'readFileSync'),
+      scans = spyOn(fs, 'readdirSync');
     try {
       for (let frame = 0; frame < 5; frame++) {
         clock!.tick();
@@ -180,7 +230,8 @@ describe('configured summary badges', () => {
       expect(reads).not.toHaveBeenCalled();
       expect(scans).not.toHaveBeenCalled();
     } finally {
-      reads.mockRestore(); scans.mockRestore();
+      reads.mockRestore();
+      scans.mockRestore();
     }
     agents = [];
     widget.refresh();
@@ -188,16 +239,21 @@ describe('configured summary badges', () => {
     expect(f.render()).toEqual([]);
   });
 
-  test.each([undefined, 'invalid', '#123', null, {}, 12])('missing/invalid snapshot color %j keeps both lines and ordinary themed names', (color) => {
-    const theme = nativeTheme('dark');
-    const f = host({ theme });
-    controller(() => [snapshot({ color: color as any, responsePreview: 'plain activity' })]).attach(f.ctx);
-    const lines = f.render();
-    expect(lines).toHaveLength(3);
-    expect(lines[1]).toContain(theme.fg('accent', '/worker'));
-    expect(lines[2]).toContain('plain activity');
-    expect(lines.join('')).not.toMatch(/\x1b\[48;/);
-  });
+  test.each([undefined, 'invalid', '#123', null, {}, 12])(
+    'missing/invalid snapshot color %j keeps both lines and ordinary themed names',
+    (color) => {
+      const theme = nativeTheme('dark');
+      const f = host({ theme });
+      controller(() => [
+        snapshot({ color: color as any, responsePreview: 'plain activity' }),
+      ]).attach(f.ctx);
+      const lines = f.render();
+      expect(lines).toHaveLength(3);
+      expect(lines[1]).toContain(theme.fg('accent', '/worker'));
+      expect(lines[2]).toContain('plain activity');
+      expect(lines.join('')).not.toMatch(/\x1b\[48;/);
+    },
+  );
 });
 
 describe('summary content', () => {
@@ -222,12 +278,31 @@ describe('summary content', () => {
 
   test('renders the agreed title, combined model metadata, cumulative tokens and this-run seconds only', () => {
     const agent = snapshot({
-      provider: 'openai-codex', modelId: 'gpt-6.1-sol', thinking: 'max',
-      tokens: 33_800, contextUsage: usage(62), compactionCount: 1, elapsedMs: 12_345,
-      activeTools: Object.freeze(['read', 'read', 'edit']), responsePreview: 'hidden while tools run',
+      provider: 'openai-codex',
+      modelId: 'gpt-6.1-sol',
+      thinking: 'max',
+      tokens: 33_800,
+      contextUsage: usage(62),
+      compactionCount: 1,
+      elapsedMs: 12_345,
+      activeTools: Object.freeze(['read', 'read', 'edit']),
+      responsePreview: 'hidden while tools run',
     });
-    for (const key of ['description', 'lastTaskMessage', 'turns', 'turnCount', 'toolUses', 'cost', 'args', 'messages'])
-      Object.defineProperty(agent, key, { get() { throw new Error('Must not read ' + key); } });
+    for (const key of [
+      'description',
+      'lastTaskMessage',
+      'turns',
+      'turnCount',
+      'toolUses',
+      'cost',
+      'args',
+      'messages',
+    ])
+      Object.defineProperty(agent, key, {
+        get() {
+          throw new Error('Must not read ' + key);
+        },
+      });
     Object.freeze(agent);
     const errors = mock((_error: unknown) => {});
     const f = host();
@@ -250,9 +325,18 @@ describe('summary content', () => {
     const widget = controller(() => [agent]);
     widget.attach(f.ctx);
     for (const [elapsedMs, seconds] of [
-      [0, 0], [0.5, 0], [999, 0], [1000, 1], [1999, 1], [12_345, 12],
-      [59_999, 59], [60_000, 60], [undefined, undefined], [-1, undefined],
-      [NaN, undefined], [Infinity, undefined],
+      [0, 0],
+      [0.5, 0],
+      [999, 0],
+      [1000, 1],
+      [1999, 1],
+      [12_345, 12],
+      [59_999, 59],
+      [60_000, 60],
+      [undefined, undefined],
+      [-1, undefined],
+      [NaN, undefined],
+      [Infinity, undefined],
     ] as const) {
       agent = snapshot({ elapsedMs });
       widget.refresh();
@@ -274,7 +358,10 @@ describe('summary content', () => {
       [{ status: 'starting', activeTools: ['read'], responsePreview: 'not yet' }, 'initializing…'],
       [{ activeTools: ['bash', 'powershell', 'read', 'read'] }, 'running command, reading…'],
       [{ activeTools: ['\x1b[31mmcp__search\x1b[0m\x07\nname'] }, 'mcp__search name…'],
-      [{ responsePreview: '\n\x1b[31m\x1b[0m\n  First public line  \r\nDO NOT SHOW SECOND' }, 'First public line'],
+      [
+        { responsePreview: '\n\x1b[31m\x1b[0m\n  First public line  \r\nDO NOT SHOW SECOND' },
+        'First public line',
+      ],
       [{ responsePreview: '\n  \t\n' }, 'thinking…'],
       [{}, 'thinking…'],
     ] as const) {
@@ -293,9 +380,14 @@ describe('summary content', () => {
     const widget = controller(() => [agent]);
     widget.attach(f.ctx);
     for (const [name, label] of [
-      ['read', 'reading'], ['write', 'writing'], ['edit', 'editing'],
-      ['bash', 'running command'], ['powershell', 'running command'],
-      ['grep', 'searching'], ['find', 'finding files'], ['ls', 'listing'],
+      ['read', 'reading'],
+      ['write', 'writing'],
+      ['edit', 'editing'],
+      ['bash', 'running command'],
+      ['powershell', 'running command'],
+      ['grep', 'searching'],
+      ['find', 'finding files'],
+      ['ls', 'listing'],
       ['codemode', 'using codemode'],
     ]) {
       agent = snapshot({ activeTools: [name] });
@@ -310,23 +402,43 @@ describe('summary content', () => {
     const widget = controller(() => [agent]);
     widget.attach(f.ctx);
     for (const name of [
-      'ffgrep', 'fffind', 'spawn_agent', 'wait_agent', 'send_message',
-      'read_agent_response', 'interrupt_agent', 'list_agents', 'my_new_extension_tool',
-      'mcp__github__search_issues', 'mcp__files__read', 'extension.read',
-      'Read', 'GREP', 'FFGrep', 'CodeMode', 'mcp__custom__codemode', 'toString',
+      'ffgrep',
+      'fffind',
+      'spawn_agent',
+      'wait_agent',
+      'send_message',
+      'read_agent_response',
+      'interrupt_agent',
+      'list_agents',
+      'my_new_extension_tool',
+      'mcp__github__search_issues',
+      'mcp__files__read',
+      'extension.read',
+      'Read',
+      'GREP',
+      'FFGrep',
+      'CodeMode',
+      'mcp__custom__codemode',
+      'toString',
     ]) {
       agent = snapshot({ activeTools: [name] });
       widget.refresh();
       expect(f.render()[2]).toEndWith(name + '…');
     }
-    agent = snapshot({ activeTools: ['grep', 'ffgrep', 'Read', 'Read', 'codemode', 'mcp__files__read'] });
+    agent = snapshot({
+      activeTools: ['grep', 'ffgrep', 'Read', 'Read', 'codemode', 'mcp__files__read'],
+    });
     widget.refresh();
     expect(f.render()[2]).toEndWith('searching, ffgrep, Read, using codemode, mcp__files__read…');
   });
 
   test('missing metadata is omitted and model IDs are never reverse-parsed', () => {
     let agent = snapshot();
-    Object.defineProperty(agent, 'model', { get() { throw new Error('legacy model field'); } });
+    Object.defineProperty(agent, 'model', {
+      get() {
+        throw new Error('legacy model field');
+      },
+    });
     const f = host();
     const widget = controller(() => [agent]);
     widget.attach(f.ctx);
@@ -346,8 +458,12 @@ describe('summary content', () => {
     const widget = controller(() => [agent]);
     widget.attach(f.ctx);
     for (const [tokens, expected] of [
-      [1, '1 token'], [999, '999 token'], [1000, '1.0k token'],
-      [33_800, '33.8k token'], [1_000_000, '1.0M token'], [1_250_000, '1.3M token'],
+      [1, '1 token'],
+      [999, '999 token'],
+      [1000, '1.0k token'],
+      [33_800, '33.8k token'],
+      [1_000_000, '1.0M token'],
+      [1_250_000, '1.3M token'],
     ] as const) {
       agent = snapshot({ tokens, elapsedMs: 0 });
       widget.refresh();
@@ -360,8 +476,10 @@ describe('summary content', () => {
       expect(f.render()[1]).not.toMatch(/token|%|↓/);
     }
     for (const [percent, compactionCount, expected] of [
-      [0, 0, '1.0k token (0%)'], [null, 2, '1.0k token (↓2)'],
-      [62, 1, '1.0k token (62% · ↓1)'], [null, 0, '1.0k token'],
+      [0, 0, '1.0k token (0%)'],
+      [null, 2, '1.0k token (↓2)'],
+      [62, 1, '1.0k token (62% · ↓1)'],
+      [null, 0, '1.0k token'],
     ] as const) {
       agent = snapshot({ tokens: 1000, contextUsage: usage(percent), compactionCount });
       widget.refresh();
@@ -374,10 +492,18 @@ describe('summary content', () => {
   test('renders compact compaction markers with single and multi-digit counts in narrow and wide rows', () => {
     let compactionCount = 1;
     const f = host({ theme: nativeTheme('dark') });
-    const widget = controller(() => [snapshot({
-      color: 'blue', provider: 'provider', modelId: 'long-model/'.repeat(12), thinking: 'max',
-      tokens: 1000, contextUsage: usage(62), elapsedMs: 12_345, compactionCount,
-    })]);
+    const widget = controller(() => [
+      snapshot({
+        color: 'blue',
+        provider: 'provider',
+        modelId: 'long-model/'.repeat(12),
+        thinking: 'max',
+        tokens: 1000,
+        contextUsage: usage(62),
+        elapsedMs: 12_345,
+        compactionCount,
+      }),
+    ]);
     widget.attach(f.ctx);
     for (compactionCount of [1, 12, 123]) {
       widget.refresh();
@@ -399,7 +525,14 @@ describe('summary content', () => {
     const f = host({ theme });
     const widget = controller(() => [snapshot({ tokens: 1000, contextUsage: usage(percent) })]);
     widget.attach(f.ctx);
-    for (const [value, color] of [[0, 'dim'], [69.6, 'dim'], [70, 'warning'], [84.6, 'warning'], [85, 'error'], [120, 'error']] as const) {
+    for (const [value, color] of [
+      [0, 'dim'],
+      [69.6, 'dim'],
+      [70, 'warning'],
+      [84.6, 'warning'],
+      [85, 'error'],
+      [120, 'error'],
+    ] as const) {
       percent = value;
       widget.refresh();
       calls.length = 0;
@@ -410,10 +543,17 @@ describe('summary content', () => {
 
   test('truncates the model before /thinking or statistics, including compact narrow rows', () => {
     const f = host();
-    controller(() => [snapshot({
-      provider: 'openai-codex', modelId: 'very-long-model-name/'.repeat(20), thinking: 'max',
-      tokens: 1000, contextUsage: usage(0), compactionCount: 1, elapsedMs: 12_345,
-    })]).attach(f.ctx);
+    controller(() => [
+      snapshot({
+        provider: 'openai-codex',
+        modelId: 'very-long-model-name/'.repeat(20),
+        thinking: 'max',
+        tokens: 1000,
+        contextUsage: usage(0),
+        compactionCount: 1,
+        elapsedMs: 12_345,
+      }),
+    ]).attach(f.ctx);
     for (const width of [32, 80, 120, 140]) {
       const lines = f.render(width);
       expectFit(lines, width);
@@ -429,13 +569,20 @@ describe('summary content', () => {
   test('sanitizes ANSI, hyperlinks, C0/C1 and multiline Unicode before theming and fits every line', () => {
     const { theme, calls } = trackingTheme();
     const f = host({ theme });
-    controller(() => [snapshot({
-      canonicalName: '\x1b[31m/工人👩🏽‍💻e\u0301\x1b[0m\n\x07\x9fworker',
-      provider: '\x1b]8;;https://example.com\x07代理\x1b]8;;\x07',
-      modelId: '模型\t👨‍👩‍👧‍👦'.repeat(12), thinking: 'high',
-      tokens: 33_800, contextUsage: usage(69.6), compactionCount: 2, elapsedMs: 1234,
-      responsePreview: '\n\x1b[31m\x1b[0m\n\x1b]8;;https://example.com\x07public 中文 👩🏽‍💻\x1b]8;;\x07\x00\x85SECOND',
-    })]).attach(f.ctx);
+    controller(() => [
+      snapshot({
+        canonicalName: '\x1b[31m/工人👩🏽‍💻e\u0301\x1b[0m\n\x07\x9fworker',
+        provider: '\x1b]8;;https://example.com\x07代理\x1b]8;;\x07',
+        modelId: '模型\t👨‍👩‍👧‍👦'.repeat(12),
+        thinking: 'high',
+        tokens: 33_800,
+        contextUsage: usage(69.6),
+        compactionCount: 2,
+        elapsedMs: 1234,
+        responsePreview:
+          '\n\x1b[31m\x1b[0m\n\x1b]8;;https://example.com\x07public 中文 👩🏽‍💻\x1b]8;;\x07\x00\x85SECOND',
+      }),
+    ]).attach(f.ctx);
     for (const width of [0, 1, 32, 80, 120]) {
       calls.length = 0;
       const lines = f.render(width);
@@ -461,7 +608,9 @@ describe('summary content', () => {
     const first = trackingTheme(36);
     const second = trackingTheme(34);
     const f = host({ theme: first.theme });
-    const getSnapshots = mock(() => [snapshot({ provider: 'p', modelId: 'm', thinking: 'high', tokens: 1000 })]);
+    const getSnapshots = mock(() => [
+      snapshot({ provider: 'p', modelId: 'm', thinking: 'high', tokens: 1000 }),
+    ]);
     controller(getSnapshots).attach(f.ctx);
     expect(f.render().join('')).toContain('\x1b[36m');
     const samples = getSnapshots.mock.calls.length;
@@ -479,54 +628,77 @@ describe('summary content', () => {
 
 describe('session status summary', () => {
   for (const appearance of ['dark', 'light'] as const) {
-    test.each(['truecolor', '256color'] as const)(`${appearance} heading keeps each original status color in %s`, (mode) => {
-      const theme = nativeTheme(appearance, mode);
-      let agents = [snapshot()];
-      let counts = { running: 2, completed: 3, failed: 1, interrupted: 1 };
-      const source = mock(() => agents);
-      const widget = controller(source, mock((_error: unknown) => {}), () => counts);
-      const f = host({ theme });
-      widget.attach(f.ctx);
-      const checkColors = (current: Theme) => {
-        const line = f.render(140)[0];
-        const active = counts.running > 0;
-        expect(line).toContain(current.fg(active ? 'accent' : 'dim', active ? '● Agents' : '○ Agents'));
-        for (const [status, color] of [
-          ['running', 'warning'], ['completed', 'success'], ['failed', 'error'], ['interrupted', 'warning'],
-        ] as const) {
-          if (counts[status]) expect(line).toContain(current.fg(color, `${counts[status]} ${status}`));
+    test.each(['truecolor', '256color'] as const)(
+      `${appearance} heading keeps each original status color in %s`,
+      (mode) => {
+        const theme = nativeTheme(appearance, mode);
+        let agents = [snapshot()];
+        let counts = { running: 2, completed: 3, failed: 1, interrupted: 1 };
+        const source = mock(() => agents);
+        const widget = controller(
+          source,
+          mock((_error: unknown) => {}),
+          () => counts,
+        );
+        const f = host({ theme });
+        widget.attach(f.ctx);
+        const checkColors = (current: Theme) => {
+          const line = f.render(140)[0];
+          const active = counts.running > 0;
+          expect(line).toContain(
+            current.fg(active ? 'accent' : 'dim', active ? '● Agents' : '○ Agents'),
+          );
+          for (const [status, color] of [
+            ['running', 'warning'],
+            ['completed', 'success'],
+            ['failed', 'error'],
+            ['interrupted', 'warning'],
+          ] as const) {
+            if (counts[status])
+              expect(line).toContain(current.fg(color, `${counts[status]} ${status}`));
+          }
+          expect(line).toEndWith(current.fg(active ? 'accent' : 'dim', ' · /subagents'));
+        };
+        checkColors(theme);
+        for (const width of [0, 1, 9, 10, 22, 32, 60, 80, 120]) {
+          expectFit(f.render(width), width);
+          if (width >= 10) expect(f.text(width).split('\n')[0]).toContain('/subagents');
         }
-        expect(line).toEndWith(current.fg(active ? 'accent' : 'dim', ' · /subagents'));
-      };
-      checkColors(theme);
-      for (const width of [0, 1, 9, 10, 22, 32, 60, 80, 120]) {
-        expectFit(f.render(width), width);
-        if (width >= 10) expect(f.text(width).split('\n')[0]).toContain('/subagents');
-      }
-      const samples = source.mock.calls.length;
-      const replacement = nativeTheme(appearance === 'dark' ? 'light' : 'dark', mode);
-      f.ui.theme = replacement;
-      f.component.invalidate();
-      checkColors(replacement);
-      expect(source).toHaveBeenCalledTimes(samples);
-      expect(f.setWidget).toHaveBeenCalledTimes(1);
-      agents = [];
-      counts = { ...counts, running: 0 };
-      widget.refresh();
-      checkColors(replacement);
-      expect(f.render()).toHaveLength(1);
-      expect(clock!.timers.size).toBe(0);
-    });
+        const samples = source.mock.calls.length;
+        const replacement = nativeTheme(appearance === 'dark' ? 'light' : 'dark', mode);
+        f.ui.theme = replacement;
+        f.component.invalidate();
+        checkColors(replacement);
+        expect(source).toHaveBeenCalledTimes(samples);
+        expect(f.setWidget).toHaveBeenCalledTimes(1);
+        agents = [];
+        counts = { ...counts, running: 0 };
+        widget.refresh();
+        checkColors(replacement);
+        expect(f.render()).toHaveLength(1);
+        expect(clock!.timers.size).toBe(0);
+      },
+    );
   }
 
   test('shows all nonzero statuses while only active agents get detail rows', () => {
-    let agents = [snapshot(), snapshot({ canonicalName: '/second' }), snapshot({ canonicalName: '/third', status: 'starting' })];
+    let agents = [
+      snapshot(),
+      snapshot({ canonicalName: '/second' }),
+      snapshot({ canonicalName: '/third', status: 'starting' }),
+    ];
     let counts = { running: 3, completed: 3, failed: 3, interrupted: 3 };
     const source = mock(() => agents);
     const f = host();
-    const widget = controller(source, mock((_error: unknown) => {}), () => counts);
+    const widget = controller(
+      source,
+      mock((_error: unknown) => {}),
+      () => counts,
+    );
     widget.attach(f.ctx);
-    expect(f.render()[0]).toBe('● Agents · 3 running · 3 completed · 3 failed · 3 interrupted · /subagents');
+    expect(f.render()[0]).toBe(
+      '● Agents · 3 running · 3 completed · 3 failed · 3 interrupted · /subagents',
+    );
     expect(f.render()).toHaveLength(7);
     const component = f.component;
     const staleTick = [...clock!.timers.values()][0].callback;
@@ -551,7 +723,11 @@ describe('session status summary', () => {
     let agents: AgentWidgetSnapshot[] = [];
     let counts = { running: 0, completed: 2, failed: 0, interrupted: 0 };
     const f = host();
-    const widget = controller(() => agents, mock((_error: unknown) => {}), () => counts);
+    const widget = controller(
+      () => agents,
+      mock((_error: unknown) => {}),
+      () => counts,
+    );
     widget.attach(f.ctx);
     expect(f.render()).toEqual(['○ Agents · 2 completed · /subagents']);
     expect(clock!.set).not.toHaveBeenCalled();
@@ -576,7 +752,9 @@ describe('session status summary', () => {
       () => ({ running: 6, completed: 100, failed: 1, interrupted: 1 }),
     ).attach(f.ctx);
     const lines = f.render(140);
-    expect(lines[0]).toBe('● Agents · 6 running · 100 completed · 1 failed · 1 interrupted · /subagents');
+    expect(lines[0]).toBe(
+      '● Agents · 6 running · 100 completed · 1 failed · 1 interrupted · /subagents',
+    );
     expect(lines).toHaveLength(12);
     expect(lines[11]).toContain('+1 more');
   });
@@ -587,10 +765,14 @@ describe('session status summary', () => {
     let fail = false;
     const errors = mock((_error: unknown) => {});
     const f = host();
-    const widget = controller(() => agents, errors, () => {
-      if (fail) throw new Error('status source failed');
-      return counts;
-    });
+    const widget = controller(
+      () => agents,
+      errors,
+      () => {
+        if (fail) throw new Error('status source failed');
+        return counts;
+      },
+    );
     widget.attach(f.ctx);
     agents = [];
     counts = { running: 0, completed: 1, failed: 0, interrupted: 0 };
@@ -609,10 +791,14 @@ describe('session status summary', () => {
   test('parent changes discard old settled counts even if the new source temporarily fails', () => {
     const f = host();
     let fail = false;
-    const widget = controller(() => [], mock((_error: unknown) => {}), () => {
-      if (fail) throw new Error('new parent unavailable');
-      return { running: 0, completed: 7, failed: 0, interrupted: 0 };
-    });
+    const widget = controller(
+      () => [],
+      mock((_error: unknown) => {}),
+      () => {
+        if (fail) throw new Error('new parent unavailable');
+        return { running: 0, completed: 7, failed: 0, interrupted: 0 };
+      },
+    );
     widget.attach(f.ctx);
     expect(f.text()).toContain('7 completed');
     fail = true;
@@ -630,7 +816,9 @@ describe('layout budgets', () => {
   test('five agents occupy 11 lines and six reserve an overflow line instead of a four-agent cap', () => {
     let count = 1;
     const f = host();
-    const widget = controller(() => Array.from({ length: count }, (_, i) => snapshot({ canonicalName: '/worker' + i })));
+    const widget = controller(() =>
+      Array.from({ length: count }, (_, i) => snapshot({ canonicalName: '/worker' + i })),
+    );
     widget.attach(f.ctx);
     for (count = 1; count <= 8; count++) {
       widget.refresh();
@@ -651,7 +839,9 @@ describe('layout budgets', () => {
 
   test('short terminals preserve the /subagents hint and reserve parent editor space', () => {
     const f = host();
-    controller(() => Array.from({ length: 6 }, (_, i) => snapshot({ canonicalName: '/worker' + i }))).attach(f.ctx);
+    controller(() =>
+      Array.from({ length: 6 }, (_, i) => snapshot({ canonicalName: '/worker' + i })),
+    ).attach(f.ctx);
     for (const rows of [0, 1, 4, 10, 11, 12, 13, 16, 20, 24]) {
       (f.tui.terminal as any).rows = rows;
       const lines = f.render(80);
@@ -669,7 +859,9 @@ describe('layout budgets', () => {
 describe('native spinner clock', () => {
   test('matches native Loader frames and cadence without sampling on animation ticks or advancing on refresh', () => {
     class NativeProbe extends Loader {
-      frame() { return this.getRenderedIndicator(); }
+      frame() {
+        return this.getRenderedIndicator();
+      }
     }
     const f = host();
     const source = mock(() => [snapshot(), snapshot({ canonicalName: '/second' })]);
@@ -682,7 +874,12 @@ describe('native spinner clock', () => {
     // Two agents share one native animation timer, not one timer per row.
     expect(clock!.timers.size).toBe(2);
     const previous = new Set(clock!.timers.keys());
-    const native = new NativeProbe(f.tui, (text) => text, (text) => text, 'Working');
+    const native = new NativeProbe(
+      f.tui,
+      (text) => text,
+      (text) => text,
+      'Working',
+    );
     const nativeTimer = [...clock!.timers].find(([key]) => !previous.has(key))![1];
     try {
       expect(animation.delay).toBe(nativeTimer.delay);
@@ -720,7 +917,11 @@ describe('native spinner clock', () => {
     let agents: AgentWidgetSnapshot[] = [];
     let counts = { running: 1, completed: 0, failed: 0, interrupted: 0 };
     const source = mock(() => agents);
-    const widget = controller(source, mock((_error: unknown) => {}), () => counts);
+    const widget = controller(
+      source,
+      mock((_error: unknown) => {}),
+      () => counts,
+    );
     const f = host();
     widget.attach(f.ctx);
     expect([...clock!.timers.values()].map((timer) => timer.delay)).toEqual([200]);
@@ -784,12 +985,17 @@ describe('widget and timer lifecycle', () => {
       return [snapshot({ provider: 'openai-codex', modelId: 'gpt-6.1-sol', thinking })];
     });
     const f = host();
-    f.requestRender.mockImplementation(() => { order.push('render'); });
+    f.requestRender.mockImplementation(() => {
+      order.push('render');
+    });
     const widget = controller(getSnapshots);
     widget.attach(f.ctx);
     const component = f.component;
     const samples = getSnapshots.mock.calls.length;
-    for (let i = 0; i < 4; i++) { component.invalidate(); component.render(80); }
+    for (let i = 0; i < 4; i++) {
+      component.invalidate();
+      component.render(80);
+    }
     expect(getSnapshots).toHaveBeenCalledTimes(samples);
     const setWidget = mock((...args: Parameters<typeof f.setWidget>) => f.setWidget(...args));
     widget.attach({ ...f.ctx, ui: { ...f.ui, setWidget } } as unknown as ExtensionContext);
@@ -836,11 +1042,15 @@ describe('widget and timer lifecycle', () => {
     const f = host();
     const native = {
       extensionWidgetsAbove: new Map<string, Widget>(),
-      extensionWidgetsBelow: new Map<string, Widget>(), ui: f.tui, renderWidgets: mock(() => {}),
+      extensionWidgetsBelow: new Map<string, Widget>(),
+      ui: f.tui,
+      renderWidgets: mock(() => {}),
     };
     const set = (InteractiveMode.prototype as any).setExtensionWidget;
     const clear = (InteractiveMode.prototype as any).clearExtensionWidgets;
-    const setWidget = mock((key: string, content: Content, options?: object) => set.call(native, key, content, options));
+    const setWidget = mock((key: string, content: Content, options?: object) =>
+      set.call(native, key, content, options),
+    );
     f.ui.setWidget = setWidget as any;
     const widget = controller(() => [snapshot()]);
     widget.attach(f.ctx);
@@ -952,10 +1162,17 @@ describe('widget and timer lifecycle', () => {
     clock = undefined;
     let thinking: 'max' | 'high' = 'max';
     const f = host();
-    const widget = controller(() => [snapshot({
-      provider: 'openai-codex', modelId: 'gpt-6.1-sol', thinking,
-      tokens: 33_800, contextUsage: usage(62), compactionCount: 1, elapsedMs: 12_345,
-    })]);
+    const widget = controller(() => [
+      snapshot({
+        provider: 'openai-codex',
+        modelId: 'gpt-6.1-sol',
+        thinking,
+        tokens: 33_800,
+        contextUsage: usage(62),
+        compactionCount: 1,
+        elapsedMs: 12_345,
+      }),
+    ]);
     widget.attach(f.ctx);
     expect(f.text()).toContain('openai-codex/gpt-6.1-sol/max');
     thinking = 'high';
@@ -1013,7 +1230,9 @@ describe('mode guards', () => {
 describe('exception isolation and recovery', () => {
   test('a first-sample failure automatically recovers on the same retry timer without external events', () => {
     let attempts = 0;
-    let agents: readonly AgentWidgetSnapshot[] = [snapshot({ responsePreview: 'automatic recovery' })];
+    let agents: readonly AgentWidgetSnapshot[] = [
+      snapshot({ responsePreview: 'automatic recovery' }),
+    ];
     const getSnapshots = mock(() => {
       if (++attempts === 1) throw new Error('first sample failed');
       return agents;
@@ -1082,7 +1301,9 @@ describe('exception isolation and recovery', () => {
   test('unmounted retry timers stop in every non-TUI mode and stale retry callbacks cannot revive them', () => {
     for (const mode of ['rpc', 'json', 'print'] as const) {
       for (const change of ['attach', 'mutate'] as const) {
-        const getSnapshots = mock((): readonly AgentWidgetSnapshot[] => { throw new Error('offline source'); });
+        const getSnapshots = mock((): readonly AgentWidgetSnapshot[] => {
+          throw new Error('offline source');
+        });
         const f = host();
         const next = host({ mode });
         const widget = controller(getSnapshots);
@@ -1145,7 +1366,11 @@ describe('exception isolation and recovery', () => {
       throw new Error('diagnostic failed');
     });
     controller(() => [snapshot()], errors).attach(f.ctx);
-    f.ui.theme = { fg() { throw new Error('bad theme'); } } as unknown as Theme;
+    f.ui.theme = {
+      fg() {
+        throw new Error('bad theme');
+      },
+    } as unknown as Theme;
     expect(() => f.render()).not.toThrow();
     for (let i = 0; i < 5; i++) {
       clock!.tick(); // Successful sampling must not reset the rendering fault cycle.
@@ -1155,7 +1380,11 @@ describe('exception isolation and recovery', () => {
     expect(errors).toHaveBeenCalledTimes(1);
     f.ui.theme = plainTheme;
     expect(f.render()).toHaveLength(3);
-    f.ui.theme = { fg() { throw new Error('bad theme again'); } } as unknown as Theme;
+    f.ui.theme = {
+      fg() {
+        throw new Error('bad theme again');
+      },
+    } as unknown as Theme;
     for (let i = 0; i < 5; i++) expect(f.render(80)).toEqual(['/subagents']);
     expect(errors).toHaveBeenCalledTimes(2);
     expect(f.setWidget).toHaveBeenCalledTimes(1);
@@ -1170,7 +1399,9 @@ describe('exception isolation and recovery', () => {
         else f.ctx.mode = 'rpc';
         throw new Error('diagnostic failed');
       });
-      widget = controller(() => { throw new Error('first source failure'); }, errors);
+      widget = controller(() => {
+        throw new Error('first source failure');
+      }, errors);
       expect(() => widget.attach(f.ctx)).not.toThrow();
       expect(clock!.timers.size).toBe(0);
       expect(f.setWidget).not.toHaveBeenCalled();
@@ -1212,13 +1443,21 @@ describe('exception isolation and recovery', () => {
     const f = host();
     const widget = controller(() => [agent], errors);
     widget.attach(f.ctx);
-    f.ui.theme = { fg() { throw new Error('theme failure'); } } as unknown as Theme;
+    f.ui.theme = {
+      fg() {
+        throw new Error('theme failure');
+      },
+    } as unknown as Theme;
     expect(f.render(32)).toEqual(['/subagents']);
     f.component.invalidate();
     f.ui.theme = plainTheme;
     expect(f.render(32)).toHaveLength(3);
     agent = snapshot();
-    Object.defineProperty(agent, 'tokens', { get() { throw new Error('stats getter'); } });
+    Object.defineProperty(agent, 'tokens', {
+      get() {
+        throw new Error('stats getter');
+      },
+    });
     widget.refresh();
     expect(f.render(80)).toEqual(['/subagents']);
     agent = snapshot({ tokens: 1000 });
@@ -1230,15 +1469,21 @@ describe('exception isolation and recovery', () => {
 
   test('attach and mounting exceptions never escape, including a throwing error reporter, and mounting can retry', () => {
     const failure = new Error('attach failure');
-    const errors = mock((_error: unknown) => { throw new Error('reporter failure'); });
+    const errors = mock((_error: unknown) => {
+      throw new Error('reporter failure');
+    });
     const widget = controller(() => [snapshot()], errors);
     const bad = host();
-    bad.ctx.sessionManager.getSessionId = () => { throw failure; };
+    bad.ctx.sessionManager.getSessionId = () => {
+      throw failure;
+    };
     expect(() => widget.attach(bad.ctx)).not.toThrow();
     expect(clock!.timers.size).toBe(0);
     const f = host();
     const setWidget = f.ui.setWidget;
-    f.ui.setWidget = mock(() => { throw new Error('mount failure'); });
+    f.ui.setWidget = mock(() => {
+      throw new Error('mount failure');
+    });
     expect(() => widget.attach(f.ctx)).not.toThrow();
     expect(clock!.timers.size).toBe(0);
     f.ui.setWidget = setWidget;
@@ -1250,17 +1495,25 @@ describe('exception isolation and recovery', () => {
 
   test('render and timer diagnostics can throw without escaping into SDK callbacks', () => {
     let fail = false;
-    const errors = mock((_error: unknown) => { throw new Error('reporter failure'); });
+    const errors = mock((_error: unknown) => {
+      throw new Error('reporter failure');
+    });
     const widget = controller(() => {
       if (fail) throw new Error('snapshot failure');
       return [snapshot()];
     }, errors);
     const f = host();
     widget.attach(f.ctx);
-    f.requestRender.mockImplementation(() => { throw new Error('requestRender failure'); });
+    f.requestRender.mockImplementation(() => {
+      throw new Error('requestRender failure');
+    });
     fail = true;
     expect(() => clock!.tick()).not.toThrow();
-    f.ui.theme = { fg() { throw new Error('render failure'); } } as unknown as Theme;
+    f.ui.theme = {
+      fg() {
+        throw new Error('render failure');
+      },
+    } as unknown as Theme;
     expect(() => f.component.invalidate()).not.toThrow();
     expect(() => f.render(1)).not.toThrow();
     expectFit(f.render(1), 1);
@@ -1273,7 +1526,9 @@ describe('exception isolation and recovery', () => {
 
   test('a throwing clear still frees resources first and cannot prevent the caller manager shutdown', () => {
     const f = host();
-    const errors = mock((_error: unknown) => { throw new Error('reporter failure'); });
+    const errors = mock((_error: unknown) => {
+      throw new Error('reporter failure');
+    });
     const widget = controller(() => [snapshot()], errors);
     widget.attach(f.ctx);
     const component = f.component;
@@ -1283,7 +1538,10 @@ describe('exception isolation and recovery', () => {
       throw new Error('SDK clear failure');
     });
     const shutdown = mock(() => {});
-    expect(() => { widget.dispose(); shutdown(); }).not.toThrow();
+    expect(() => {
+      widget.dispose();
+      shutdown();
+    }).not.toThrow();
     expect(shutdown).toHaveBeenCalledTimes(1);
     expect(clock!.timers.size).toBe(0);
     widget.dispose();
@@ -1297,7 +1555,9 @@ describe('exception isolation and recovery', () => {
     const widget = controller(() => agents, errors);
     widget.attach(f.ctx);
     const setWidget = f.ui.setWidget;
-    f.ui.setWidget = mock(() => { throw new Error('clear failure'); });
+    f.ui.setWidget = mock(() => {
+      throw new Error('clear failure');
+    });
     f.component.invalidate();
     f.render();
     expect(f.ui.setWidget).not.toHaveBeenCalled();
@@ -1315,11 +1575,15 @@ describe('exception isolation and recovery', () => {
   test('timer cleanup failures disable stale callbacks and cannot escape component or controller disposal', () => {
     const f = host();
     const getSnapshots = mock(() => [snapshot()]);
-    const errors = mock((_error: unknown) => { throw new Error('reporter failure'); });
+    const errors = mock((_error: unknown) => {
+      throw new Error('reporter failure');
+    });
     const widget = controller(getSnapshots, errors);
     widget.attach(f.ctx);
     const staleTicks = [...clock!.timers.values()].map((timer) => timer.callback);
-    clock!.clear.mockImplementation(() => { throw new Error('timer clear failure'); });
+    clock!.clear.mockImplementation(() => {
+      throw new Error('timer clear failure');
+    });
     expect(() => f.component.dispose?.()).not.toThrow();
     const samples = getSnapshots.mock.calls.length;
     const renders = f.requestRender.mock.calls.length;
@@ -1332,12 +1596,19 @@ describe('exception isolation and recovery', () => {
 
   test('an SDK wrapper with a throwing component disposer cannot prevent controller cleanup or caller shutdown', () => {
     const f = host();
-    const errors = mock((_error: unknown) => { throw new Error('reporter failure'); });
+    const errors = mock((_error: unknown) => {
+      throw new Error('reporter failure');
+    });
     const widget = controller(() => [snapshot()], errors);
     widget.attach(f.ctx);
-    f.component.dispose = () => { throw new Error('host dispose wrapper'); };
+    f.component.dispose = () => {
+      throw new Error('host dispose wrapper');
+    };
     const shutdown = mock(() => {});
-    expect(() => { widget.dispose(); shutdown(); }).not.toThrow();
+    expect(() => {
+      widget.dispose();
+      shutdown();
+    }).not.toThrow();
     expect(shutdown).toHaveBeenCalledTimes(1);
     expect(clock!.timers.size).toBe(0);
     expect(f.render()).toEqual([]);
@@ -1346,7 +1617,9 @@ describe('exception isolation and recovery', () => {
 
   test('a failed timer allocation can retry on a later refresh', () => {
     const set = clock!.set.getMockImplementation()!;
-    clock!.set.mockImplementationOnce(() => { throw new Error('timer allocation'); });
+    clock!.set.mockImplementationOnce(() => {
+      throw new Error('timer allocation');
+    });
     const f = host();
     const errors = mock((_error: unknown) => {});
     const widget = controller(() => [snapshot()], errors);

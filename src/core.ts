@@ -373,11 +373,10 @@ function ensureSystemPromptFile(): void {
   }
 }
 
-function readSystemPrompt(): string {
+function validateSystemPrompt(): void {
   ensureSystemPromptFile();
   const prompt = fs.readFileSync(SYSTEM_PROMPT_PATH, 'utf8');
   if (!prompt.trim()) throw new Error(`Subagent system prompt is empty: ${SYSTEM_PROMPT_PATH}`);
-  return prompt;
 }
 
 function ensureBaseDirs(): void {
@@ -661,10 +660,7 @@ export function parseAgentDefinitionText(text: string, fallbackName: string): Ag
       const entry = lines[index].match(/^([A-Za-z0-9_-]+):\s*(.*?)\s*$/);
       if (!entry) continue;
       const [, key, value] = entry;
-      if (
-        key === 'description' &&
-        /^[|>][0-9+-]*(?:[ \t]+#.*)?$/.test(value)
-      ) {
+      if (key === 'description' && /^[|>][0-9+-]*(?:[ \t]+#.*)?$/.test(value)) {
         // Only collect the block; native YAML handles indentation, folding and chomping.
         const block = [`${key}: ${value}`];
         while (index + 1 < lines.length && /^(?:[ \t]|$)/.test(lines[index + 1]))
@@ -859,7 +855,7 @@ class SessionLogger {
     private readonly file: string,
     private readonly onError: (error: Error) => void,
   ) {}
-  write(level: string, category: string, message: string, data?: any): void {
+  info(category: string, message: string): void {
     if (this.closed) return;
     if (!this.stream) {
       fs.mkdirSync(path.dirname(this.file), { recursive: true });
@@ -873,17 +869,12 @@ class SessionLogger {
     this.stream.write(
       JSON.stringify({
         ts: new Date().toISOString(),
-        level,
+        level: 'INFO',
         category,
         message,
-        ...(data !== undefined ? { data } : {}),
       }) + '\n',
     );
-    if (process.env.PI_SUBAGENT_DEBUG)
-      console.error(`[${level}] ${category}: ${message}`, data ?? '');
-  }
-  info(category: string, message: string, data?: any): void {
-    this.write('INFO', category, message, data);
+    if (process.env.PI_SUBAGENT_DEBUG) console.error(`[INFO] ${category}: ${message}`, '');
   }
   close(): void {
     this.closed = true;
@@ -1417,7 +1408,7 @@ export class AgentManager {
     const { provider, modelId } = params.model ??
       templateModel ?? { provider: params.inheritedProvider, modelId: params.inheritedModelId };
     const config = loadSubagentConfig();
-    readSystemPrompt();
+    validateSystemPrompt();
     const extensions = normalizeList(definition?.extensions ?? config.defaults?.extensions);
     const tools =
       definition?.tools !== undefined
@@ -1501,7 +1492,7 @@ export class AgentManager {
     message: string,
     displayMessage = message,
     resume = true,
-  ): Promise<LiveAgent> {
+  ): Promise<void> {
     throwIfAborted(this.shutdownController.signal);
     if (this.live.has(info.id))
       throw new Error(
@@ -1559,10 +1550,13 @@ export class AgentManager {
     };
     this.live.set(info.id, live);
     await this.startRun(live, message, displayMessage);
-    return live;
   }
 
-  private async startRun(live: LiveAgent, message: string, displayMessage = message): Promise<void> {
+  private async startRun(
+    live: LiveAgent,
+    message: string,
+    displayMessage = message,
+  ): Promise<void> {
     const previous = { ...live.info };
     const run: RunState = {
       displayStartedAt: Date.now(),
@@ -1620,7 +1614,11 @@ export class AgentManager {
             live.closing = true;
             this.scheduleTermination(live);
             if (live.run)
-              this.requestCancellation(live, live.run, new Error('Child extension requested shutdown.'));
+              this.requestCancellation(
+                live,
+                live.run,
+                new Error('Child extension requested shutdown.'),
+              );
             try {
               if (live.run) this.finalizeRun(live, live.run, 'interrupted');
             } catch (error) {
@@ -1863,7 +1861,10 @@ export class AgentManager {
       session.clearQueue();
       this.clearModelResponseTimer(run);
       if (!run.observerSettled) {
-        live.broadcaster.broadcast({ type: 'agent_settled', aborted: run.cancellation.signal.aborted });
+        live.broadcaster.broadcast({
+          type: 'agent_settled',
+          aborted: run.cancellation.signal.aborted,
+        });
         run.observerSettled = true;
       }
       delete live.run;
@@ -1885,7 +1886,11 @@ export class AgentManager {
     const idle = [...this.live.values()]
       .filter(
         (live) =>
-          !live.run && !live.closing && !live.nativeWork && !live.pendingCompactions.size && live.session?.isIdle,
+          !live.run &&
+          !live.closing &&
+          !live.nativeWork &&
+          !live.pendingCompactions.size &&
+          live.session?.isIdle,
       )
       .sort((a, b) => a.lastUsedAt - b.lastUsedAt);
     for (const live of idle.slice(0, Math.max(0, idle.length - this.maxIdleSessions))) {
@@ -1945,7 +1950,12 @@ export class AgentManager {
     if (timeoutMs === 0) return;
     run.modelResponseTimer = setTimeout(() => {
       delete run.modelResponseTimer;
-      if (this.live.get(live.info.id) !== live || live.run !== run || live.closing || run.finalizedRun)
+      if (
+        this.live.get(live.info.id) !== live ||
+        live.run !== run ||
+        live.closing ||
+        run.finalizedRun
+      )
         return;
       const error = `Model response exceeded ${timeoutMs} ms without completing.`;
       live.closing = true;
@@ -2097,7 +2107,8 @@ export class AgentManager {
       if (
         info.parentSessionId !== parentSessionId ||
         (info.status !== 'starting' && info.status !== 'running')
-      ) continue;
+      )
+        continue;
 
       let provider = info.provider;
       let modelId = info.modelId;
@@ -2185,10 +2196,7 @@ export class AgentManager {
   }
 
   readAgentResponse(target: string, parentSessionId: string): AgentResponseEntry {
-    return this.agentResponse(this.getAgentInfo(target, parentSessionId));
-  }
-
-  private agentResponse(info: AgentInfo): AgentResponseEntry {
+    const info = this.getAgentInfo(target, parentSessionId);
     return {
       agent_name: info.canonicalName,
       status: info.status,
@@ -2311,7 +2319,10 @@ export class AgentManager {
       if (live.closing) await this.waitForTermination(live);
       else if (live.run?.finalizedRun) await this.waitForRunSettlement(live, live.run);
       else if (
-        !live.run && !live.nativeWork && !live.pendingCompactions.size && live.session?.isIdle
+        !live.run &&
+        !live.nativeWork &&
+        !live.pendingCompactions.size &&
+        live.session?.isIdle
       ) {
         const trusted = this.options.projectTrusted?.(info.cwd);
         const model = live.session.model;
@@ -2391,7 +2402,12 @@ export class AgentManager {
     } finally {
       const finish = () => {
         if (this.live.get(info.id) === current && current.run === run) {
-          if (run.cancellation.signal.aborted || run.finalizedRun || current.closing || !session.isStreaming) {
+          if (
+            run.cancellation.signal.aborted ||
+            run.finalizedRun ||
+            current.closing ||
+            !session.isStreaming
+          ) {
             try {
               session.clearQueue();
             } catch (error) {

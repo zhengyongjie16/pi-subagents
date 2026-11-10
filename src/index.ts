@@ -38,7 +38,11 @@ import {
 } from './core.js';
 import { SubagentPeekOverlay } from './peek.js';
 import {
-  agentStatusColor, paintAgentLine, renderAgentBadge, resolveAgentColor, sanitizeAgentText,
+  agentStatusColor,
+  paintAgentLine,
+  renderAgentBadge,
+  resolveAgentColor,
+  sanitizeAgentText,
 } from './color.js';
 import { AgentSummaryWidget, type AgentStatusCounts } from './widget.js';
 
@@ -142,7 +146,12 @@ export default async function index_(pi: ExtensionAPI) {
   let widgetContext: any;
   const agentStatuses = new Map<string, AgentInfo['status']>();
   const agentColors = new Map<string, string>();
-  let widgetStatusCounts: AgentStatusCounts = { running: 0, completed: 0, failed: 0, interrupted: 0 };
+  let widgetStatusCounts: AgentStatusCounts = {
+    running: 0,
+    completed: 0,
+    failed: 0,
+    interrupted: 0,
+  };
 
   type SpawnModel = { provider: string; modelId: string };
 
@@ -205,7 +214,8 @@ export default async function index_(pi: ExtensionAPI) {
     if (activeContext?.mode !== 'tui') return;
     // Recount only on lifecycle events, never on the 200ms rendering ticks.
     const counts = { running: 0, completed: 0, failed: 0, interrupted: 0 };
-    for (const status of agentStatuses.values()) counts[status === 'starting' ? 'running' : status]++;
+    for (const status of agentStatuses.values())
+      counts[status === 'starting' ? 'running' : status]++;
     widgetStatusCounts = counts;
     widgetContext = activeContext;
     agentWidget.attach(activeContext);
@@ -264,7 +274,12 @@ export default async function index_(pi: ExtensionAPI) {
       const fallback: AgentWidgetSnapshot[] = [];
       for (const [canonicalName, status] of agentStatuses) {
         if ((status === 'starting' || status === 'running') && !names.has(canonicalName))
-          fallback.push({ canonicalName, color: agentColors.get(canonicalName), status, activeTools: [] });
+          fallback.push({
+            canonicalName,
+            color: agentColors.get(canonicalName),
+            status,
+            activeTools: [],
+          });
       }
       return [...snapshots, ...fallback];
     },
@@ -290,7 +305,8 @@ export default async function index_(pi: ExtensionAPI) {
         else {
           // A legacy notification cannot invent a terminal status or erase a known one.
           const previous = agentStatuses.get(event.agentName);
-          if (previous === 'starting' || previous === 'running') agentStatuses.delete(event.agentName);
+          if (previous === 'starting' || previous === 'running')
+            agentStatuses.delete(event.agentName);
         }
         refreshAgentWidget();
       },
@@ -911,7 +927,9 @@ ${getAgentDefinitionsDescription()}`;
       };
       return {
         render(availableWidth: number): string[] {
-          const width = Number.isFinite(availableWidth) ? Math.max(0, Math.floor(availableWidth)) : 0;
+          const width = Number.isFinite(availableWidth)
+            ? Math.max(0, Math.floor(availableWidth))
+            : 0;
           if (width === 0) return [];
           if (cached && cachedWidth === width) return cached;
           const theme = ctx.ui.theme ?? factoryTheme;
@@ -967,7 +985,9 @@ ${getAgentDefinitionsDescription()}`;
             const pointer = isSelected ? fg('accent', '› ') : '  ';
             const badge = renderAgentBadge(
               formatColumn(info.canonicalName, nameWidth - (color ? 2 : 0)).trimEnd(),
-              theme, color, isSelected ? 'accent' : 'text',
+              theme,
+              color,
+              isSelected ? 'accent' : 'text',
             );
             const name = badge + ' '.repeat(Math.max(0, nameWidth - visibleWidth(badge)));
             const parent = showAll ? ` ${sanitizeAgentText(sessionId.slice(-8))}` : '';
@@ -976,23 +996,32 @@ ${getAgentDefinitionsDescription()}`;
               formatColumn(info.modelId || 'unknown', modelWidth),
               formatColumn(info.thinking || 'off', thinkingWidth),
             ].join(' ');
-            lines.push(paintAgentLine(
-              pointer + name +
-                ' ' +
-                fg(
-                  agentStatusColor(info.status),
-                  sanitizeAgentText(info.status).padEnd(statusWidth),
-                ) +
-                ' ' +
-                fg('dim', details + parent),
-              width, theme, isSelected,
-            ));
+            lines.push(
+              paintAgentLine(
+                pointer +
+                  name +
+                  ' ' +
+                  fg(
+                    agentStatusColor(info.status),
+                    sanitizeAgentText(info.status).padEnd(statusWidth),
+                  ) +
+                  ' ' +
+                  fg('dim', details + parent),
+                width,
+                theme,
+                isSelected,
+              ),
+            );
             const preview = previewText(sanitizeAgentText(info.lastTaskMessage ?? ''));
             if (preview)
-              lines.push(paintAgentLine(
-                '  ' + fg('dim', truncateToWidth(preview, Math.max(0, width - 4))),
-                width, theme, isSelected,
-              ));
+              lines.push(
+                paintAgentLine(
+                  '  ' + fg('dim', truncateToWidth(preview, Math.max(0, width - 4))),
+                  width,
+                  theme,
+                  isSelected,
+                ),
+              );
           }
           if (viewEnd < entries.length)
             lines.push(fg('dim', `  ↓ ${entries.length - viewEnd} more`));
