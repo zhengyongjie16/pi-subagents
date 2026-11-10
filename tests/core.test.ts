@@ -412,6 +412,22 @@ describe('session-scoped identities', () => {
 });
 
 describe('agent templates', () => {
+  test.each([
+    ['color: " ReD "', '#DC2626'],
+    ['color: neon-cyan', '#06B6D4'],
+    ['color: " MeTaLlIc-BlUe "', '#3B82F6'],
+    ['color: #aAbBcC', '#AABBCC'],
+    ['color: "#007777"', '#007777'],
+    ['color: invalid', undefined],
+    ['color: "#123"', undefined],
+    ['color: {}', undefined],
+    ['color:', undefined],
+    ['', undefined],
+  ])('parses optional badge configuration %s without changing the template', (field, color) => {
+    expect(parseAgentDefinitionText('---\nname: reviewer\n' + field + '\nmodel: fake\n---\nInstructions.', 'fallback'))
+      .toMatchObject({ name: 'reviewer', color, model: 'fake', prompt: 'Instructions.' });
+  });
+
   test('template listing initializes only the templates directory', () => {
     const mkdir = spyOn(fs, 'mkdirSync');
     const read = spyOn(fs, 'readFileSync');
@@ -1210,6 +1226,106 @@ const activeMarker = (id: string) => path.join(markerDir, id + '.active.json');
 const peekMarker = (id: string) => path.join(markerDir, id + '.peek.json');
 
 describe('widget snapshots', () => {
+  test.each([4, 0])('captures template color for repeated instances, persistence and warm/cold continuation (idle cap %s)', async (cap) => {
+    writeConfig({ maxIdleSessions: cap });
+    const parent = 'configured-color-' + randomUUID();
+    const directory = path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents');
+    fs.mkdirSync(directory, { recursive: true });
+    const templates = [
+      ['badge-valid', 'color: " ReD "', '#DC2626'],
+      ['badge-absent', '', undefined],
+      ['badge-invalid', 'color: "not-a-color"', undefined],
+    ] as const;
+    for (const [name, field] of templates)
+      fs.writeFileSync(path.join(directory, name + '.md'), '---\nname: ' + name + '\n' + field + '\n---\nhold instructions.');
+    const manager = new AgentManager();
+    try {
+      const agents = [...templates, templates[0]].map(([type, , color], index) => ({ type, color, name: 'worker-' + index }));
+      for (const { type, color, name } of agents) {
+        expect(await manager.spawnAgent({ ...spawnParams(parent, name, 'hold first'), agent_type: type }))
+          .toEqual({ task_name: '/' + name, nickname: null });
+        const info = manager.getAgentInfo(name, parent);
+        expect(info.color).toBe(color);
+        expect(JSON.parse(fs.readFileSync(info.infoFile, 'utf8')).color).toBe(color);
+      }
+      expect(manager.listAgentInfos(undefined, parent).map((info) => info.color).sort())
+        .toEqual(agents.map((agent) => agent.color).sort());
+      const firstSession = manager['live'].get(manager.getAgentInfo('worker-0', parent).id)!.session;
+      const reads = spyOn(fs, 'readFileSync'), scans = spyOn(fs, 'readdirSync'), writes = spyOn(fs, 'writeFileSync');
+      try {
+        for (let frame = 0; frame < 5; frame++) {
+          const snapshots = manager.getWidgetSnapshot(parent);
+          expect(snapshots.map((snapshot) => snapshot.color)).toEqual(agents.map((agent) => agent.color));
+          (snapshots[0] as any).color = '#FFFFFF';
+        }
+        expect(reads).not.toHaveBeenCalled();
+        expect(scans).not.toHaveBeenCalled();
+        expect(writes).not.toHaveBeenCalled();
+      } finally {
+        reads.mockRestore(); scans.mockRestore(); writes.mockRestore();
+      }
+      for (const { name } of agents) {
+        const info = manager.getAgentInfo(name, parent);
+        await manager.interruptAgent(parent, name);
+        await settled(manager, info);
+      }
+      // The effective presentation value belongs to the original instance, not today's template.
+      for (const [name] of templates)
+        fs.writeFileSync(path.join(directory, name + '.md'), '---\nname: ' + name + '\ncolor: blue\n---\nChanged instructions.');
+      const readsOnResume = spyOn(fs, 'readFileSync');
+      try {
+        for (const { name, color } of agents) {
+          expect(await manager.sendMessage(parent, name, 'hold continuation')).toEqual({ delivery: 'prompt' });
+          expect(manager.getAgentInfo(name, parent).color).toBe(color);
+          expect(manager.getWidgetSnapshot(parent).find((snapshot) => snapshot.canonicalName === '/' + name)?.color).toBe(color);
+          expect(manager.readAgentResponse(name, parent)).not.toHaveProperty('color');
+        }
+        expect(readsOnResume.mock.calls.some(([file]) => String(file).startsWith(directory + path.sep))).toBe(false);
+      } finally {
+        readsOnResume.mockRestore();
+      }
+      const resumedSession = manager['live'].get(manager.getAgentInfo('worker-0', parent).id)!.session;
+      if (cap) expect(resumedSession).toBe(firstSession);
+      else expect(resumedSession).not.toBe(firstSession);
+      for (const entry of manager.listAgents(undefined, parent))
+        expect(Object.keys(entry).sort()).toEqual(['agent_name', 'agent_status', 'last_task_message']);
+    } finally {
+      await manager.shutdown();
+      for (const [name] of templates) fs.rmSync(path.join(directory, name + '.md'), { force: true });
+    }
+  });
+
+  test('old and malformed saved colors resume as plain even when the current template has a color', async () => {
+    writeConfig({ maxIdleSessions: 0 });
+    const parent = 'old-color-' + randomUUID();
+    const template = path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents', 'old-badge.md');
+    fs.mkdirSync(path.dirname(template), { recursive: true });
+    fs.writeFileSync(template, '---\nname: old-badge\ncolor: cyan\n---\n');
+    const manager = new AgentManager();
+    try {
+      await manager.spawnAgent({ ...spawnParams(parent, 'worker', 'first'), agent_type: 'old-badge' });
+      const first = manager.getAgentInfo('worker', parent);
+      await settled(manager, first);
+      for (const color of [undefined, null, {}, ['red'], 123, 'toString', '__proto__', '#GGGGGG']) {
+        const saved = JSON.parse(fs.readFileSync(first.infoFile, 'utf8'));
+        if (color === undefined) delete saved.color;
+        else saved.color = color;
+        fs.writeFileSync(first.infoFile, JSON.stringify(saved));
+        const original = fs.readFileSync(first.infoFile, 'utf8');
+        expect(readInfoFile(first.infoFile)?.color).toBeUndefined();
+        expect(fs.readFileSync(first.infoFile, 'utf8')).toBe(original); // Reading is not a migration.
+        expect(await manager.sendMessage(parent, 'worker', 'hold old continuation')).toEqual({ delivery: 'prompt' });
+        expect(manager.getWidgetSnapshot(parent)[0].color).toBeUndefined();
+        expect(manager.getAgentInfo('worker', parent).color).toBeUndefined();
+        await manager.interruptAgent(parent, 'worker');
+        await settled(manager, first);
+      }
+    } finally {
+      await manager.shutdown();
+      fs.rmSync(template, { force: true });
+    }
+  });
+
   test('lifecycle notifications expose exact statuses, including interrupted without a completion notification', async () => {
     const parent = 'widget-statuses-' + randomUUID();
     const activity: Array<{ agentName: string; active: boolean; status?: AgentInfo['status'] }> = [];

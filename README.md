@@ -50,6 +50,7 @@ description: |-
 provider: openai-codex
 model: gpt-5.6-sol
 thinking: high
+color: blue
 tools: read,bash,grep,find,ls
 extensions: @scope/pi-extra-tools, ~/.pi/agent/extensions/local-helper.ts
 ---
@@ -148,9 +149,9 @@ A session-scoped agent summary appears above the editor and points to `/subagent
 
 ```text
 ● Agents · 2 running · 3 completed · 1 failed · 1 interrupted · /subagents
-├─ ⠹ /review-auth  openai-codex/gpt-6.1-sol/max · 33.8k token (62% · ⇊1) · 12.3s
+├─ ⠹ /review-auth  openai-codex/gpt-6.1-sol/max · 33.8k token (62% · ↓1) · 12s
 │    ⎿ reading…
-└─ ⠹ /tests  anthropic/claude-sonnet-4-6/high · 8.2k token (12%) · 4.1s
+└─ ⠹ /tests  anthropic/claude-sonnet-4-6/high · 8.2k token (12%) · 4s
      ⎿ thinking…
 ```
 

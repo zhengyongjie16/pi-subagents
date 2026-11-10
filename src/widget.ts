@@ -1,14 +1,20 @@
 import type { ExtensionContext, Theme } from '@earendil-works/pi-coding-agent';
-import { truncateToWidth, visibleWidth, type Component, type TUI } from '@earendil-works/pi-tui';
+import { Loader, truncateToWidth, visibleWidth, type Component, type TUI } from '@earendil-works/pi-tui';
 import { stripVTControlCharacters } from 'node:util';
 import type { AgentWidgetSnapshot } from './core.js';
+import {
+  agentStatusColor, renderAgentBadge, resolveAgentColor, sanitizeAgentText as sanitize,
+} from './color.js';
 
 const WIDGET_KEY = 'pi-subagents';
 const MAX_LINES = 12;
 const SUMMARY_STATUSES = ['running', 'completed', 'failed', 'interrupted'] as const;
 export type AgentStatusCounts = Readonly<Record<typeof SUMMARY_STATUSES[number], number>>;
 const EMPTY_STATUS_COUNTS: AgentStatusCounts = { running: 0, completed: 0, failed: 0, interrupted: 0 };
-const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+// Use the same frames and animation clock as Pi's WorkingStatusIndicator.
+class AgentSpinner extends Loader {
+  frame(): string { return this.getRenderedIndicator(); }
+}
 // Exact Pi built-in names (including native codemode) get labels; other names stay dynamic.
 const BUILTIN_TOOL_ACTIONS = new Map([
   ['read', 'reading'],
@@ -28,14 +34,6 @@ interface Mount {
   theme?: Theme;
   disposed: boolean;
   component: WidgetComponent;
-}
-
-// Strip terminal escapes before controls: deleting ESC first would expose escape payloads.
-function sanitize(value: string): string {
-  return stripVTControlCharacters(value)
-    .replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')
-    .replace(/\s+/gu, ' ')
-    .trim();
 }
 
 function preview(value: string | undefined): string | undefined {
@@ -70,7 +68,7 @@ function fitText(text: string, width: number): string {
   return stripVTControlCharacters(fit(text, width));
 }
 
-function paint(theme: Theme | undefined, color: 'accent' | 'dim' | 'warning' | 'error', text: string): string {
+function paint(theme: Theme | undefined, color: 'accent' | 'dim' | 'warning' | 'error' | 'success', text: string): string {
   return theme ? theme.fg(color, text) : text;
 }
 
@@ -90,7 +88,7 @@ function tokenText(snapshot: AgentWidgetSnapshot, theme: Theme | undefined, comp
   }
   const compactions = snapshot.compactionCount;
   if (compactions !== undefined && Number.isFinite(compactions) && compactions > 0)
-    annotations.push(paint(theme, 'dim', `⇊${compactions}`));
+    annotations.push(paint(theme, 'dim', `↓${compactions}`));
   const annotation = annotations.length
     ? `${compact ? '' : ' '}(${annotations.join(compact ? '·' : ' · ')})`
     : '';
@@ -112,12 +110,14 @@ function agentHeader(
   width: number,
   prefix: string,
   theme: Theme | undefined,
+  color: string | undefined,
 ): string {
   const name = sanitize(snapshot.canonicalName);
+  const badgePadding = color ? 2 : 0;
   const thinking = sanitize(snapshot.thinking ?? '');
   const elapsed = snapshot.elapsedMs;
   const duration = elapsed !== undefined && Number.isFinite(elapsed) && elapsed >= 0
-    ? `${(elapsed / 1000).toFixed(1)}s`
+    ? `${Math.floor(elapsed / 1000)}s`
     : '';
   const tail = [
     tokenText(snapshot, theme),
@@ -125,7 +125,7 @@ function agentHeader(
   ].filter(Boolean).join(' · ');
   const hasModel = Boolean(snapshot.provider || snapshot.modelId || thinking);
   const suffixWidth = thinking ? visibleWidth(`/${thinking}`) : 0;
-  const fixedWidth = visibleWidth(prefix) + visibleWidth(tail) + (tail ? 3 : 0);
+  const fixedWidth = visibleWidth(prefix) + visibleWidth(tail) + (tail ? 3 : 0) + badgePadding;
   const nameBudget = width - fixedWidth - (hasModel ? 3 + suffixWidth : 0);
   if (nameBudget >= Math.min(visibleWidth(name), 4)) {
     // Keep statistics and /thinking intact; use only the remaining columns for the model.
@@ -134,7 +134,7 @@ function agentHeader(
       : nameBudget);
     const modelBudget = width - fixedWidth - visibleWidth(shownName) - 3;
     const model = hasModel ? modelText(snapshot, modelBudget) : '';
-    return prefix + paint(theme, 'accent', shownName)
+    return prefix + renderAgentBadge(shownName, theme, color)
       + (model ? ` · ${paint(theme, 'dim', model)}` : '')
       + (tail ? ` · ${tail}` : '');
   }
@@ -142,31 +142,33 @@ function agentHeader(
   // Compact statistics still outrank the model at narrow widths.
   const compactStats = [tokenText(snapshot, theme, true), duration].filter(Boolean).join(' ');
   const compactTail = [thinking ? `/${thinking}` : '', compactStats].filter(Boolean).join(' ');
-  const compactNameBudget = width - visibleWidth(compactTail) - (compactTail ? 1 : 0);
+  const compactNameBudget = width - visibleWidth(compactTail) - (compactTail ? 1 : 0) - badgePadding;
   if (compactNameBudget >= Math.min(visibleWidth(name), 4)) {
     const shownName = fitText(name, compactNameBudget);
-    const modelBudget = width - visibleWidth(shownName) - visibleWidth(compactStats)
+    const modelBudget = width - visibleWidth(shownName) - badgePadding - visibleWidth(compactStats)
       - (compactStats ? 1 : 0) - 1;
     const model = hasModel ? modelText(snapshot, modelBudget) : '';
-    return [paint(theme, 'accent', shownName), model ? paint(theme, 'dim', model) : '', compactStats]
+    return [renderAgentBadge(shownName, theme, color), model ? paint(theme, 'dim', model) : '', compactStats]
       .filter(Boolean).join(' ');
   }
   const status = snapshot.status === 'starting' ? 'initializing' : 'running';
-  return paint(theme, 'accent', name) + ' ' + paint(theme, 'dim', status);
+  return renderAgentBadge(name, theme, color) + ' ' + paint(theme, 'dim', status);
 }
 
 function heading(width: number, counts: AgentStatusCounts, theme?: Theme): string {
   const active = counts.running > 0;
-  const parts = SUMMARY_STATUSES
-    .filter((status) => counts[status] > 0)
-    .map((status) => `${counts[status]} ${status}`);
-  const title = [active ? '● Agents' : '○ Agents', ...parts].join(' · ');
+  const baseColor = active ? 'accent' : 'dim';
   const suffix = ' · /subagents';
   const available = width - visibleWidth(suffix);
-  const text = available >= visibleWidth('● Agents')
-    ? fitText(title, available) + suffix
-    : fitText('/subagents', width);
-  return paint(theme, active ? 'accent' : 'dim', text);
+  if (available < visibleWidth('● Agents'))
+    return paint(theme, baseColor, fitText('/subagents', width));
+  const parts = SUMMARY_STATUSES
+    .filter((status) => counts[status] > 0)
+    .map((status) => paint(theme, agentStatusColor(status), `${counts[status]} ${status}`));
+  const title = [paint(theme, baseColor, active ? '● Agents' : '○ Agents'), ...parts]
+    .join(paint(theme, baseColor, ' · '));
+  // Preserve each status's ANSI color while still reserving the command hint.
+  return fit(title, available) + paint(theme, baseColor, suffix);
 }
 
 /** Parent-editor widget. Snapshot sampling and its timer never run from render(). */
@@ -178,7 +180,7 @@ export class AgentSummaryWidget {
   private registration?: object;
   private mount?: Mount;
   private timer?: ReturnType<typeof setInterval>;
-  private frame = 0;
+  private spinner?: AgentSpinner;
   private disposed = false;
   private sampleFailed = false;
   private renderFailed = false;
@@ -242,11 +244,11 @@ export class AgentSummaryWidget {
         this.clearWidget();
         return;
       }
-      this.frame = (this.frame + 1) % SPINNER.length;
       if (!this.registration) this.registerWidget();
       if (!this.registration) return;
       if (this.snapshots.length || this.statusCounts.running > 0) this.startTimer();
       else this.stopTimer(); // Keep settled totals visible without a background timer.
+      this.syncSpinner();
       this.requestRender();
     } catch (error) {
       this.report(error);
@@ -282,7 +284,10 @@ export class AgentSummaryWidget {
           },
         };
         if (this.disposed || this.registration !== registration) mount.component.dispose();
-        else this.mount = mount;
+        else {
+          this.mount = mount;
+          this.syncSpinner(); // Factories may mount after the sampling timer has started.
+        }
         return mount.component;
       }, { placement: 'aboveEditor' });
     } catch (error) {
@@ -314,9 +319,10 @@ export class AgentSummaryWidget {
       for (let index = 0; index < count; index++) {
         const last = index === count - 1 && hidden === 0;
         const prefix = paint(theme, 'dim', last ? '└─ ' : '├─ ')
-          + paint(theme, 'accent', SPINNER[this.frame]) + ' ';
+          + paint(theme, 'accent', this.spinner?.frame() ?? '') + ' ';
         const snapshot = this.snapshots[index];
-        lines.push(agentHeader(snapshot, width, prefix, theme));
+        const color = resolveAgentColor(snapshot.color);
+        lines.push(agentHeader(snapshot, width, prefix, theme, color));
         lines.push(paint(theme, 'dim', (last ? '   ' : '│  ') + '  ⎿  ' + activity(snapshot)));
       }
       if (hidden) lines.push(paint(theme, 'dim', `└─ +${hidden} more · /subagents`));
@@ -330,6 +336,38 @@ export class AgentSummaryWidget {
       }
       // A bad getter/theme must not escape into the SDK render loop or poison future frames.
       return [fit('/subagents', width)];
+    }
+  }
+
+  private syncSpinner(): void {
+    if (!this.snapshots.length || !this.mount?.tui || this.timer === undefined || this.ctx?.mode !== 'tui') {
+      this.stopSpinner();
+      return;
+    }
+    if (this.spinner || this.disposed || this.mount.disposed) return;
+    try {
+      let spinner: AgentSpinner | undefined;
+      // An own property preserves Pi's TUI proxy. Ignore constructor/stale callbacks;
+      // animation only requests a redraw and never samples SDK sessions.
+      const ui: TUI = Object.create(this.mount.tui, {
+        requestRender: { value: () => {
+          if (spinner && this.spinner === spinner && this.ctx?.mode === 'tui') this.requestRender();
+        } },
+      });
+      spinner = new AgentSpinner(ui, (text) => text, (text) => text, '');
+      this.spinner = spinner;
+    } catch (error) {
+      this.report(error);
+    }
+  }
+
+  private stopSpinner(): void {
+    const spinner = this.spinner;
+    this.spinner = undefined;
+    try {
+      spinner?.stop();
+    } catch (error) {
+      this.report(error);
     }
   }
 
@@ -349,6 +387,7 @@ export class AgentSummaryWidget {
   private stopTimer(): void {
     const timer = this.timer;
     this.timer = undefined;
+    this.stopSpinner();
     if (timer === undefined) return;
     try {
       clearInterval(timer);

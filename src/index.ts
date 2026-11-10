@@ -37,6 +37,9 @@ import {
   writeFullToolOutput,
 } from './core.js';
 import { SubagentPeekOverlay } from './peek.js';
+import {
+  agentStatusColor, paintAgentLine, renderAgentBadge, resolveAgentColor, sanitizeAgentText,
+} from './color.js';
 import { AgentSummaryWidget, type AgentStatusCounts } from './widget.js';
 
 type ToolRenderContext = Parameters<NonNullable<ToolRenderers['renderResult']>>[3];
@@ -104,7 +107,7 @@ function formatDuration(ms: number): string {
 }
 
 function formatColumn(text: string, width: number): string {
-  const clipped = truncateToWidth(text, width);
+  const clipped = sanitizeAgentText(truncateToWidth(sanitizeAgentText(text), width));
   return clipped + ' '.repeat(Math.max(0, width - visibleWidth(clipped)));
 }
 
@@ -138,6 +141,7 @@ export default async function index_(pi: ExtensionAPI) {
   let activeContext: any;
   let widgetContext: any;
   const agentStatuses = new Map<string, AgentInfo['status']>();
+  const agentColors = new Map<string, string>();
   let widgetStatusCounts: AgentStatusCounts = { running: 0, completed: 0, failed: 0, interrupted: 0 };
 
   type SpawnModel = { provider: string; modelId: string };
@@ -260,7 +264,7 @@ export default async function index_(pi: ExtensionAPI) {
       const fallback: AgentWidgetSnapshot[] = [];
       for (const [canonicalName, status] of agentStatuses) {
         if ((status === 'starting' || status === 'running') && !names.has(canonicalName))
-          fallback.push({ canonicalName, status, activeTools: [] });
+          fallback.push({ canonicalName, color: agentColors.get(canonicalName), status, activeTools: [] });
       }
       return [...snapshots, ...fallback];
     },
@@ -313,7 +317,7 @@ export default async function index_(pi: ExtensionAPI) {
     completionMessageType,
     (message: any, { expanded }: any, theme: Theme) => {
       const status = message.details?.status;
-      const color = status === 'completed' ? 'success' : status === 'failed' ? 'error' : 'warning';
+      const color = agentStatusColor(status);
       let text = theme.fg(
         color,
         `${status === 'completed' ? '✓' : '✗'} ${message.details?.agent_name || 'subagent'} ${status || 'finished'}`,
@@ -469,6 +473,7 @@ ${getAgentDefinitionsDescription()}`;
   pi.on('session_start', async (_event: any, ctx: any) => {
     activeContext = ctx;
     agentStatuses.clear();
+    agentColors.clear();
     widgetStatusCounts = { running: 0, completed: 0, failed: 0, interrupted: 0 };
     try {
       spawnModels = resolveSpawnModels(ctx);
@@ -482,9 +487,13 @@ ${getAgentDefinitionsDescription()}`;
     const manager = ensureManager(ctx);
     await manager.ready();
     if (activeContext !== ctx) return;
-    // Reuse the existing one-time scoped startup read, including historical final states.
-    for (const entry of manager.listAgents(undefined, parentSessionId(ctx)))
-      agentStatuses.set(entry.agent_name, entry.agent_status);
+    // One scoped metadata read seeds external-host summaries too; no presentation
+    // fields are added to list_agents and the 200ms sampler never rereads storage.
+    for (const info of manager.listAgentInfos(undefined, parentSessionId(ctx))) {
+      agentStatuses.set(info.canonicalName, info.status);
+      const color = resolveAgentColor(info.color);
+      if (color) agentColors.set(info.canonicalName, color);
+    }
     refreshAgentWidget();
   });
 
@@ -492,6 +501,7 @@ ${getAgentDefinitionsDescription()}`;
     const shutdownContext = activeContext ?? ctx;
     activeContext = undefined;
     agentStatuses.clear();
+    agentColors.clear();
     widgetStatusCounts = { running: 0, completed: 0, failed: 0, interrupted: 0 };
     try {
       agentWidget.dispose();
@@ -887,22 +897,25 @@ ${getAgentDefinitionsDescription()}`;
   async function pickAgent(ctx: ExtensionContext): Promise<AgentSelection | undefined> {
     const manager = ensureManager(ctx);
     const currentSessionId = parentSessionId(ctx);
-    return ctx.ui.custom<AgentSelection | undefined>((tui, theme, _keybindings, done) => {
+    return ctx.ui.custom<AgentSelection | undefined>((tui, factoryTheme, _keybindings, done) => {
       let selected = 0;
       let showAll = false;
       let displayedCount = 0;
       let displayedSelection: AgentSelection | undefined;
       let cached: string[] | undefined;
       let cachedWidth: number | undefined;
-      const fg = theme.fg.bind(theme);
       const pageSize = 10;
       const refresh = () => {
         cached = undefined;
         tui.requestRender();
       };
       return {
-        render(width: number): string[] {
+        render(availableWidth: number): string[] {
+          const width = Number.isFinite(availableWidth) ? Math.max(0, Math.floor(availableWidth)) : 0;
+          if (width === 0) return [];
           if (cached && cachedWidth === width) return cached;
+          const theme = ctx.ui.theme ?? factoryTheme;
+          const fg = theme.fg.bind(theme);
           const entries = manager.listAgentInfos(undefined, currentSessionId, showAll);
           selected = Math.max(0, Math.min(selected, entries.length - 1));
           displayedCount = entries.length;
@@ -949,32 +962,37 @@ ${getAgentDefinitionsDescription()}`;
                 parentSessionId: sessionId || currentSessionId,
                 includeAll: showAll,
               };
-            const pointer = index === selected ? fg('accent', '› ') : '  ';
-            const name = formatColumn(info.canonicalName, nameWidth);
-            const parent = showAll ? ` ${sessionId.slice(-8)}` : '';
+            const isSelected = index === selected;
+            const color = resolveAgentColor(info.color);
+            const pointer = isSelected ? fg('accent', '› ') : '  ';
+            const badge = renderAgentBadge(
+              formatColumn(info.canonicalName, nameWidth - (color ? 2 : 0)).trimEnd(),
+              theme, color, isSelected ? 'accent' : 'text',
+            );
+            const name = badge + ' '.repeat(Math.max(0, nameWidth - visibleWidth(badge)));
+            const parent = showAll ? ` ${sanitizeAgentText(sessionId.slice(-8))}` : '';
             const details = [
               formatColumn(runtimeLabel(info), durationWidth),
               formatColumn(info.modelId || 'unknown', modelWidth),
               formatColumn(info.thinking || 'off', thinkingWidth),
             ].join(' ');
-            lines.push(
-              pointer +
-                fg(index === selected ? 'accent' : 'text', name) +
+            lines.push(paintAgentLine(
+              pointer + name +
                 ' ' +
                 fg(
-                  info.status === 'failed'
-                    ? 'error'
-                    : info.status === 'completed'
-                      ? 'success'
-                      : 'warning',
-                  info.status.padEnd(statusWidth),
+                  agentStatusColor(info.status),
+                  sanitizeAgentText(info.status).padEnd(statusWidth),
                 ) +
                 ' ' +
                 fg('dim', details + parent),
-            );
-            const preview = previewText(info.lastTaskMessage);
+              width, theme, isSelected,
+            ));
+            const preview = previewText(sanitizeAgentText(info.lastTaskMessage ?? ''));
             if (preview)
-              lines.push('  ' + fg('dim', truncateToWidth(preview, Math.max(0, width - 4))));
+              lines.push(paintAgentLine(
+                '  ' + fg('dim', truncateToWidth(preview, Math.max(0, width - 4))),
+                width, theme, isSelected,
+              ));
           }
           if (viewEnd < entries.length)
             lines.push(fg('dim', `  ↓ ${entries.length - viewEnd} more`));

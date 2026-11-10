@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { InteractiveMode, type ExtensionContext, type Theme } from '@earendil-works/pi-coding-agent';
-import { visibleWidth, type Component, type TUI } from '@earendil-works/pi-tui';
+import { backgroundAnsi, Loader, parseColor, visibleWidth, type Component, type TUI } from '@earendil-works/pi-tui';
 import { stripVTControlCharacters } from 'node:util';
+import * as fs from 'node:fs';
 import type { AgentWidgetSnapshot } from '../src/core.js';
 import { AgentSummaryWidget, type AgentStatusCounts } from '../src/widget.js';
+import { renderAgentBadge } from '../src/color.js';
+import { nativeTheme } from './fixtures/ui-theme.js';
 
 type Widget = Component & { dispose?(): void };
 type Factory = (tui: TUI, theme: Theme) => Widget;
@@ -28,8 +31,8 @@ function controlledTimers() {
   }) as any);
   return {
     timers, set, clear,
-    tick() {
-      for (const timer of [...timers.values()]) timer.callback();
+    tick(delay = 200) {
+      for (const timer of [...timers.values()]) if (timer.delay === delay) timer.callback();
     },
     restore() {
       clear.mockRestore();
@@ -91,7 +94,7 @@ function host(options: { mode?: ExtensionContext['mode']; parentId?: string; row
 
 function trackingTheme(accent = 36) {
   const calls: { color: string; text: string }[] = [];
-  const colors: Record<string, number> = { accent, dim: accent + 1, warning: 33, error: 31 };
+  const colors: Record<string, number> = { accent, dim: accent + 1, warning: 33, error: 31, success: 32 };
   const theme = {
     fg(color: string, text: string) {
       calls.push({ color, text });
@@ -111,6 +114,91 @@ function expectFit(lines: string[], width: number) {
     expect(stripVTControlCharacters(line)).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
   }
 }
+
+describe('configured summary badges', () => {
+  for (const appearance of ['dark', 'light'] as const) {
+    test.each(['truecolor', '256color'] as const)(`${appearance} name badges fit and keep statistics in %s without row tint`, (mode) => {
+      const theme = nativeTheme(appearance, mode);
+      const f = host({ theme });
+      controller(() => [snapshot({
+        color: 'blue', provider: 'openai-codex', modelId: 'long-model/'.repeat(12), thinking: 'max',
+        tokens: 1000, contextUsage: usage(86), compactionCount: 1, elapsedMs: 12_345,
+        responsePreview: '中文😀'.repeat(100),
+      })]).attach(f.ctx);
+      const open = backgroundAnsi(parseColor('#6A9BCC'), mode);
+      for (const width of [2, 9, 32, 38, 50, 80, 120]) {
+        const lines = f.render(width);
+        expectFit(lines, width);
+        expect(lines).toHaveLength(3);
+        expect(lines[2]).not.toMatch(/\x1b\[48;/);
+        if (width >= 32) {
+          const text = stripVTControlCharacters(lines[1]);
+          for (const stat of ['/max', '1.0k', '86%', '↓1', '12s']) expect(text).toContain(stat);
+          expect(lines[1]).toContain(theme.fg('error', '86%'));
+          expect(lines[1]).toContain(open);
+          expect(lines[1]).not.toContain('\x1b[7m');
+        }
+      }
+      expect(f.render(0)).toEqual([]);
+      expect(f.render(1)).toHaveLength(1);
+      expect(clock!.timers.size).toBe(2);
+      expect(f.setWidget).toHaveBeenCalledTimes(1);
+    });
+  }
+
+  test('shared template colors survive removal and theme invalidation without sampling, IO or remounting', () => {
+    const dark = nativeTheme('dark');
+    let agents = [
+      snapshot({ canonicalName: '/review', color: '#DC2626' }),
+      snapshot({ canonicalName: '/tests', color: '#DC2626' }),
+    ];
+    const getSnapshots = mock(() => agents);
+    const widget = controller(getSnapshots);
+    const f = host({ theme: dark });
+    widget.attach(f.ctx);
+    expect(f.render()[1]).toContain(renderAgentBadge('/review', dark, 'red'));
+    expect(f.render()[3]).toContain(renderAgentBadge('/tests', dark, 'red'));
+    agents = [agents[1]];
+    widget.refresh();
+    expect(f.render()[1]).toContain(renderAgentBadge('/tests', dark, 'red'));
+    const samples = getSnapshots.mock.calls.length;
+    const light = nativeTheme('light');
+    f.ui.theme = light;
+    f.component.invalidate();
+    const updated = f.render()[1];
+    expect(updated).toContain(renderAgentBadge('/tests', light, 'red'));
+    expect(updated).toContain(light.fg('accent', '⠋'));
+    expect(getSnapshots).toHaveBeenCalledTimes(samples);
+    expect(f.setWidget).toHaveBeenCalledTimes(1);
+    expect(clock!.timers.size).toBe(2);
+    const reads = spyOn(fs, 'readFileSync'), scans = spyOn(fs, 'readdirSync');
+    try {
+      for (let frame = 0; frame < 5; frame++) {
+        clock!.tick();
+        expect(f.render()[1]).toContain(renderAgentBadge('/tests', light, 'red'));
+      }
+      expect(reads).not.toHaveBeenCalled();
+      expect(scans).not.toHaveBeenCalled();
+    } finally {
+      reads.mockRestore(); scans.mockRestore();
+    }
+    agents = [];
+    widget.refresh();
+    expect(clock!.timers.size).toBe(0);
+    expect(f.render()).toEqual([]);
+  });
+
+  test.each([undefined, 'invalid', '#123', null, {}, 12])('missing/invalid snapshot color %j keeps both lines and ordinary themed names', (color) => {
+    const theme = nativeTheme('dark');
+    const f = host({ theme });
+    controller(() => [snapshot({ color: color as any, responsePreview: 'plain activity' })]).attach(f.ctx);
+    const lines = f.render();
+    expect(lines).toHaveLength(3);
+    expect(lines[1]).toContain(theme.fg('accent', '/worker'));
+    expect(lines[2]).toContain('plain activity');
+    expect(lines.join('')).not.toMatch(/\x1b\[48;/);
+  });
+});
 
 describe('summary content', () => {
   test('construction and an empty attachment allocate no widget or timer', () => {
@@ -147,13 +235,34 @@ describe('summary content', () => {
     const lines = f.render();
     expect(lines[0]).toBe('● Agents · 1 running · /subagents');
     expect(lines[1]).toContain('/worker · openai-codex/gpt-6.1-sol/max');
-    expect(lines[1]).toContain('33.8k token (62% · ⇊1) · 12.3s');
+    expect(lines[1]).toContain('33.8k token (62% · ↓1) · 12s');
     expect(lines[2]).toContain('reading, editing…');
     expect(lines.join('\n')).not.toMatch(/thinking:|hidden while|turns|tool use|cost|\$/);
     expect(errors).not.toHaveBeenCalled();
     expect(f.setWidget.mock.calls[0][0]).toBe('pi-subagents');
     expect(f.setWidget.mock.calls[0][2]).toEqual({ placement: 'aboveEditor' });
     expect(f.component).not.toHaveProperty('handleInput');
+  });
+
+  test('elapsed labels show completed whole seconds and omit unknown or invalid durations', () => {
+    let agent = snapshot();
+    const f = host();
+    const widget = controller(() => [agent]);
+    widget.attach(f.ctx);
+    for (const [elapsedMs, seconds] of [
+      [0, 0], [0.5, 0], [999, 0], [1000, 1], [1999, 1], [12_345, 12],
+      [59_999, 59], [60_000, 60], [undefined, undefined], [-1, undefined],
+      [NaN, undefined], [Infinity, undefined],
+    ] as const) {
+      agent = snapshot({ elapsedMs });
+      widget.refresh();
+      for (const width of [32, 140]) {
+        const text = f.text(width).split('\n')[1];
+        expect(text.match(/\b\d+s\b/g) ?? []).toEqual(seconds === undefined ? [] : [`${seconds}s`]);
+        expect(text).not.toMatch(/\d+\.\d+s\b/);
+        expectFit(f.render(width), width);
+      }
+    }
   });
 
   test('activity prefers initializing, then deduplicated tool actions, then the first public line, then thinking', () => {
@@ -175,7 +284,7 @@ describe('summary content', () => {
       expect(f.text()).not.toContain('DO NOT SHOW SECOND');
     }
     expect(f.setWidget).toHaveBeenCalledTimes(1);
-    expect(clock!.timers.size).toBe(1);
+    expect(clock!.timers.size).toBe(2);
   });
 
   test('exact Pi built-in tool names, including native codemode, use short action labels', () => {
@@ -243,22 +352,44 @@ describe('summary content', () => {
       agent = snapshot({ tokens, elapsedMs: 0 });
       widget.refresh();
       expect(f.render()[1]).toContain(expected);
-      expect(f.render()[1]).toContain('0.0s');
+      expect(f.render()[1]).toContain('0s');
     }
     for (const tokens of [undefined, 0, -1, NaN, Infinity]) {
       agent = snapshot({ tokens, contextUsage: usage(0), compactionCount: 2 });
       widget.refresh();
-      expect(f.render()[1]).not.toMatch(/token|%|⇊/);
+      expect(f.render()[1]).not.toMatch(/token|%|↓/);
     }
     for (const [percent, compactionCount, expected] of [
-      [0, 0, '1.0k token (0%)'], [null, 2, '1.0k token (⇊2)'],
-      [62, 1, '1.0k token (62% · ⇊1)'], [null, 0, '1.0k token'],
+      [0, 0, '1.0k token (0%)'], [null, 2, '1.0k token (↓2)'],
+      [62, 1, '1.0k token (62% · ↓1)'], [null, 0, '1.0k token'],
     ] as const) {
       agent = snapshot({ tokens: 1000, contextUsage: usage(percent), compactionCount });
       widget.refresh();
       expect(f.render()[1]).toContain(expected);
       if (percent === null) expect(f.render()[1]).not.toContain('%');
-      if (!compactionCount) expect(f.render()[1]).not.toContain('⇊');
+      if (!compactionCount) expect(f.render()[1]).not.toContain('↓');
+    }
+  });
+
+  test('renders compact compaction markers with single and multi-digit counts in narrow and wide rows', () => {
+    let compactionCount = 1;
+    const f = host({ theme: nativeTheme('dark') });
+    const widget = controller(() => [snapshot({
+      color: 'blue', provider: 'provider', modelId: 'long-model/'.repeat(12), thinking: 'max',
+      tokens: 1000, contextUsage: usage(62), elapsedMs: 12_345, compactionCount,
+    })]);
+    widget.attach(f.ctx);
+    for (compactionCount of [1, 12, 123]) {
+      widget.refresh();
+      for (const width of [32, 80, 140]) {
+        const lines = f.render(width);
+        const line = stripVTControlCharacters(lines[1]);
+        expect(line.match(/↓\d+/g)).toEqual([`↓${compactionCount}`]);
+        expect(line).not.toMatch(/↓\s/);
+        expect(line).toContain('/max');
+        expect(line).toContain('12s');
+        expectFit(lines, width);
+      }
     }
   });
 
@@ -287,10 +418,10 @@ describe('summary content', () => {
       const lines = f.render(width);
       expectFit(lines, width);
       expect(lines[1]).toContain('/max');
-      expect(lines[1]).toContain('12.3s');
+      expect(lines[1]).toContain('12s');
       expect(lines[1]).toContain('1.0k');
       expect(lines[1]).toContain('0%');
-      expect(lines[1]).toContain('⇊1');
+      expect(lines[1]).toContain('↓1');
       expect(lines[1]).not.toContain('thinking:');
     }
   });
@@ -347,6 +478,47 @@ describe('summary content', () => {
 });
 
 describe('session status summary', () => {
+  for (const appearance of ['dark', 'light'] as const) {
+    test.each(['truecolor', '256color'] as const)(`${appearance} heading keeps each original status color in %s`, (mode) => {
+      const theme = nativeTheme(appearance, mode);
+      let agents = [snapshot()];
+      let counts = { running: 2, completed: 3, failed: 1, interrupted: 1 };
+      const source = mock(() => agents);
+      const widget = controller(source, mock((_error: unknown) => {}), () => counts);
+      const f = host({ theme });
+      widget.attach(f.ctx);
+      const checkColors = (current: Theme) => {
+        const line = f.render(140)[0];
+        const active = counts.running > 0;
+        expect(line).toContain(current.fg(active ? 'accent' : 'dim', active ? '● Agents' : '○ Agents'));
+        for (const [status, color] of [
+          ['running', 'warning'], ['completed', 'success'], ['failed', 'error'], ['interrupted', 'warning'],
+        ] as const) {
+          if (counts[status]) expect(line).toContain(current.fg(color, `${counts[status]} ${status}`));
+        }
+        expect(line).toEndWith(current.fg(active ? 'accent' : 'dim', ' · /subagents'));
+      };
+      checkColors(theme);
+      for (const width of [0, 1, 9, 10, 22, 32, 60, 80, 120]) {
+        expectFit(f.render(width), width);
+        if (width >= 10) expect(f.text(width).split('\n')[0]).toContain('/subagents');
+      }
+      const samples = source.mock.calls.length;
+      const replacement = nativeTheme(appearance === 'dark' ? 'light' : 'dark', mode);
+      f.ui.theme = replacement;
+      f.component.invalidate();
+      checkColors(replacement);
+      expect(source).toHaveBeenCalledTimes(samples);
+      expect(f.setWidget).toHaveBeenCalledTimes(1);
+      agents = [];
+      counts = { ...counts, running: 0 };
+      widget.refresh();
+      checkColors(replacement);
+      expect(f.render()).toHaveLength(1);
+      expect(clock!.timers.size).toBe(0);
+    });
+  }
+
   test('shows all nonzero statuses while only active agents get detail rows', () => {
     let agents = [snapshot(), snapshot({ canonicalName: '/second' }), snapshot({ canonicalName: '/third', status: 'starting' })];
     let counts = { running: 3, completed: 3, failed: 3, interrupted: 3 };
@@ -392,7 +564,7 @@ describe('session status summary', () => {
     widget.refresh();
     expect(f.render()[0]).toBe('● Agents · 1 running · /subagents');
     expect(f.render()).toHaveLength(3);
-    expect(clock!.timers.size).toBe(1);
+    expect(clock!.timers.size).toBe(2);
     expect(f.text()).not.toMatch(/0 completed|0 failed|0 interrupted/);
   });
 
@@ -494,8 +666,117 @@ describe('layout budgets', () => {
   });
 });
 
+describe('native spinner clock', () => {
+  test('matches native Loader frames and cadence without sampling on animation ticks or advancing on refresh', () => {
+    class NativeProbe extends Loader {
+      frame() { return this.getRenderedIndicator(); }
+    }
+    const f = host();
+    const source = mock(() => [snapshot(), snapshot({ canonicalName: '/second' })]);
+    const widget = controller(source);
+    widget.attach(f.ctx);
+    const sample = [...clock!.timers.values()].find((timer) => timer.delay === 200)!;
+    const animation = [...clock!.timers.values()].find((timer) => timer.delay === 80)!;
+    expect(sample).toBeDefined();
+    expect(animation).toBeDefined();
+    // Two agents share one native animation timer, not one timer per row.
+    expect(clock!.timers.size).toBe(2);
+    const previous = new Set(clock!.timers.keys());
+    const native = new NativeProbe(f.tui, (text) => text, (text) => text, 'Working');
+    const nativeTimer = [...clock!.timers].find(([key]) => !previous.has(key))![1];
+    try {
+      expect(animation.delay).toBe(nativeTimer.delay);
+      expect(animation.delay).toBe(80);
+      const checkFrame = () => {
+        const lines = f.render().map(stripVTControlCharacters);
+        expect(lines[1]).toStartWith('├─ ' + native.frame() + ' ');
+        expect(lines[3]).toStartWith('└─ ' + native.frame() + ' ');
+      };
+      for (let frame = 0; frame < 25; frame++) {
+        checkFrame();
+        widget.refresh();
+        widget.refresh();
+        f.component.invalidate();
+        checkFrame(); // Lifecycle refreshes and renders must not speed up the spinner.
+        const samples = source.mock.calls.length;
+        const redraws = f.requestRender.mock.calls.length;
+        animation.callback();
+        expect(source).toHaveBeenCalledTimes(samples);
+        expect(f.requestRender).toHaveBeenCalledTimes(redraws + 1);
+        nativeTimer.callback();
+        checkFrame();
+        sample.callback();
+        checkFrame(); // 200ms SDK sampling is independent of the native animation.
+      }
+      expect(clock!.set).toHaveBeenCalledTimes(3);
+    } finally {
+      native.stop();
+      widget.dispose();
+    }
+    expect(clock!.timers.size).toBe(0);
+  });
+
+  test('heading-only totals do not animate and stale frames cannot redraw a restarted widget', () => {
+    let agents: AgentWidgetSnapshot[] = [];
+    let counts = { running: 1, completed: 0, failed: 0, interrupted: 0 };
+    const source = mock(() => agents);
+    const widget = controller(source, mock((_error: unknown) => {}), () => counts);
+    const f = host();
+    widget.attach(f.ctx);
+    expect([...clock!.timers.values()].map((timer) => timer.delay)).toEqual([200]);
+    agents = [snapshot()];
+    widget.refresh();
+    expect([...clock!.timers.values()].map((timer) => timer.delay)).toEqual([200, 80]);
+    const staleFrame = [...clock!.timers.values()].find((timer) => timer.delay === 80)!.callback;
+    agents = [];
+    counts = { ...counts, running: 0, completed: 1 };
+    widget.refresh();
+    expect(f.render()).toHaveLength(1);
+    expect(clock!.timers.size).toBe(0);
+    agents = [snapshot()];
+    counts = { ...counts, running: 1 };
+    widget.refresh();
+    const samples = source.mock.calls.length;
+    const redraws = f.requestRender.mock.calls.length;
+    staleFrame();
+    expect(source).toHaveBeenCalledTimes(samples);
+    expect(f.requestRender).toHaveBeenCalledTimes(redraws);
+    expect([...clock!.timers.values()].map((timer) => timer.delay)).toEqual([200, 80]);
+    widget.dispose();
+    expect(clock!.timers.size).toBe(0);
+  });
+
+  test('a native animation allocation failure leaves sampling alive and retries without remounting', () => {
+    const set = clock!.set.getMockImplementation()!;
+    let fail = true;
+    clock!.set.mockImplementation(((callback: () => void, delay?: number) => {
+      if (delay === 80 && fail) {
+        fail = false;
+        throw new Error('native animation allocation');
+      }
+      return set(callback, delay);
+    }) as any);
+    const errors = mock((_error: unknown) => {});
+    const source = mock(() => [snapshot()]);
+    const widget = controller(source, errors);
+    const f = host();
+    expect(() => widget.attach(f.ctx)).not.toThrow();
+    expect(f.text()).toContain('/worker');
+    expect([...clock!.timers.values()].map((timer) => timer.delay)).toEqual([200]);
+    expect(errors).toHaveBeenCalledTimes(1);
+    widget.refresh();
+    expect([...clock!.timers.values()].map((timer) => timer.delay)).toEqual([200, 80]);
+    const samples = source.mock.calls.length;
+    clock!.tick(80);
+    expect(source).toHaveBeenCalledTimes(samples);
+    expect(f.setWidget).toHaveBeenCalledTimes(1);
+    widget.dispose();
+    expect(clock!.timers.size).toBe(0);
+  });
+});
+
 describe('widget and timer lifecycle', () => {
-  test('caches snapshots outside render and reuses one factory and one 200ms timer across fresh same-parent contexts', () => {
+  test('caches snapshots outside render and reuses one factory, one sampler and one native animator across fresh same-parent contexts', () => {
     const order: string[] = [];
     let thinking: 'max' | 'high' = 'max';
     const getSnapshots = mock(() => {
@@ -516,8 +797,8 @@ describe('widget and timer lifecycle', () => {
     expect(setWidget).not.toHaveBeenCalled();
     expect(f.component).toBe(component);
     expect(f.setWidget).toHaveBeenCalledTimes(1);
-    expect(clock!.set).toHaveBeenCalledTimes(1);
-    expect([...clock!.timers.values()][0].delay).toBe(200);
+    expect(clock!.set).toHaveBeenCalledTimes(2);
+    expect([...clock!.timers.values()].map((timer) => timer.delay)).toEqual([200, 80]);
     thinking = 'high';
     order.length = 0;
     clock!.tick();
@@ -545,7 +826,7 @@ describe('widget and timer lifecycle', () => {
     staleTick();
     expect(getSnapshots).toHaveBeenCalledTimes(samples);
     widget.refresh();
-    expect(clock!.timers.size).toBe(1);
+    expect(clock!.timers.size).toBe(2);
     expect(f.component).not.toBe(previous);
     expect(f.text()).toContain('new run');
     expect(f.setWidget).toHaveBeenCalledTimes(3);
@@ -572,9 +853,9 @@ describe('widget and timer lifecycle', () => {
     widget.refresh();
     const current = native.extensionWidgetsAbove.get('pi-subagents')!;
     expect(current).not.toBe(previous);
-    expect(clock!.timers.size).toBe(1);
+    expect(clock!.timers.size).toBe(2);
     previous.dispose?.();
-    expect(clock!.timers.size).toBe(1);
+    expect(clock!.timers.size).toBe(2);
     widget.dispose();
     widget.dispose();
     expect(setWidget).toHaveBeenCalledTimes(3); // mount, remount, controller clear
@@ -615,10 +896,10 @@ describe('widget and timer lifecycle', () => {
     widget.attach(second.ctx);
     expect(first.setWidget).toHaveBeenCalledTimes(2);
     expect(second.setWidget).toHaveBeenCalledTimes(1);
-    expect(clock!.timers.size).toBe(1);
+    expect(clock!.timers.size).toBe(2);
     previous.dispose?.();
     staleTick();
-    expect(clock!.timers.size).toBe(1);
+    expect(clock!.timers.size).toBe(2);
     expect(second.setWidget).toHaveBeenCalledTimes(1);
   });
 
@@ -663,7 +944,7 @@ describe('widget and timer lifecycle', () => {
     const current = factories[1](f.tui, f.factoryTheme);
     factories[0](f.tui, f.factoryTheme).dispose?.();
     expect(current.render(80)).toHaveLength(3);
-    expect(clock!.timers.size).toBe(1);
+    expect(clock!.timers.size).toBe(2);
   });
 
   test('real 200ms ticks update model thinking by 450ms without remounting', async () => {
@@ -680,7 +961,7 @@ describe('widget and timer lifecycle', () => {
     thinking = 'high';
     await new Promise((resolve) => setTimeout(resolve, 450));
     expect(f.text()).toContain('openai-codex/gpt-6.1-sol/high');
-    expect(f.text()).toContain('33.8k token (62% · ⇊1) · 12.3s');
+    expect(f.text()).toContain('33.8k token (62% · ↓1) · 12s');
     expect(f.setWidget).toHaveBeenCalledTimes(1);
     expect(f.requestRender.mock.calls.length).toBeGreaterThanOrEqual(3);
   });
@@ -708,13 +989,13 @@ describe('mode guards', () => {
       const next = host({ mode });
       const widget = controller(() => [snapshot()]);
       widget.attach(f.ctx);
-      expect(clock!.timers.size).toBe(1);
+      expect(clock!.timers.size).toBe(2);
       widget.attach(next.ctx);
       expect(f.setWidget).toHaveBeenCalledTimes(2);
       expect(next.setWidget).not.toHaveBeenCalled();
       expect(clock!.timers.size).toBe(0);
       widget.attach(f.ctx);
-      expect(clock!.timers.size).toBe(1);
+      expect(clock!.timers.size).toBe(2);
       widget.dispose();
     }
   });
@@ -747,7 +1028,7 @@ describe('exception isolation and recovery', () => {
     const retryTick = [...clock!.timers.values()][0].callback;
     clock!.tick(); // No attach(), refresh(), activity event or previous snapshot is needed.
     expect(f.text()).toContain('automatic recovery');
-    expect(clock!.set).toHaveBeenCalledTimes(1);
+    expect(clock!.set).toHaveBeenCalledTimes(2);
     expect(f.setWidget).toHaveBeenCalledTimes(1);
     expect(errors).toHaveBeenCalledTimes(1);
     agents = [];
@@ -911,7 +1192,7 @@ describe('exception isolation and recovery', () => {
     fail = true;
     expect(() => clock!.tick()).not.toThrow();
     expect(f.text()).toContain('last good frame');
-    expect(clock!.timers.size).toBe(1);
+    expect(clock!.timers.size).toBe(2);
     fail = false;
     agents = [];
     clock!.tick();
@@ -963,7 +1244,7 @@ describe('exception isolation and recovery', () => {
     f.ui.setWidget = setWidget;
     widget.refresh();
     expect(f.render()).toHaveLength(3);
-    expect(clock!.timers.size).toBe(1);
+    expect(clock!.timers.size).toBe(2);
     expect(errors.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
@@ -1027,7 +1308,7 @@ describe('exception isolation and recovery', () => {
     agents = [snapshot({ responsePreview: 'new work' })];
     widget.refresh();
     expect(f.text()).toContain('new work');
-    expect(clock!.timers.size).toBe(1);
+    expect(clock!.timers.size).toBe(2);
     expect(errors).toHaveBeenCalledTimes(1);
   });
 
@@ -1037,14 +1318,16 @@ describe('exception isolation and recovery', () => {
     const errors = mock((_error: unknown) => { throw new Error('reporter failure'); });
     const widget = controller(getSnapshots, errors);
     widget.attach(f.ctx);
-    const staleTick = [...clock!.timers.values()][0].callback;
+    const staleTicks = [...clock!.timers.values()].map((timer) => timer.callback);
     clock!.clear.mockImplementation(() => { throw new Error('timer clear failure'); });
     expect(() => f.component.dispose?.()).not.toThrow();
     const samples = getSnapshots.mock.calls.length;
-    staleTick();
+    const renders = f.requestRender.mock.calls.length;
+    for (const tick of staleTicks) tick();
+    expect(f.requestRender).toHaveBeenCalledTimes(renders);
     expect(getSnapshots).toHaveBeenCalledTimes(samples);
     expect(() => widget.dispose()).not.toThrow();
-    expect(errors).toHaveBeenCalledTimes(1);
+    expect(errors).toHaveBeenCalledTimes(2);
   });
 
   test('an SDK wrapper with a throwing component disposer cannot prevent controller cleanup or caller shutdown', () => {
@@ -1071,7 +1354,7 @@ describe('exception isolation and recovery', () => {
     expect(clock!.timers.size).toBe(0);
     clock!.set.mockImplementation(set);
     widget.refresh();
-    expect(clock!.timers.size).toBe(1);
+    expect(clock!.timers.size).toBe(2);
     expect(f.setWidget).toHaveBeenCalledTimes(1);
     expect(errors).toHaveBeenCalledTimes(1);
   });

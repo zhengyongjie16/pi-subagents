@@ -12,6 +12,7 @@ import {
   type ContextUsage,
 } from '@earendil-works/pi-coding-agent';
 import { createChildSession, promptChildSession, shutdownChildSession } from './runtime.js';
+import { resolveAgentColor } from './color.js';
 import { parseStreamingJson, type AssistantMessage } from '@earendil-works/pi-ai';
 
 export const PACKAGE_BASENAME = 'pi-subagents';
@@ -88,6 +89,7 @@ export interface SubagentConfig {
 
 export interface AgentDefinition {
   name: string;
+  color?: string;
   description?: string;
   provider?: string;
   model?: string;
@@ -104,6 +106,8 @@ export interface AgentInfo {
   parentSessionId: string;
   parentSessionFile?: string;
   agentType?: string;
+  /** Effective template badge color captured at creation; absent in older records. */
+  color?: string;
   provider: string;
   modelId: string;
   model: string;
@@ -131,6 +135,7 @@ export interface AgentInfo {
 /** Read-only parent-widget data; never persisted or exposed as a tool result. */
 export interface AgentWidgetSnapshot {
   readonly canonicalName: string;
+  readonly color?: string;
   readonly status: 'starting' | 'running';
   readonly provider?: string;
   readonly modelId?: string;
@@ -587,6 +592,9 @@ export function readInfoFile(file: string): AgentInfo | undefined {
       closedAt?: number;
     };
     if (!info || typeof info !== 'object' || Array.isArray(info)) return undefined;
+    const color = resolveAgentColor(info.color);
+    if (color) info.color = color;
+    else delete info.color;
     const contextUsage = normalizeContextUsage(info.contextUsage);
     if (contextUsage) info.contextUsage = contextUsage;
     else delete info.contextUsage;
@@ -673,6 +681,7 @@ export function parseAgentDefinitionText(text: string, fallbackName: string): Ag
   }
   return {
     name: attrs.name || fallbackName,
+    color: resolveAgentColor(attrs.color),
     description: attrs.description,
     provider: attrs.provider?.trim() || undefined,
     model: attrs.model?.trim() || undefined,
@@ -1446,6 +1455,7 @@ export class AgentManager {
         parentSessionId: params.parentSessionId,
         parentSessionFile: params.parentSessionFile,
         agentType: params.agent_type,
+        color: definition?.color,
         provider,
         modelId,
         model: `${provider}:${modelId}`,
@@ -2130,6 +2140,7 @@ export class AgentManager {
       } catch {} // Display failure cannot fail, cancel, or finalize an agent.
       snapshots.push({
         canonicalName: info.canonicalName,
+        color: info.color,
         status: info.status,
         provider,
         modelId,

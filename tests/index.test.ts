@@ -6,7 +6,10 @@ import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { stripVTControlCharacters } from 'node:util';
-import { TuiAltScreen, TuiMainScreen, visibleWidth, type Terminal } from '@earendil-works/pi-tui';
+import { backgroundAnsi, parseColor, TuiAltScreen, TuiMainScreen, visibleWidth, type Terminal } from '@earendil-works/pi-tui';
+import { renderAgentBadge, resolveAgentColor } from '../src/color.js';
+import { nativeTheme } from './fixtures/ui-theme.js';
+import { AgentSummaryWidget } from '../src/widget.js';
 import type { AgentInfo } from '../src/core.js';
 import { configureCoreFixture, useTestAgentDir, waitUntil } from './fixtures/core-sdk-fixture.js';
 
@@ -69,6 +72,7 @@ const hostFixture = `
   AgentManager.prototype.ready = async function() { options = this.options; };
   AgentManager.prototype.shutdown = async function() { shutdownCalls++; };
   AgentManager.prototype.listAgents = () => [];
+  AgentManager.prototype.listAgentInfos = () => [];
   function host() {
     const tools = new Map(), handlers = new Map(), commands = new Map(), shortcuts = new Map(), renderers = new Map();
     const messages = [], notifications = [], widgets = [];
@@ -612,6 +616,44 @@ test('keeps scoped notifications, bounded full output, and widget/shortcut integ
   );
 });
 
+test('startup summaries retain saved configured colors without exposing them in public lists or polling templates', () => {
+  probe(
+    hostFixture +
+      `const { nativeTheme } = await import(${JSON.stringify(pathToFileURL(path.join(packageDir, 'tests', 'fixtures', 'ui-theme.ts')).href)});\n` +
+      String.raw`
+    let lists = 0, samples = 0;
+    let entries = [
+      { canonicalName: "/configured", status: "running", color: "red" },
+      { canonicalName: "/invalid", status: "running", color: {} },
+      { canonicalName: "/old", status: "running" },
+    ];
+    AgentManager.prototype.listAgentInfos = () => { lists++; return entries; };
+    AgentManager.prototype.listAgents = () => { throw new Error("presentation must not use the public tool view"); };
+    AgentManager.prototype.getWidgetSnapshot = () => { samples++; return []; };
+    const f = host(), theme = nativeTheme("dark");
+    f.ctx.ui.theme = theme;
+    await extension(f.pi);
+    await f.emit("session_start");
+    const component = f.widgets.at(-1)[1]({}, theme);
+    const first = component.render(120);
+    assert.ok(first[1].includes("\x1b[48;2;220;38;38m"));
+    for (const row of first.slice(2)) assert.ok(!row.includes("\x1b[48;"));
+    const sampled = samples;
+    for (let frame = 0; frame < 5; frame++) component.render(120);
+    assert.equal(samples, sampled, "render only uses captured snapshots");
+    await new Promise(resolve => setTimeout(resolve, 450));
+    assert.ok(samples > sampled);
+    assert.equal(lists, 1, "timer sampling must not reread history/templates");
+    entries = [{ canonicalName: "/configured", status: "running" }];
+    const next = { ...f.ctx, sessionManager: { getSessionId: () => "next-parent" } };
+    await f.emit("session_start", {}, next);
+    assert.ok(!f.widgets.at(-1)[1]({}, theme).render(120).join("").includes("\x1b[48;"), "no previous-parent badge color");
+    assert.equal(lists, 2);
+    await f.emit("session_shutdown", { reason: "quit" }, next);
+  `,
+  );
+});
+
 test('summarizes every current-session agent by latest status without polling history or counting runs', () => {
   probe(
     hostFixture +
@@ -624,9 +666,9 @@ test('summarizes every current-session agent by latest status without polling hi
       ...[0, 1, 2].map(n => ({ agent_name: "/i" + n, agent_status: "interrupted" })),
     ];
     let expectedParent = "parent";
-    AgentManager.prototype.listAgents = (prefix, parent, all) => {
+    AgentManager.prototype.listAgentInfos = (prefix, parent, all) => {
       assert.equal(prefix, undefined); assert.equal(parent, expectedParent); assert.notEqual(all, true);
-      listed++; return entries;
+      listed++; return entries.map(entry => ({ canonicalName: entry.agent_name, status: entry.agent_status }));
     };
     AgentManager.prototype.getWidgetSnapshot = parent => {
       assert.equal(parent, expectedParent); sampled++; return [];
@@ -685,10 +727,10 @@ test('restores a settled-only session heading without starting periodic history 
     hostFixture +
       String.raw`
     let lists = 0, samples = 0;
-    AgentManager.prototype.listAgents = () => { lists++; return [
-      { agent_name: "/done", agent_status: "completed" },
-      { agent_name: "/error", agent_status: "failed" },
-      { agent_name: "/stopped", agent_status: "interrupted" },
+    AgentManager.prototype.listAgentInfos = () => { lists++; return [
+      { canonicalName: "/done", status: "completed" },
+      { canonicalName: "/error", status: "failed" },
+      { canonicalName: "/stopped", status: "interrupted" },
     ]; };
     AgentManager.prototype.getWidgetSnapshot = () => { samples++; return []; };
     const f = host();
@@ -733,8 +775,8 @@ test('updates live model summaries without messages, focus changes, or repeated 
     const text = component.render(140).join("\n");
     assert.ok(text.includes("/review"));
     assert.ok(text.includes("openai-codex/gpt-6.1-sol/max"));
-    assert.ok(text.includes("33.8k token (62% · ⇊1)"));
-    assert.ok(text.includes("12.3s"));
+    assert.ok(text.includes("33.8k token (62% · ↓1)"));
+    assert.ok(text.includes("12s"));
     assert.ok(text.includes("reading"));
     assert.ok(!text.includes("PRIVATE TASK") && !text.includes("tool use") && !text.includes("↻"));
     const mounted = factories().length;
@@ -1584,6 +1626,7 @@ test('packs runtime.ts without an SDK copy and loads the extracted package throu
       [
         'LICENSE',
         'README.md',
+        'src/color.ts',
         'src/core.ts',
         'src/index.ts',
         'package.json',
@@ -1894,7 +1937,7 @@ describe('extension completion delivery and TUI', () => {
               if (!(component instanceof SubagentPeekOverlay)) selections.push(value);
               component?.dispose?.();
             };
-            component = create(fixture.tui, theme, {}, done);
+            component = create(fixture.tui, fixture.theme, {}, done);
             try {
               if (component instanceof SubagentPeekOverlay) {
                 opened.push(component['info']);
@@ -1942,6 +1985,168 @@ describe('extension completion delivery and TUI', () => {
           .render(width)
           .find((line: string) => stripVTControlCharacters(line).startsWith('› ')) ?? '',
       );
+
+    test.each(['dark', 'light'] as const)('native %s browser uses configured name badges and independent two-line selection', async (appearance) => {
+      await withBrowser(async (f) => {
+        // Keep all-session fixtures newer than unrelated history in this shared directory.
+        const now = Date.now() + 1000;
+        const review = f.put('review', { color: 'red', agentType: 'reviewer', createdAt: now + 500, status: 'failed', lastTaskMessage: 'review preview 中文😀 '.repeat(20) });
+        f.put('tests', { color: '#dc2626', agentType: 'reviewer', createdAt: now + 400, lastTaskMessage: 'tests preview' });
+        f.put('plain', { createdAt: now + 300, lastTaskMessage: 'plain preview' });
+        f.put('invalid', { color: 'invalid', createdAt: now + 200, lastTaskMessage: 'invalid preview' });
+        f.put('bad-record', { color: {} as any, createdAt: now + 100, lastTaskMessage: 'malformed preview' });
+        const other = f.put('review', { color: 'red', agentType: 'reviewer', createdAt: now + 600 }, f.otherId);
+        for (const mode of ['truecolor', '256color'] as const) {
+          const theme = nativeTheme(appearance, mode);
+          f.theme = theme;
+          f.ctx.ui.theme = theme;
+          await f.open((browser: any) => {
+            const selectedBg = backgroundAnsi(theme.colors.selectedBg, mode);
+            const badgeBg = backgroundAnsi(parseColor('#DC2626'), mode);
+            const checkRow = (name: string, color: string | undefined, selected: boolean, width = 120) => {
+              const lines = browser.render(width);
+              const index = lines.findIndex((line: string) => stripVTControlCharacters(line).includes(name));
+              if (resolveAgentColor(color)) expect(lines[index]).toContain(badgeBg);
+              else if (!selected) expect(lines[index]).not.toMatch(/\x1b\[48;/);
+              expect(lines[index]).not.toContain('\x1b[7m');
+              expect(lines[index + 1]).not.toContain(badgeBg);
+              for (const line of [lines[index], lines[index + 1]]) {
+                if (selected) {
+                  expect(line).toStartWith(selectedBg);
+                  expect(visibleWidth(line)).toBe(width);
+                  expect(line).toEndWith('\x1b[49m');
+                  // Badge resets and clipping must immediately restore selection.
+                  for (const reset of line.matchAll(/\x1b\[(?:0|49)m/g)) {
+                    const end = reset.index! + reset[0].length;
+                    if (end < line.length) expect(line.slice(end)).toStartWith(selectedBg);
+                  }
+                } else {
+                  expect(line).not.toStartWith(selectedBg);
+                }
+              }
+              return lines;
+            };
+            const first = checkRow('/review', 'red', true);
+            expect(first.join('')).toContain(theme.fg('error', 'failed'.padEnd(11)));
+            checkRow('/tests', 'red', false);
+            checkRow('/plain', undefined, false);
+            checkRow('/invalid', undefined, false);
+            checkRow('/bad-record', undefined, false);
+            const reads = f.list.mock.calls.length;
+            expect(browser.render(120)).toBe(first);
+            expect(f.list).toHaveBeenCalledTimes(reads);
+            browser.handleInput('j');
+            checkRow('/review', 'red', false);
+            checkRow('/tests', 'red', true);
+            browser.handleInput('j');
+            checkRow('/plain', undefined, true); // Selection also works without an identity color.
+            for (const width of [0, 1, 2, 32, 38, 50, 80, 120])
+              expect(browser.render(width).every((line: string) => visibleWidth(line) <= width)).toBe(true);
+            browser.handleInput('\t');
+            const all = browser.render(120);
+            const otherLine = all.find((line: string) => stripVTControlCharacters(line).includes(other.parentSessionId.slice(-8)));
+            expect(otherLine).toContain(badgeBg);
+            // Theme invalidation changes selection/text, not explicit configured identity RGB.
+            const replacement = nativeTheme(appearance === 'dark' ? 'light' : 'dark', mode);
+            f.ctx.ui.theme = replacement;
+            browser.invalidate();
+            const chosen = browser.render(120).find((line: string) => stripVTControlCharacters(line).startsWith('› '));
+            expect(chosen).toStartWith(backgroundAnsi(replacement.colors.selectedBg, mode));
+            expect(chosen).toContain(badgeBg);
+            browser.handleInput('q');
+          });
+        }
+        expect(JSON.parse(fs.readFileSync(review.infoFile, 'utf8')).status).toBe('failed');
+      });
+    });
+
+    test('template colors flow through real spawn metadata and snapshots to the widget and browser without template IO', async () => {
+      await withBrowser(async (f) => {
+        const directory = path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents');
+        const templates = [
+          ['e2e-colored', 'color: cyan', '#0891B2'],
+          ['e2e-invalid', 'color: not-a-color', undefined],
+          ['e2e-plain', '', undefined],
+        ] as const;
+        fs.mkdirSync(directory, { recursive: true });
+        for (const [name, field] of templates)
+          fs.writeFileSync(path.join(directory, name + '.md'), '---\nname: ' + name + '\n' + field + '\n---\n');
+        const manager = new AgentManager();
+        const theme = nativeTheme('dark', '256color');
+        f.theme = f.ctx.ui.theme = theme;
+        let component: any;
+        const widget = new AgentSummaryWidget(() => manager.getWidgetSnapshot(f.parentId), (error) => { throw error; });
+        f.ctx.ui.setWidget = (_key: string, content: any) => {
+          if (typeof content === 'function') component = content(f.tui, theme);
+        };
+        try {
+          for (const [name, , color] of templates) {
+            await manager.spawnAgent({
+              task_name: name, message: 'hold end-to-end', agent_type: name, parentSessionId: f.parentId,
+              cwd: TEST_AGENT_DIR, inheritedProvider: 'test', inheritedModelId: 'fake',
+            });
+            expect(manager.getAgentInfo(name, f.parentId).color).toBe(color);
+          }
+          // Rendering must not rediscover types; their definitions can be gone now.
+          for (const [name] of templates) fs.rmSync(path.join(directory, name + '.md'));
+          widget.attach(f.ctx);
+          const reads = spyOn(fs, 'readFileSync'), scans = spyOn(fs, 'readdirSync');
+          try {
+            const summary = component.render(140);
+            expect(summary[1]).toContain(renderAgentBadge('/e2e-colored', theme, 'cyan'));
+            expect(summary[3]).not.toMatch(/\x1b\[48;/);
+            expect(summary[5]).not.toMatch(/\x1b\[48;/);
+            widget.refresh();
+            component.render(140);
+            expect(reads).not.toHaveBeenCalled();
+            expect(scans).not.toHaveBeenCalled();
+            await f.open((browser: any) => {
+              const lines = browser.render(120);
+              expect(lines.find((line: string) => stripVTControlCharacters(line).includes('/e2e-colored')))
+                .toContain(renderAgentBadge('/e2e-colored', theme, 'cyan'));
+              expect(lines.join('')).toContain('/e2e-invalid');
+              expect(lines.join('')).toContain('/e2e-plain');
+              browser.handleInput('q');
+            });
+            expect(reads.mock.calls.some(([file]) => String(file).startsWith(directory + path.sep))).toBe(false);
+            expect(scans.mock.calls.some(([file]) => String(file) === directory)).toBe(false);
+          } finally {
+            reads.mockRestore(); scans.mockRestore();
+          }
+        } finally {
+          widget.dispose();
+          await manager.shutdown();
+          for (const [name] of templates) fs.rmSync(path.join(directory, name + '.md'), { force: true });
+          fs.rmSync(path.join(getRunsDir(), parentScopeKey(f.parentId)), { recursive: true, force: true });
+        }
+      });
+    });
+
+    test('sanitizes untrusted browser names and metadata before explicit badge styling', async () => {
+      await withBrowser(async (f) => {
+        f.put('unsafe', {
+          canonicalName: '\x1b[31m/工人😀\x1b[0m\nworker\x07',
+          color: '#0077cc', modelId: '\x1b[31mmodel\x1b[0m\t中文',
+          lastTaskMessage: '\x1b]8;;https://unsafe.invalid\x07public preview\x1b]8;;\x07\nmore\x9f',
+        });
+        f.theme = f.ctx.ui.theme = nativeTheme('light', '256color');
+        await f.open((browser: any) => {
+          for (const width of [0, 1, 2, 32, 80, 120]) {
+            const lines = browser.render(width);
+            for (const line of lines) {
+              expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+              expect(stripVTControlCharacters(line)).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
+              expect(line).not.toContain('unsafe.invalid');
+              expect(line).not.toContain('\x1b[31m');
+            }
+          }
+          const text = browser.render(120).map(stripVTControlCharacters).join('\n');
+          expect(text).toContain('/工人😀 worker');
+          expect(text).toContain('public preview more');
+          browser.handleInput('q');
+        });
+      });
+    });
 
     test('reads each metadata file once per browser frame and never on a cache hit', async () => {
       await withBrowser(async (f) => {
@@ -2376,6 +2581,8 @@ describe('extension completion delivery and TUI', () => {
       async (mode) => {
         await withBrowser(async (f) => {
           f.put('native', { lastTaskMessage: '中文任务 '.repeat(30) });
+          f.theme = nativeTheme('dark');
+          f.ctx.ui.theme = f.theme;
           let input: (data: string) => void = () => {};
           let resize = () => {};
           const writes: string[] = [];

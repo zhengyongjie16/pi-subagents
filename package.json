@@ -59,6 +59,7 @@
     "src/runtime.ts",
     "src/peek.ts",
     "src/widget.ts",
+    "src/color.ts",
     "README.md",
     "LICENSE"
   ]
