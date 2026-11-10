@@ -144,7 +144,15 @@ A child completion or failure is delivered automatically to its parent session a
 
 ## Commands and TUI
 
-While agents are starting or running, a compact one-line indicator appears above the editor. It shows the task name for one active agent or a count for multiple agents and points to `/subagents`. The indicator disappears when no agents are active.
+A session-scoped agent summary appears above the editor and points to `/subagents`:
+
+```text
+● Agents · 2 running · 3 completed · 1 failed · 1 interrupted · /subagents
+├─ ⠹ /review-auth  openai-codex/gpt-6.1-sol/max · 33.8k token (62% · ⇊1) · 12.3s
+│    ⎿ reading…
+└─ ⠹ /tests  anthropic/claude-sonnet-4-6/high · 8.2k token (12%) · 4.1s
+     ⎿ thinking…
+```
 
 `/subagents` opens the agent browser for the current session. Each row shows the task name, status, elapsed time, model, and thinking level, with the task preview underneath. Long names are shortened to fit the terminal. Press Tab to switch to the read-only all-sessions view, then Enter to open an agent.
 

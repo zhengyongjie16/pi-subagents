@@ -587,7 +587,7 @@ test('keeps scoped notifications, bounded full output, and widget/shortcut integ
     const [key, widget] = f.widgets.at(-1);
     assert.equal(key, "pi-subagents");
     const theme = { fg: (_color, text) => text };
-    assert.ok(widget({}, theme).render(80).join("\n").includes("/task running"));
+    assert.ok(widget({}, theme).render(80).join("\n").includes("/task"));
     assert.ok(widget({}, theme).render(30).join("\n").includes("/subagents"));
     options.onCompletion({ parentSessionId: "other", agentName: "/ignored", status: "completed" });
     assert.equal(f.messages.length, 0);
@@ -612,6 +612,249 @@ test('keeps scoped notifications, bounded full output, and widget/shortcut integ
   );
 });
 
+test('summarizes every current-session agent by latest status without polling history or counting runs', () => {
+  probe(
+    hostFixture +
+      String.raw`
+    let listed = 0, sampled = 0;
+    let entries = [
+      ...[0, 1, 2].map(n => ({ agent_name: "/r" + n, agent_status: n ? "running" : "starting" })),
+      ...[0, 1, 2].map(n => ({ agent_name: "/c" + n, agent_status: "completed" })),
+      ...[0, 1, 2].map(n => ({ agent_name: "/f" + n, agent_status: "failed" })),
+      ...[0, 1, 2].map(n => ({ agent_name: "/i" + n, agent_status: "interrupted" })),
+    ];
+    let expectedParent = "parent";
+    AgentManager.prototype.listAgents = (prefix, parent, all) => {
+      assert.equal(prefix, undefined); assert.equal(parent, expectedParent); assert.notEqual(all, true);
+      listed++; return entries;
+    };
+    AgentManager.prototype.getWidgetSnapshot = parent => {
+      assert.equal(parent, expectedParent); sampled++; return [];
+    };
+    const f = host();
+    await extension(f.pi);
+    await f.emit("session_start");
+    const factory = f.widgets.filter(([, content]) => typeof content === "function").at(-1)[1];
+    const component = factory({ terminal: { rows: 50 }, requestRender() {} }, { fg: (_c, s) => s });
+    const lines = () => component.render(140);
+    const title = () => lines()[0];
+    assert.equal(title(), "● Agents · 3 running · 3 completed · 3 failed · 3 interrupted · /subagents");
+    assert.equal(lines().length, 7);
+    assert.ok(lines().slice(1).join("\n").includes("/r0"));
+    assert.ok(!lines().slice(1).join("\n").match(/\/[cfi][0-2]/));
+    const update = (name, status) => options.onActivityChange({
+      parentSessionId: "parent", agentName: name, status,
+      active: status === "starting" || status === "running",
+    });
+    update("/r1", "running"); update("/r1", "running"); update("/r0", "running");
+    options.onActivityChange({ parentSessionId: "other", agentName: "/ignored", active: false, status: "failed" });
+    assert.equal(title(), "● Agents · 3 running · 3 completed · 3 failed · 3 interrupted · /subagents");
+    update("/r0", "completed");
+    assert.equal(title(), "● Agents · 2 running · 4 completed · 3 failed · 3 interrupted · /subagents");
+    update("/c0", "starting"); update("/c0", "running");
+    update("/f0", "failed"); update("/i0", "interrupted");
+    assert.equal(title(), "● Agents · 3 running · 3 completed · 3 failed · 3 interrupted · /subagents");
+    update("/r1", "failed"); update("/r2", "interrupted"); update("/c0", "completed");
+    assert.deepEqual(lines(), ["○ Agents · 4 completed · 4 failed · 4 interrupted · /subagents"]);
+    const stoppedAt = sampled;
+    await new Promise(resolve => setTimeout(resolve, 450));
+    assert.equal(sampled, stoppedAt, "settled heading must not keep sampling");
+    assert.equal(listed, 1, "lifecycle updates must not reread history");
+    assert.equal(f.messages.length, 0, "status rendering must not send model messages");
+    entries = [];
+    expectedParent = "next-parent";
+    const next = { ...f.ctx, sessionManager: { getSessionId: () => expectedParent } };
+    await f.emit("session_start", {}, next);
+    assert.equal(f.widgets.at(-1)[1], undefined);
+    assert.deepEqual(component.render(140), []);
+    options.onActivityChange({ parentSessionId: "parent", agentName: "/old", active: false, status: "completed" });
+    assert.equal(f.widgets.at(-1)[1], undefined);
+    options.onActivityChange({ parentSessionId: expectedParent, agentName: "/new", active: true, status: "running" });
+    const newFactory = f.widgets.filter(([, content]) => typeof content === "function").at(-1)[1];
+    const fresh = newFactory({}, { fg: (_c, s) => s });
+    assert.equal(fresh.render(140)[0], "● Agents · 1 running · /subagents");
+    assert.equal(listed, 2);
+    await f.emit("session_shutdown", { reason: "quit" }, next);
+    assert.equal(f.widgets.at(-1)[1], undefined);
+  `,
+  );
+});
+
+test('restores a settled-only session heading without starting periodic history reads', () => {
+  probe(
+    hostFixture +
+      String.raw`
+    let lists = 0, samples = 0;
+    AgentManager.prototype.listAgents = () => { lists++; return [
+      { agent_name: "/done", agent_status: "completed" },
+      { agent_name: "/error", agent_status: "failed" },
+      { agent_name: "/stopped", agent_status: "interrupted" },
+    ]; };
+    AgentManager.prototype.getWidgetSnapshot = () => { samples++; return []; };
+    const f = host();
+    await extension(f.pi);
+    await f.emit("session_start");
+    const factory = f.widgets.at(-1)[1];
+    const component = factory({}, { fg: (_c, s) => s });
+    assert.deepEqual(component.render(140), ["○ Agents · 1 completed · 1 failed · 1 interrupted · /subagents"]);
+    const idle = samples;
+    await new Promise(resolve => setTimeout(resolve, 450));
+    assert.equal(samples, idle);
+    assert.equal(lists, 1);
+    await f.emit("session_shutdown", { reason: "quit" });
+    assert.equal(f.widgets.at(-1)[1], undefined);
+  `,
+  );
+});
+
+test('updates live model summaries without messages, focus changes, or repeated widget mounting', () => {
+  probe(
+    hostFixture +
+      String.raw`
+    let rows = [];
+    const scopes = [];
+    AgentManager.prototype.getWidgetSnapshot = parent => { scopes.push(parent); return rows; };
+    const f = host();
+    f.ctx.ui.custom = () => { throw new Error("summary must not take focus"); };
+    await extension(f.pi);
+    await f.emit("session_start");
+    rows = [{
+      canonicalName: "/review", status: "running", provider: "openai-codex",
+      modelId: "gpt-6.1-sol", thinking: "max", tokens: 33800,
+      contextUsage: { contextWindow: 500000, tokens: 310000, percent: 62 },
+      compactionCount: 1, elapsedMs: 12300, activeTools: ["read"],
+      lastTaskMessage: "PRIVATE TASK DESCRIPTION", turnCount: 17, toolUses: 99,
+    }];
+    options.onActivityChange({ parentSessionId: "parent", agentName: "/review", active: true });
+    const factories = () => f.widgets.filter(([, content]) => typeof content === "function");
+    const factory = factories().at(-1)[1];
+    let renders = 0;
+    const component = factory({ terminal: { rows: 40 }, requestRender() { renders++; } }, { fg: (_c, s) => s });
+    const text = component.render(140).join("\n");
+    assert.ok(text.includes("/review"));
+    assert.ok(text.includes("openai-codex/gpt-6.1-sol/max"));
+    assert.ok(text.includes("33.8k token (62% · ⇊1)"));
+    assert.ok(text.includes("12.3s"));
+    assert.ok(text.includes("reading"));
+    assert.ok(!text.includes("PRIVATE TASK") && !text.includes("tool use") && !text.includes("↻"));
+    const mounted = factories().length;
+    rows = [{ ...rows[0], thinking: "high", tokens: 40000 }];
+    await new Promise(resolve => setTimeout(resolve, 450));
+    assert.ok(renders > 0);
+    assert.ok(component.render(140).join("\n").includes("openai-codex/gpt-6.1-sol/high"));
+    assert.equal(factories().length, mounted);
+    assert.ok(scopes.length > 1 && scopes.every(scope => scope === "parent"));
+    assert.equal(f.messages.length, 0);
+    rows = [];
+    options.onActivityChange({ parentSessionId: "parent", agentName: "/review", active: false });
+    assert.equal(f.widgets.at(-1)[1], undefined);
+    await f.emit("session_shutdown", { reason: "quit" });
+    component.dispose?.();
+  `,
+  );
+});
+
+test('does not mount summary widgets in RPC, JSON, or print mode', () => {
+  probe(
+    hostFixture +
+      String.raw`
+    for (const mode of ["rpc", "json", "print"]) {
+      const f = host();
+      f.ctx.mode = mode;
+      f.ctx.hasUI = mode === "rpc";
+      await extension(f.pi);
+      await f.emit("session_start");
+      options.onActivityChange({ parentSessionId: "parent", agentName: "/task", active: true });
+      assert.equal(f.widgets.length, 0);
+      await f.emit("session_shutdown", { reason: "quit" });
+      assert.equal(f.widgets.length, 0);
+    }
+  `,
+  );
+});
+
+test.each(['regular', 'fullscreen'] as const)(
+  'native %s summary redraws and resizes without taking editor focus',
+  async (mode) => {
+    const { AgentSummaryWidget } = await import('../src/widget.js');
+    let rows = [{
+      canonicalName: '/review', status: 'running' as const, provider: 'openai-codex',
+      modelId: 'gpt-6.1-sol', thinking: 'max' as const, tokens: 33800,
+      elapsedMs: 12300, activeTools: ['read'],
+    }];
+    let input = (_data: string) => {};
+    let resize = () => {};
+    const writes: string[] = [];
+    const terminal: Terminal & { columns: number; rows: number } = {
+      columns: 140, rows: 40, kittyProtocolActive: false,
+      start(onInput, onResize) { input = onInput; resize = onResize; },
+      stop() {}, async drainInput() {}, write(data) { writes.push(data); },
+      moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {},
+      clearFromCursor() {}, clearScreen() {}, setTitle() {}, setProgress() {}, setProgramStatus() {},
+    };
+    const tui = mode === 'regular' ? new TuiMainScreen(terminal) : new TuiAltScreen(terminal);
+    let component: any;
+    let mounts = 0;
+    const errors: unknown[] = [];
+    const widget = new AgentSummaryWidget(() => rows, (error) => {
+      errors.push(error);
+      // Native notify() adds a chat component and requests another render.
+      tui.addChild({ render: () => ['summary warning'], invalidate() {} });
+      tui.requestRender();
+    });
+    let brokenTheme = false;
+    const theme = { fg: (_color: string, text: string) => {
+      if (brokenTheme) throw new Error('broken summary theme');
+      return text;
+    } };
+    const ctx: any = {
+      mode: 'tui', sessionManager: { getSessionId: () => 'summary-native' },
+      ui: { theme, setWidget(_key: string, content: any) {
+        if (component) { tui.removeChild(component); component.dispose(); }
+        component = content?.(tui, theme);
+        if (component) { mounts++; tui.addChild(component); }
+      } },
+    };
+    widget.attach(ctx);
+    widget.refresh();
+    const typed: string[] = [];
+    const editor = { render: (width: number) => ['> '.slice(0, width)], invalidate() {}, handleInput(data: string) { typed.push(data); } };
+    tui.addChild(editor);
+    tui.setFocus(editor);
+    tui.start();
+    const draw = () => { writes.length = 0; tui.renderNow(true); return stripVTControlCharacters(writes.join('')); };
+    try {
+      expect(draw()).toContain('openai-codex/gpt-6.1-sol/max');
+      rows = [{ ...rows[0], tokens: 40000 }];
+      widget.refresh();
+      expect(draw()).toContain('40.0k token');
+      expect(mounts).toBe(1);
+      for (const width of [1, 32, 80, 140]) {
+        terminal.columns = width;
+        resize();
+        draw();
+        expect(component.render(width).every((line: string) => visibleWidth(line) <= width)).toBe(true);
+      }
+      input('x');
+      expect(typed).toEqual(['x']);
+      expect(errors).toEqual([]);
+      brokenTheme = true;
+      draw();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(errors).toHaveLength(1); // A warning-driven redraw must not create more warnings.
+      brokenTheme = false;
+      draw();
+      brokenTheme = true;
+      draw();
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(errors).toHaveLength(2); // A genuinely new failure after recovery is reported again.
+    } finally {
+      widget.dispose();
+      tui.stop();
+    }
+  },
+);
+
 test('reports persistence/cleanup errors on every shutdown reason even if widget cleanup fails', () => {
   probe(
     hostFixture +
@@ -621,6 +864,7 @@ test('reports persistence/cleanup errors on every shutdown reason even if widget
       await extension(f.pi);
       await f.emit("session_start");
       const count = shutdownCalls;
+      options.onActivityChange({ parentSessionId: "parent", agentName: "/task", active: true });
       AgentManager.prototype.shutdown = async function() {
         shutdownCalls++;
         throw new AggregateError([new Error("save failed"), new Error("dispose failed")], "shutdown failed");
@@ -1345,6 +1589,7 @@ test('packs runtime.ts without an SDK copy and loads the extracted package throu
         'package.json',
         'src/peek.ts',
         'src/runtime.ts',
+        'src/widget.ts',
       ].sort(),
     );
     const unpacked = Bun.spawnSync(

@@ -44,6 +44,97 @@ const {
 } = await import('../src/core.js');
 
 describe('observer stream reconstruction', () => {
+
+  test('widget textPreview is bounded public text and never parses streaming tool arguments', () => {
+    const broadcaster = new EventBroadcaster(randomUUID());
+    const stream = broadcaster['assistantStream'];
+    stream.start(assistant());
+    stream.update({ type: 'thinking_start', contentIndex: 0 });
+    stream.update({ type: 'thinking_delta', contentIndex: 0, delta: 'PRIVATE_THINKING' });
+    startTool(stream, 1);
+    stream.update({
+      type: 'toolcall_delta',
+      contentIndex: 1,
+      delta: '{"secret":"PRIVATE_ARGUMENTS' + 'x'.repeat(32 * 1024),
+    });
+    const raw = stream.snapshotToolArguments();
+    const parse = spyOn(JSON, 'parse');
+    try {
+      expect(stream.textPreview).toBeUndefined();
+      stream.update({ type: 'text_start', contentIndex: 2 });
+      const publicText = 'Public answer ' + 'a'.repeat(512);
+      stream.update({
+        type: 'text_delta',
+        contentIndex: 2,
+        delta: '\n  ' + publicText + '\nnot the preview',
+      });
+      for (let index = 0; index < 5; index++) {
+        expect(stream.textPreview).toBe(publicText.slice(0, 180));
+        expect(broadcaster.getWidgetActivity()).toEqual({ activeTools: [], responsePreview: stream.textPreview });
+        expect(stream.textPreview).not.toMatch(/PRIVATE_|not the preview/);
+      }
+      expect(stream.snapshotToolArguments()).toEqual(raw);
+      expect(parse).not.toHaveBeenCalled();
+      stream.clear();
+      expect(stream.textPreview).toBeUndefined();
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
+  test('widget activity tracks concurrent same-name call IDs without changing observer nesting or results', () => {
+    const broadcaster = new EventBroadcaster(randomUUID());
+    const emit = (type: string, toolCallId: string, extra: any = {}) =>
+      broadcaster.broadcast({ type, toolCallId, toolName: 'codemode', ...extra });
+    const active = broadcaster['activeTools'];
+    emit('tool_execution_start', 'a', { args: { secret: 'PRIVATE_ARGUMENTS' } });
+    emit('tool_execution_start', 'b');
+    emit('tool_execution_start', 'top/read', { toolName: 'read' });
+    for (const type of ['tool_execution_start', 'tool_execution_update', 'tool_execution_end']) {
+      emit(type, 'orphan/child', { parentToolCallId: 'missing' });
+      emit(type, 'b', { parentToolCallId: 'a' });
+    }
+    const activity = broadcaster.getWidgetActivity();
+    expect(activity).toEqual({ activeTools: ['codemode', 'codemode', 'read'], responsePreview: undefined });
+    (activity.activeTools as string[]).pop();
+    expect(broadcaster.getWidgetActivity().activeTools).toEqual(['codemode', 'codemode', 'read']);
+    emit('tool_execution_end', 'a', { result: { content: [] }, isError: true });
+    expect(broadcaster.getWidgetActivity().activeTools).toEqual(['codemode', 'read']);
+    expect(broadcaster['activeTools']).toBe(active);
+    expect(active.get('a')).toMatchObject({ result: { content: [] }, isError: true });
+    expect(active.size).toBe(3); // Observer results survive until toolResult message_end.
+    broadcaster.broadcast({ type: 'message_end', message: { role: 'toolResult', toolCallId: 'a' } });
+    emit('tool_execution_end', 'b', { result: { content: [] } });
+    expect(broadcaster.getWidgetActivity().activeTools).toEqual(['read']);
+    broadcaster.broadcast({ type: 'agent_settled' });
+    expect(broadcaster.getWidgetActivity()).toEqual({ activeTools: [], responsePreview: undefined });
+    expect(active.size).toBe(0);
+  });
+
+  test('widget activity retains bounded final text through tool results and clears it on user/settled', () => {
+    const broadcaster = new EventBroadcaster(randomUUID());
+    const final = assistant([
+      { type: 'thinking', thinking: 'PRIVATE_THINKING' },
+      { type: 'toolCall', id: 'call-0', name: 'read', arguments: { secret: 'PRIVATE_ARGUMENTS' } },
+      { type: 'text', text: '\nPublic answer ' + 'x'.repeat(512) + '\nsecond line' },
+    ]);
+    broadcaster.broadcast({ type: 'message_start', message: final });
+    const preview = broadcaster.getWidgetActivity().responsePreview!;
+    expect(preview).toBe(('Public answer ' + 'x'.repeat(512)).slice(0, 180));
+    expect(preview).not.toMatch(/PRIVATE_|second line/);
+    broadcaster.broadcast({ type: 'message_end', message: final });
+    expect(broadcaster['assistantStream'].textPreview).toBeUndefined();
+    expect(broadcaster.getWidgetActivity().responsePreview).toBe(preview);
+    broadcaster.broadcast({ type: 'message_end', message: { role: 'toolResult', toolCallId: 'call-0' } });
+    broadcaster.broadcast({ type: 'message_start', message: assistant([{ type: 'thinking', thinking: 'PRIVATE_THINKING' }]) });
+    expect(broadcaster.getWidgetActivity().responsePreview).toBe(preview);
+    broadcaster.broadcast({ type: 'message_start', message: { role: 'user', content: 'next task' } });
+    expect(broadcaster.getWidgetActivity().responsePreview).toBeUndefined();
+    broadcaster.broadcast({ type: 'message_end', message: final });
+    expect(broadcaster.getWidgetActivity().responsePreview).toBe(preview);
+    broadcaster.broadcast({ type: 'agent_settled' });
+    expect(broadcaster.getWidgetActivity().responsePreview).toBeUndefined();
+  });
   function assistant(content: AssistantMessage['content'] = []): AssistantMessage {
     return {
       role: 'assistant',
@@ -1117,6 +1208,344 @@ function sessionMessages(info: AgentInfo): any[] {
 const markerDir = path.join(TEST_AGENT_DIR, 'pi-subagents', os.userInfo().username, 'sockets');
 const activeMarker = (id: string) => path.join(markerDir, id + '.active.json');
 const peekMarker = (id: string) => path.join(markerDir, id + '.peek.json');
+
+describe('widget snapshots', () => {
+  test('lifecycle notifications expose exact statuses, including interrupted without a completion notification', async () => {
+    const parent = 'widget-statuses-' + randomUUID();
+    const activity: Array<{ agentName: string; active: boolean; status?: AgentInfo['status'] }> = [];
+    const completions: string[] = [];
+    const manager = new AgentManager({
+      onActivityChange: (event) => activity.push(event),
+      onCompletion: (event) => completions.push(event.agentName),
+    });
+    try {
+      await manager.spawnAgent(spawnParams(parent, 'success', 'first'));
+      await settled(manager, manager.getAgentInfo('success', parent));
+      await manager.spawnAgent(spawnParams(parent, 'failure', 'fail this request'));
+      await settled(manager, manager.getAgentInfo('failure', parent));
+      await manager.spawnAgent(spawnParams(parent, 'cancelled', 'hold until interrupted'));
+      await waitUntil(() => fixture.instances.at(-1)!.activeStreams === 1);
+      await manager.interruptAgent(parent, 'cancelled');
+      expect(new Set(activity.map((event) => event.status))).toEqual(
+        new Set(['starting', 'running', 'completed', 'failed', 'interrupted']),
+      );
+      for (const event of activity)
+        expect(event.active).toBe(event.status === 'starting' || event.status === 'running');
+      expect(activity.filter((event) => !event.active).map((event) => [event.agentName, event.status])).toEqual([
+        ['/success', 'completed'], ['/failure', 'failed'], ['/cancelled', 'interrupted'],
+      ]);
+      expect(completions).toEqual(['/success', '/failure']);
+      expect(manager.readAgentResponse('cancelled', parent).status).toBe('interrupted');
+    } finally {
+      await manager.shutdown();
+    }
+  });
+
+  test('cumulates only assistant usage, caches by entry count/session identity, and is memory-only', async () => {
+    const parent = 'widget-cache-' + randomUUID();
+    const manager = new AgentManager();
+    try {
+      await manager.spawnAgent(spawnParams(parent, 'worker', 'hold source'));
+      await manager.spawnAgent(spawnParams(parent, 'replacement', 'hold replacement'));
+      await waitUntil(() => fixture.instances.every((instance) => instance.activeStreams === 1));
+      await manager.spawnAgent(spawnParams(parent, 'finished', 'finished'));
+      await settled(manager, manager.getAgentInfo('finished', parent));
+      const info = manager.getAgentInfo('worker', parent);
+      const live = manager['live'].get(info.id)!;
+      const other = manager['live'].get(manager.getAgentInfo('replacement', parent).id)!;
+      const source = live.session!, replacement = other.session!;
+      const store = source.sessionManager, otherStore = replacement.sessionManager;
+      const base = structuredClone(fixture.instances[0].requests[0].message);
+      const usage = { ...base.usage, input: 10, output: 2, cacheWrite: 3, cacheRead: 10000, totalTokens: 99999 };
+      const first = store.appendMessage({ ...base, stopReason: 'stop', usage });
+      store.appendContextEdit(first, null); // Raw historical usage still counts after projection omits it.
+      store.appendMessage({ ...base, stopReason: 'error', usage: { ...usage, input: 7, output: 4, cacheWrite: 5 } });
+      store.appendMessage({ ...base, stopReason: 'aborted', usage: { ...usage, input: 11, output: 6, cacheWrite: 8 } });
+      store.appendMessage({ role: 'user', content: 'not assistant usage', timestamp: Date.now(), usage } as any);
+      store.appendMessage({ role: 'toolResult', toolCallId: 'nested', toolName: 'read', content: [], isError: false, timestamp: Date.now(), usage });
+      store.appendUsage('cache_warm', 'test', 'fake', usage);
+      store.appendCompaction('summary with separate usage', null, 100000, undefined, false, usage);
+      store.appendCompaction('another compaction', null, 100000);
+      otherStore.appendMessage({ ...base, usage: { ...usage, input: 9, output: 0, cacheWrite: 0 } });
+      while (otherStore.getEntryCount() < store.getEntryCount()) otherStore.appendCustomEntry('padding');
+      expect(otherStore.getEntryCount()).toBe(store.getEntryCount());
+      live.info.contextUsage = { tokens: 22, contextWindow: 500000, percent: 0.0044 };
+      const before = structuredClone(live.info), otherBefore = structuredClone(other.info);
+      const mailbox = structuredClone(manager['mailbox']);
+      expect(mailbox).toHaveLength(1);
+      const savedInfo = fs.readFileSync(info.infoFile, 'utf8');
+      const savedSession = fs.readFileSync(info.sessionFile, 'utf8');
+      const scan = spyOn(store, 'getEntries'), otherScan = spyOn(otherStore, 'getEntries');
+      const sample = spyOn(source, 'getContextUsage');
+      const io = [
+        spyOn(fs, 'readFileSync'), spyOn(fs, 'writeFileSync'), spyOn(fs, 'appendFileSync'),
+        spyOn(fs, 'renameSync'), spyOn(fs, 'readdirSync'), spyOn(fs, 'statSync'), spyOn(fs, 'existsSync'),
+      ];
+      try {
+        const snapshot = manager.getWidgetSnapshot(parent)[0];
+        expect(snapshot).toMatchObject({ tokens: 56, compactionCount: 2, contextUsage: before.contextUsage });
+        expect(snapshot.contextUsage).not.toBe(live.info.contextUsage);
+        snapshot.contextUsage!.tokens = 999;
+        for (let index = 0; index < 5; index++)
+          expect(manager.getWidgetSnapshot(parent)[0].contextUsage).toEqual(before.contextUsage);
+        expect(scan).toHaveBeenCalledTimes(1);
+        expect(otherScan).toHaveBeenCalledTimes(1);
+        expect(sample).not.toHaveBeenCalled();
+        // Swap two real native sessions at the same entry count; identity must invalidate both caches.
+        live.session = replacement;
+        other.session = source;
+        expect(manager.getWidgetSnapshot(parent).map((entry) => entry.tokens)).toEqual([9, 56]);
+        expect(scan).toHaveBeenCalledTimes(2);
+        expect(otherScan).toHaveBeenCalledTimes(2);
+        for (const operation of io) expect(operation).not.toHaveBeenCalled();
+        expect(live.info).toEqual(before);
+        expect(other.info).toEqual(otherBefore);
+        expect(manager['mailbox']).toEqual(mailbox);
+      } finally {
+        live.session = source;
+        other.session = replacement;
+        for (const operation of io) operation.mockRestore();
+        sample.mockRestore();
+      }
+      expect(fs.readFileSync(info.infoFile, 'utf8')).toBe(savedInfo);
+      expect(fs.readFileSync(info.sessionFile, 'utf8')).toBe(savedSession);
+      manager.getWidgetSnapshot(parent);
+      const scans = scan.mock.calls.length;
+      // Native ordinary messages do not emit entry_appended; count alone must detect this append.
+      store.appendMessage({ ...base, usage: { ...usage, input: 4, output: 0, cacheWrite: 0 } });
+      expect(manager.getWidgetSnapshot(parent)[0].tokens).toBe(60);
+      expect(manager.getWidgetSnapshot(parent)[0].tokens).toBe(60);
+      expect(scan.mock.calls.length).toBe(scans + 1);
+      scan.mockRestore();
+      otherScan.mockRestore();
+    } finally {
+      await manager.shutdown();
+    }
+  });
+
+  test.each([4, 0])('restores historical tokens/compactions on real resume, resetting only the display clock (idle cap %s)', async (cap) => {
+    writeConfig({ maxIdleSessions: cap });
+    const gate = deferred(), next = deferred();
+    fixture.responseGate = gate.promise;
+    fixture.tokens = (text) => text === 'first' ? 50 : 70;
+    const parent = 'widget-resume-' + randomUUID();
+    const manager = new AgentManager();
+    try {
+      await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
+      const info = manager.getAgentInfo('worker', parent);
+      const firstLive = manager['live'].get(info.id)!;
+      const firstSession = firstLive.session!;
+      const firstClock = firstLive.run!.displayStartedAt;
+      const startedAt = info.startedAt;
+      await settled(manager, info);
+      const history = cap ? firstSession.sessionManager : codingAgent.SessionManager.open(
+        info.sessionFile, path.dirname(info.sessionFile), info.cwd,
+      );
+      history.appendCompaction('historical widget compaction', null, 50);
+      await manager.sendMessage(parent, 'worker', 'hold second');
+      await waitUntil(() => fixture.instances.at(-1)!.activeStreams === 1);
+      const live = manager['live'].get(info.id)!;
+      if (cap) expect(live.session).toBe(firstSession);
+      else expect(live.session).not.toBe(firstSession);
+      const run = live.run!, resumedAt = run.displayStartedAt;
+      expect(resumedAt).toBeGreaterThan(firstClock);
+      const clock = spyOn(Date, 'now').mockReturnValue(run.displayStartedAt + 1234);
+      try {
+        expect(manager.getWidgetSnapshot(parent)[0]).toMatchObject({ tokens: 50, compactionCount: 1, elapsedMs: 1234 });
+        expect(manager.getWidgetSnapshot(parent)[0].elapsedMs).toBe(1234);
+      } finally {
+        clock.mockRestore();
+      }
+      expect(await manager.sendMessage(parent, 'worker', 'hold steered')).toEqual({ delivery: 'steer' });
+      manager.getWidgetSnapshot(parent);
+      expect(live.run).toBe(run);
+      expect(live.run!.displayStartedAt).toBe(resumedAt);
+      expect(live.info.startedAt).toBe(startedAt);
+      expect(readInfoFile(info.infoFile)?.startedAt).toBe(startedAt);
+      gate.resolve();
+      await settled(manager, info);
+      expect(manager.getWidgetSnapshot(parent)).toEqual([]);
+      fixture.responseGate = next.promise;
+      await manager.sendMessage(parent, 'worker', 'hold third');
+      expect(manager.getWidgetSnapshot(parent)[0]).toMatchObject({ tokens: 190, compactionCount: 1 });
+      expect(manager.getAgentInfo('worker', parent).startedAt).toBe(startedAt);
+      expect(readInfoFile(info.infoFile)?.startedAt).toBe(startedAt);
+      expect(fixture.instances).toHaveLength(cap ? 1 : 3);
+    } finally {
+      gate.resolve();
+      next.resolve();
+      await manager.shutdown();
+    }
+  });
+
+  test('does not reset elapsed time for steer, native retry, or repeated reads', async () => {
+    const gate = deferred();
+    fixture.responseGate = gate.promise;
+    fixture.tokens = 20;
+    fixture.onLoad = (pi) => {
+      pi.on('message_end', (event) => {
+        if (event.message.role === 'assistant' && event.message.stopReason === 'error')
+          event.message.errorMessage = '503 overloaded';
+      });
+    };
+    const parent = 'widget-retry-' + randomUUID();
+    const manager = new AgentManager();
+    try {
+      await manager.spawnAgent(spawnParams(parent, 'worker', 'hold first'));
+      await waitUntil(() => fixture.instances[0].activeStreams === 1);
+      const info = manager.getAgentInfo('worker', parent);
+      const live = manager['live'].get(info.id)!;
+      const run = live.run!, started = run.displayStartedAt;
+      live.session!.settingsManager.applyOverrides({ retry: { enabled: true, maxRetries: 1, baseDelayMs: 300, maxAgentDelayMs: 300 } });
+      const before = manager.getWidgetSnapshot(parent)[0].elapsedMs!;
+      expect(await manager.sendMessage(parent, 'worker', 'fail retry')).toEqual({ delivery: 'steer' });
+      expect(manager.getWidgetSnapshot(parent)[0].elapsedMs).toBeGreaterThanOrEqual(before);
+      expect(live.run!.displayStartedAt).toBe(started);
+      gate.resolve();
+      await waitUntil(() => live.session!.isRetrying);
+      for (let index = 0; index < 3; index++)
+        expect(manager.getWidgetSnapshot(parent)[0]).toMatchObject({ tokens: 40, compactionCount: 0 });
+      expect(live.run).toBe(run);
+      expect(live.run!.displayStartedAt).toBe(started);
+      await settled(manager, info);
+      expect(fixture.instances[0].requests).toHaveLength(3);
+      expect(manager.getAgentInfo('worker', parent).status).toBe('failed');
+    } finally {
+      gate.resolve();
+      await manager.shutdown();
+    }
+  });
+
+  test('isolates parent scopes, includes starting/running memory only, and omits every final status', async () => {
+    const parent = 'widget-scope-' + randomUUID(), foreign = 'widget-foreign-' + randomUUID();
+    const startup = deferred();
+    const manager = new AgentManager();
+    let starting: Promise<unknown> | undefined;
+    try {
+      await manager.spawnAgent(spawnParams(parent, 'worker', 'hold local'));
+      await manager.spawnAgent(spawnParams(foreign, 'worker', 'hold foreign'));
+      for (const [task, command, status] of [
+        ['done', 'done', 'completed'], ['failed', 'fail now', 'failed'], ['stopped', 'hold interrupted', 'interrupted'],
+      ]) {
+        await manager.spawnAgent(spawnParams(parent, task, command));
+        const info = manager.getAgentInfo(task, parent);
+        if (status === 'interrupted') await manager.interruptAgent(parent, task);
+        await settled(manager, info);
+        expect(manager.getAgentInfo(task, parent).status).toBe(status);
+      }
+      const done = manager.getAgentInfo('done', parent);
+      fs.writeFileSync(done.infoFile, JSON.stringify({ ...done, status: 'running' }));
+      fixture.startupGate = startup.promise;
+      const instances = fixture.instances.length;
+      starting = manager.spawnAgent(spawnParams(parent, 'starting', 'hold startup'));
+      await waitUntil(() => fixture.instances[instances]?.events.includes('session_start') ?? false);
+      expect(manager.getWidgetSnapshot(parent).map(({ canonicalName, status }) => [canonicalName, status])).toEqual([
+        ['/worker', 'running'], ['/starting', 'starting'],
+      ]);
+      expect(manager.getWidgetSnapshot(foreign).map(({ canonicalName }) => canonicalName)).toEqual(['/worker']);
+      expect(manager.getWidgetSnapshot('unrelated-parent')).toEqual([]);
+      startup.resolve();
+      await starting;
+    } finally {
+      startup.resolve();
+      await starting;
+      await manager.shutdown();
+    }
+    expect(manager.getWidgetSnapshot(parent)).toEqual([]);
+    expect(manager.getWidgetSnapshot(foreign)).toEqual([]);
+  });
+
+  test('uses the native effective model/thinking (including clamp), with configured fallback before a session', async () => {
+    const parent = 'widget-native-model-' + randomUUID();
+    const manager = new AgentManager();
+    try {
+      await manager.spawnAgent({ ...spawnParams(parent, 'worker', 'hold model'), thinking: 'xhigh' });
+      const info = manager.getAgentInfo('worker', parent);
+      const live = manager['live'].get(info.id)!;
+      const session = live.session!;
+      await session.setModel(fixture.instances[0].ctx!.modelRegistry.find('template-provider', 'template-model')!);
+      session.setThinkingLevel('xhigh');
+      expect(session.thinkingLevel).toBe('high');
+      expect(manager.getWidgetSnapshot(parent)[0]).toMatchObject({
+        provider: 'template-provider', modelId: 'template-model', thinking: 'high',
+      });
+      expect(live.info).toMatchObject({ provider: 'test', modelId: 'fake', thinking: 'xhigh' });
+      live.session = undefined;
+      try {
+        expect(manager.getWidgetSnapshot(parent)[0]).toMatchObject({
+          provider: 'test', modelId: 'fake', thinking: 'xhigh', tokens: undefined, compactionCount: undefined,
+        });
+      } finally {
+        live.session = session;
+      }
+    } finally {
+      await manager.shutdown();
+    }
+  });
+
+  test.each(['completed', 'failed'] as const)('display getter failures cannot change %s results, completion delivery, waits or cleanup', async (status) => {
+    writeConfig({ maxIdleSessions: 0 });
+    const gate = deferred();
+    fixture.responseGate = gate.promise;
+    const parent = 'widget-fault-' + randomUUID();
+    const notices: any[] = [], errors: Error[] = [];
+    const manager = new AgentManager({ onCompletion: (event) => notices.push(event), onError: (error) => errors.push(error) });
+    const spies: Array<ReturnType<typeof spyOn>> = [];
+    fixture.onLoad = (pi) => {
+      pi.on('message_end', (event) => {
+        if (event.message.role === 'assistant' && status === 'failed') {
+          event.message.stopReason = 'error';
+          event.message.errorMessage = 'original model failure';
+        }
+      });
+    };
+    try {
+      await manager.spawnAgent(spawnParams(parent, 'worker', 'hold outcome'));
+      const info = manager.getAgentInfo('worker', parent);
+      const live = manager['live'].get(info.id)!;
+      const session = live.session!, store = session.sessionManager;
+      const fail = () => { throw new Error('display getter failure'); };
+      spies.push(spyOn(live.broadcaster, 'getWidgetActivity').mockImplementation(fail));
+      spies.push(spyOn(store, 'getEntries').mockImplementationOnce(fail));
+      expect(manager.getWidgetSnapshot(parent)[0]).toMatchObject({ tokens: undefined, compactionCount: undefined, activeTools: [] });
+      const count = spyOn(store, 'getEntryCount').mockImplementationOnce(fail);
+      spies.push(count);
+      expect(manager.getWidgetSnapshot(parent)[0].tokens).toBeUndefined();
+      Object.defineProperty(session, 'model', { configurable: true, get: fail });
+      try {
+        expect(manager.getWidgetSnapshot(parent)[0]).toMatchObject({ provider: 'test', modelId: 'fake', tokens: 0 });
+      } finally {
+        delete (session as any).model;
+      }
+      const unsubscribe = session.subscribe((event) => {
+        if (event.type === 'message_end' && event.message.role === 'assistant') {
+          count.mockImplementationOnce(fail);
+          expect(manager.getWidgetSnapshot(parent)[0].tokens).toBeUndefined();
+        }
+      });
+      const waiting = manager.waitAgent(parent, ['worker']);
+      gate.resolve();
+      const { event } = await waiting;
+      await settled(manager, info);
+      unsubscribe();
+      expect(event).toMatchObject({ status, ...(status === 'completed' ? { finalResponse: 'response:hold outcome' } : { error: 'original model failure' }) });
+      expect(notices).toHaveLength(1);
+      expect(notices[0].id).toBe(event.id);
+      expect(errors).toEqual([]);
+      expect(manager.getAgentInfo('worker', parent).status).toBe(status);
+      expect(manager['mailbox']).toEqual([]);
+      expect(manager['waiters']).toEqual([]);
+      expect(manager['live'].has(info.id)).toBe(false);
+      expect(fixture.instances[0].shutdowns).toBe(1);
+      expect(fs.existsSync(activeMarker(info.id))).toBe(false);
+      expect(manager.getWidgetSnapshot(parent)).toEqual([]);
+    } finally {
+      gate.resolve();
+      for (const spy of spies) spy.mockRestore();
+      await manager.shutdown();
+    }
+  });
+});
 
 describe('spawn model and thinking resolution', () => {
   test('caller wins, then the template, then the inherited value, then the default', async () => {

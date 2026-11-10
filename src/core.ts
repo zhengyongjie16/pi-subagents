@@ -128,6 +128,21 @@ export interface AgentInfo {
   contextUsage?: ContextUsage;
 }
 
+/** Read-only parent-widget data; never persisted or exposed as a tool result. */
+export interface AgentWidgetSnapshot {
+  readonly canonicalName: string;
+  readonly status: 'starting' | 'running';
+  readonly provider?: string;
+  readonly modelId?: string;
+  readonly thinking?: ThinkingLevel;
+  readonly tokens?: number;
+  readonly compactionCount?: number;
+  readonly contextUsage?: ContextUsage;
+  readonly elapsedMs?: number;
+  readonly activeTools: readonly string[];
+  readonly responsePreview?: string;
+}
+
 export interface AgentListEntry {
   agent_name: string;
   agent_status: AgentRuntimeStatus;
@@ -159,6 +174,8 @@ export interface SpawnAgentParams {
 }
 
 interface RunState {
+  /** UI-only clock: the persisted agent timestamp retains its existing semantics. */
+  displayStartedAt: number;
   cancellation: AbortController;
   promptFinished?: Promise<void>;
   pendingSteers: Set<Promise<unknown>>;
@@ -192,6 +209,12 @@ interface LiveAgent {
   eventError?: Error;
   lastUsedAt: number;
   lastActivityPersistedAt: number;
+  widgetStats?: {
+    session: AgentSession;
+    entryCount: number;
+    tokens: number;
+    compactionCount: number;
+  };
 }
 
 export interface AgentCompletionEvent {
@@ -208,6 +231,8 @@ export interface AgentActivityEvent {
   parentSessionId: string;
   agentName: string;
   active: boolean;
+  /** Exact latest status, including terminal states; active remains backward-compatible. */
+  status?: AgentRuntimeStatus;
 }
 
 export interface AgentManagerOptions {
@@ -858,6 +883,15 @@ class SessionLogger {
   }
 }
 
+function assistantTextPreview(message: AssistantMessage | null | undefined): string | undefined {
+  for (const part of message?.content ?? []) {
+    if (part.type !== 'text') continue;
+    const line = part.text.match(/\S[^\r\n]*/)?.[0];
+    if (line) return line.trim().slice(0, 180);
+  }
+  return undefined;
+}
+
 export type RpcAssistantStreamStatus = 'thinking' | 'streaming' | 'calling';
 
 export class RpcAssistantStreamState {
@@ -869,6 +903,11 @@ export class RpcAssistantStreamState {
   get message(): AssistantMessage | null {
     this.flushToolArguments();
     return this.currentMessage;
+  }
+
+  /** Unlike message, reading a public-text preview never parses tool arguments. */
+  get textPreview(): string | undefined {
+    return assistantTextPreview(this.currentMessage);
   }
 
   /** Parse only changed arguments when a snapshot or UI frame actually needs them. */
@@ -1051,6 +1090,7 @@ export class EventBroadcaster {
   private toolName?: string;
   private readonly assistantStream = new RpcAssistantStreamState();
   private userMessage: any = null;
+  private responsePreview?: string;
   private readonly activeTools = new Map<
     string,
     {
@@ -1125,6 +1165,16 @@ export class EventBroadcaster {
     }
   }
 
+  /** Reuse observer activity without opening a socket or exposing mutable tool state. */
+  getWidgetActivity(): Pick<AgentWidgetSnapshot, 'activeTools' | 'responsePreview'> {
+    return {
+      activeTools: [...this.activeTools.values()]
+        .filter((tool) => tool.result === undefined)
+        .map((tool) => tool.toolName),
+      responsePreview: this.assistantStream.textPreview ?? this.responsePreview,
+    };
+  }
+
   broadcast(event: any): void {
     const isToolExecution =
       event.type === 'tool_execution_start' ||
@@ -1136,6 +1186,7 @@ export class EventBroadcaster {
 
     if (event.type === 'message_start' && event.message?.role === 'user') {
       this.userMessage = event.message;
+      this.responsePreview = undefined;
     } else if (event.type === 'message_start' && event.message?.role === 'assistant') {
       this.assistantStream.start(event.message);
       this.status = 'thinking';
@@ -1165,6 +1216,12 @@ export class EventBroadcaster {
         active.isError = event.isError ?? false;
       }
     } else if (event.type === 'message_end') {
+      if (event.message?.role === 'assistant') {
+        // Presentation sampling must never enter the observer/session failure path.
+        try {
+          this.responsePreview = assistantTextPreview(event.message);
+        } catch {}
+      }
       if (event.message?.role === 'toolResult' && event.message.toolCallId) {
         this.activeTools.delete(event.message.toolCallId);
       }
@@ -1172,6 +1229,7 @@ export class EventBroadcaster {
       this.userMessage = null;
     } else if (event.type === 'agent_settled') {
       this.assistantStream.clear();
+      this.responsePreview = undefined;
       this.userMessage = null;
       this.activeTools.clear();
       this.status = 'done';
@@ -1289,6 +1347,7 @@ export class AgentManager {
         parentSessionId: info.parentSessionId,
         agentName: info.canonicalName,
         active: info.status === 'starting' || info.status === 'running',
+        status: info.status,
       });
     } catch (error) {
       this.reportError(undefined, error);
@@ -1496,6 +1555,7 @@ export class AgentManager {
   private async startRun(live: LiveAgent, message: string, displayMessage = message): Promise<void> {
     const previous = { ...live.info };
     const run: RunState = {
+      displayStartedAt: Date.now(),
       cancellation: new AbortController(),
       finalizedRun: false,
       awaitingPrompt: true,
@@ -2016,6 +2076,72 @@ export class AgentManager {
     }
     this.mailbox.push(event);
     if (notify) this.notifyCompletion(event, false);
+  }
+
+  /** Memory-only summaries. Cache writes below are presentation-only, never saveInfo(). */
+  getWidgetSnapshot(parentSessionId: string): readonly AgentWidgetSnapshot[] {
+    const snapshots: AgentWidgetSnapshot[] = [];
+    const now = Date.now();
+    for (const live of this.live.values()) {
+      const { info, session, run } = live;
+      if (
+        info.parentSessionId !== parentSessionId ||
+        (info.status !== 'starting' && info.status !== 'running')
+      ) continue;
+
+      let provider = info.provider;
+      let modelId = info.modelId;
+      let thinking = info.thinking;
+      let stats: LiveAgent['widgetStats'];
+      if (session) {
+        try {
+          const model = session.model;
+          provider = model?.provider ?? provider;
+          modelId = model?.id ?? modelId;
+          thinking = session.thinkingLevel;
+        } catch {} // Keep configured metadata when a native getter is unavailable.
+        try {
+          const entryCount = session.sessionManager.getEntryCount();
+          stats = live.widgetStats;
+          if (stats?.session !== session || stats.entryCount !== entryCount) {
+            let tokens = 0;
+            let compactionCount = 0;
+            for (const entry of session.sessionManager.getEntries()) {
+              if (entry.type === 'compaction') compactionCount++;
+              if (entry.type !== 'message' || entry.message.role !== 'assistant') continue;
+              const usage = entry.message.usage;
+              if (!usage) continue;
+              // Match the reference display, not SDK billing totals or tool usage.
+              for (const value of [usage.input, usage.output, usage.cacheWrite])
+                if (typeof value === 'number' && Number.isFinite(value) && value >= 0)
+                  tokens += value;
+            }
+            stats = live.widgetStats = { session, entryCount, tokens, compactionCount };
+          }
+        } catch {
+          stats = undefined; // Unknown is not zero; retry on the next UI refresh.
+        }
+      }
+      let activity: Pick<AgentWidgetSnapshot, 'activeTools' | 'responsePreview'> = {
+        activeTools: [],
+      };
+      try {
+        activity = live.broadcaster.getWidgetActivity();
+      } catch {} // Display failure cannot fail, cancel, or finalize an agent.
+      snapshots.push({
+        canonicalName: info.canonicalName,
+        status: info.status,
+        provider,
+        modelId,
+        thinking,
+        tokens: stats?.tokens,
+        compactionCount: stats?.compactionCount,
+        contextUsage: normalizeContextUsage(info.contextUsage),
+        elapsedMs: run ? Math.max(0, now - run.displayStartedAt) : undefined,
+        ...activity,
+      });
+    }
+    return snapshots;
   }
 
   listAgentInfos(

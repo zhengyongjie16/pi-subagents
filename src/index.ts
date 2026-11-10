@@ -32,10 +32,12 @@ import {
   THINKING_LEVELS,
   type AgentCompletionEvent,
   type AgentInfo,
+  type AgentWidgetSnapshot,
   type ThinkingLevel,
   writeFullToolOutput,
 } from './core.js';
 import { SubagentPeekOverlay } from './peek.js';
+import { AgentSummaryWidget, type AgentStatusCounts } from './widget.js';
 
 type ToolRenderContext = Parameters<NonNullable<ToolRenderers['renderResult']>>[3];
 
@@ -132,10 +134,11 @@ export default async function index_(pi: ExtensionAPI) {
     throw new Error('Native codemode renderers are unavailable.');
   }
 
-  const widgetKey = 'pi-subagents';
   const completionMessageType = 'pi-subagent-completion';
   let activeContext: any;
-  const activeAgents = new Set<string>();
+  let widgetContext: any;
+  const agentStatuses = new Map<string, AgentInfo['status']>();
+  let widgetStatusCounts: AgentStatusCounts = { running: 0, completed: 0, failed: 0, interrupted: 0 };
 
   type SpawnModel = { provider: string; modelId: string };
 
@@ -196,28 +199,12 @@ export default async function index_(pi: ExtensionAPI) {
 
   const refreshAgentWidget = () => {
     if (activeContext?.mode !== 'tui') return;
-    const running = [...activeAgents];
-    if (!running.length) {
-      activeContext.ui.setWidget(widgetKey, undefined);
-      return;
-    }
-    const label =
-      running.length === 1 ? `${running[0]} running` : `${running.length} subagents running`;
-    activeContext.ui.setWidget(widgetKey, (_tui: any, theme: Theme) => ({
-      render(width: number) {
-        const marker = '◌ ';
-        const suffix = ' · /subagents';
-        if (width <= visibleWidth(marker) + visibleWidth(suffix)) {
-          return [truncateToWidth(theme.fg('dim', '/subagents'), width, '')];
-        }
-        const available = width - visibleWidth(marker) - visibleWidth(suffix);
-        const clippedLabel = truncateToWidth(label, available, '…');
-        return [
-          theme.fg('accent', marker) + theme.fg('text', clippedLabel) + theme.fg('dim', suffix),
-        ];
-      },
-      invalidate() {},
-    }));
+    // Recount only on lifecycle events, never on the 200ms rendering ticks.
+    const counts = { running: 0, completed: 0, failed: 0, interrupted: 0 };
+    for (const status of agentStatuses.values()) counts[status === 'starting' ? 'running' : status]++;
+    widgetStatusCounts = counts;
+    widgetContext = activeContext;
+    agentWidget.attach(activeContext);
   };
 
   const deliverCompletion = (event: AgentCompletionEvent, waiting = false) => {
@@ -264,6 +251,22 @@ export default async function index_(pi: ExtensionAPI) {
   };
 
   let manager: AgentManager | undefined;
+  const agentWidget = new AgentSummaryWidget(
+    () => {
+      if (!activeContext) return [];
+      const snapshots = manager?.getWidgetSnapshot(parentSessionId(activeContext)) ?? [];
+      const names = new Set(snapshots.map((snapshot) => snapshot.canonicalName));
+      // Preserve early-start and external-host indicators without polling storage.
+      const fallback: AgentWidgetSnapshot[] = [];
+      for (const [canonicalName, status] of agentStatuses) {
+        if ((status === 'starting' || status === 'running') && !names.has(canonicalName))
+          fallback.push({ canonicalName, status, activeTools: [] });
+      }
+      return [...snapshots, ...fallback];
+    },
+    (error) => reportError(error, widgetContext),
+    () => widgetStatusCounts,
+  );
   const ensureManager = (ctx: any): AgentManager => {
     activeContext = ctx;
     if (manager) return manager;
@@ -278,8 +281,13 @@ export default async function index_(pi: ExtensionAPI) {
       onError: reportError,
       onActivityChange: (event) => {
         if (!isCurrentSession(event.parentSessionId)) return;
-        if (event.active) activeAgents.add(event.agentName);
-        else activeAgents.delete(event.agentName);
+        if (event.status) agentStatuses.set(event.agentName, event.status);
+        else if (event.active) agentStatuses.set(event.agentName, 'running');
+        else {
+          // A legacy notification cannot invent a terminal status or erase a known one.
+          const previous = agentStatuses.get(event.agentName);
+          if (previous === 'starting' || previous === 'running') agentStatuses.delete(event.agentName);
+        }
         refreshAgentWidget();
       },
       onCompletion: deliverCompletion,
@@ -460,7 +468,8 @@ ${getAgentDefinitionsDescription()}`;
 
   pi.on('session_start', async (_event: any, ctx: any) => {
     activeContext = ctx;
-    activeAgents.clear();
+    agentStatuses.clear();
+    widgetStatusCounts = { running: 0, completed: 0, failed: 0, interrupted: 0 };
     try {
       spawnModels = resolveSpawnModels(ctx);
     } catch (error: any) {
@@ -473,21 +482,23 @@ ${getAgentDefinitionsDescription()}`;
     const manager = ensureManager(ctx);
     await manager.ready();
     if (activeContext !== ctx) return;
-    for (const entry of manager.listAgents(undefined, parentSessionId(ctx))) {
-      if (entry.agent_status === 'starting' || entry.agent_status === 'running')
-        activeAgents.add(entry.agent_name);
-    }
+    // Reuse the existing one-time scoped startup read, including historical final states.
+    for (const entry of manager.listAgents(undefined, parentSessionId(ctx)))
+      agentStatuses.set(entry.agent_name, entry.agent_status);
     refreshAgentWidget();
   });
 
   pi.on('session_shutdown', async (_event, ctx) => {
     const shutdownContext = activeContext ?? ctx;
     activeContext = undefined;
-    activeAgents.clear();
+    agentStatuses.clear();
+    widgetStatusCounts = { running: 0, completed: 0, failed: 0, interrupted: 0 };
     try {
-      if (shutdownContext?.mode === 'tui') shutdownContext.ui.setWidget(widgetKey, undefined);
+      agentWidget.dispose();
     } catch (error) {
       reportError(error, shutdownContext);
+    } finally {
+      widgetContext = undefined;
     }
     try {
       await manager?.shutdown();
