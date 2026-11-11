@@ -348,32 +348,22 @@ export default async function index_(pi: ExtensionAPI) {
     name: 'spawn_agent',
     label: 'Spawn Agent',
     get description() {
-      return `Spawn a fresh-context Pi subagent for a concrete task. Skills are discovered automatically by the child session. Automatic extension and prompt-template discovery is disabled. Agent templates may configure a model with an optional provider, thinking level, tools, and extensions. A template model without a provider uses the current parent provider at spawn; without a model, both provider and model inherit (provider-only templates do not reroute). A caller model overrides the template route. Exact registered provider/model IDs are required, and any provider extension must be explicitly loaded in the child. Other omitted template settings inherit from the parent where applicable.
-${
-  spawnModels.size
-    ? `
-A task may run on a model of its own, without a template: \`model\` takes one of the values its schema lists, and \`thinking\` sets the reasoning effort.
-`
-    : ''
-}
-Returns after the child accepts its initial task. Continue with independent work instead of waiting; the child's final response will be delivered automatically when ready. Use \`wait_agent\` only when your next action depends on the subagent response and you have no useful work to do meanwhile.
+      return `Spawn a fresh-context subagent sharing the parent's working directory, not its conversation. Returns on task acceptance; success/error results arrive automatically. Continue other assigned work if available; use wait_agent only when blocked.
 
-\`agent_type\` is optional. Omit it for a generic subagent. Use a template only when the task matches it.
-
-Available agent templates:
+Agent templates:
 ${getAgentDefinitionsDescription()}`;
     },
     get parameters() {
       return Type.Object({
         task_name: Type.String({
           description:
-            'Task name for the new agent. Use letters, digits, underscores, dashes, and optional slash path separators.',
+            'Unique within this parent session. Use ASCII letters, digits, _, -, and / separators.',
         }),
-        message: Type.String({ description: 'Initial task for the new agent.' }),
+        message: Type.String({
+          description: 'Concise, self-contained task: relevant context, paths, constraints, expected output.',
+        }),
         agent_type: Type.Optional(
-          Type.String({
-            description: 'Optional agent template name from ~/.pi/agent/pi-subagents/agents/.',
-          }),
+          Type.String({ description: 'Matching listed template; omit for a generic subagent.' }),
         ),
         ...(spawnModels.size
           ? {
@@ -381,8 +371,7 @@ ${getAgentDefinitionsDescription()}`;
               model: Type.Optional(
                 Type.Unsafe<string>(
                   StringEnum([...spawnModels.keys()], {
-                    description:
-                      'Optional model for this one task, for example an independent review by another vendor. Defaults to the template model, otherwise the parent model.',
+                    description: 'Model override; defaults to template, then parent.',
                   }),
                 ),
               ),
@@ -390,7 +379,7 @@ ${getAgentDefinitionsDescription()}`;
                 Type.Unsafe<ThinkingLevel>(
                   StringEnum(THINKING_LEVELS, {
                     description:
-                      'Optional thinking level. Defaults to the template level, otherwise the parent level.',
+                      'Reasoning effort; defaults to template, then parent, clamped to model support.',
                   }),
                 ),
               ),
@@ -539,12 +528,12 @@ ${getAgentDefinitionsDescription()}`;
     name: 'wait_agent',
     label: 'Wait Agent',
     description:
-      'Wait for one session-owned agent completion, or for the next completion if targets is omitted. Returns only agent_name and status; final text and errors arrive automatically in a completion notification. Use only when blocked on that result; otherwise continue working. Use read_agent_response only to explicitly reread a result.',
+      'Wait for one subagent completion; already-finished targets return immediately. Returns only agent_name and status; text/errors use automatic notifications. Use only when blocked. Canceling this wait does not stop agents.',
     parameters: Type.Object({
       targets: Type.Optional(
         Type.Array(Type.String(), {
           description:
-            'Agent task names to wait on. Omit to wait for the next completion in this parent session.',
+            'Current-session agent names; any one, not all. Omit for any queued or next completion.',
         }),
       ),
     }),
@@ -599,28 +588,25 @@ ${getAgentDefinitionsDescription()}`;
     name: 'list_agents',
     label: 'List Agents',
     description:
-      'List compact agent names and statuses for the current parent session, newest first with active agents prioritized. Returns 10 by default; use offset for another page or path_prefix to narrow the result. Set include_all only for an explicit read-only historical listing across parent sessions.',
+      'List current-session agent names/statuses: active first, then newest-created within each group. Use include_all only for an explicitly requested cross-session listing.',
     parameters: Type.Object({
       path_prefix: Type.Optional(
-        Type.String({ description: 'Task-path prefix filter without a trailing slash.' }),
+        Type.String({
+          description: 'Literal task-name prefix; review/ matches descendants only.',
+        }),
       ),
       include_all: Type.Optional(
         Type.Boolean({
-          description:
-            'Include agents from all parent sessions and show parent_session_id. Default false.',
+          description: 'Cross-session listing only; includes parent_session_id. Default false.',
         }),
       ),
       limit: Type.Optional(
-        Type.Integer({
-          minimum: 1,
-          maximum: 100,
-          description: 'Maximum agents to return. Default 10; maximum 100.',
-        }),
+        Type.Integer({ minimum: 1, maximum: 100, description: 'Page size; default 10.' }),
       ),
       offset: Type.Optional(
         Type.Integer({
           minimum: 0,
-          description: 'Zero-based offset into the compact ordered result. Default 0.',
+          description: 'Zero-based offset; default 0. Use next_offset to continue.',
         }),
       ),
     }),
@@ -704,9 +690,9 @@ ${getAgentDefinitionsDescription()}`;
     name: 'read_agent_response',
     label: 'Read Agent Response',
     description:
-      "Read one current-session agent's latest final raw text response. Tool calls and intermediate assistant text are excluded.",
+      "Read an agent's latest run status and available final text/error, not a transcript. Non-blocking; use for rereads or programmatic access, not polling.",
     parameters: Type.Object({
-      target: Type.String({ description: 'Session-owned agent task name.' }),
+      target: Type.String({ description: 'Current-session agent name, e.g. /review.' }),
     }),
     outputSchema: Type.Object(
       {
@@ -714,7 +700,9 @@ ${getAgentDefinitionsDescription()}`;
         status: agentStatusSchema,
         finalResponse: Type.Optional(Type.String()),
         error: Type.Optional(Type.String()),
-        last_task_message: Type.Union([Type.String(), Type.Null()]),
+        last_task_message: Type.Union([Type.String(), Type.Null()], {
+          description: 'Latest task/steering message preview, not full text.',
+        }),
       },
       { additionalProperties: false },
     ),
@@ -759,9 +747,9 @@ ${getAgentDefinitionsDescription()}`;
     name: 'send_message',
     label: 'Send Message',
     description:
-      'Send a message to a session-owned agent. Steers the current run when active; otherwise starts a new turn.',
+      'Steer a running subagent, or start another run with its history once idle. Returns on input acceptance, not completion.',
     parameters: Type.Object({
-      target: Type.String({ description: 'Session-owned agent task name.' }),
+      target: Type.String({ description: 'Current-session agent name, e.g. /review.' }),
       message: Type.String({ description: 'Message text to send.' }),
     }),
     async execute(
@@ -808,9 +796,9 @@ ${getAgentDefinitionsDescription()}`;
     name: 'interrupt_agent',
     label: 'Interrupt Agent',
     description:
-      "Abort a session-owned agent's current turn while keeping its session available for later send_message calls.",
+      'Request cooperative cancellation of the current run (no rollback). History can be resumed with send_message after cleanup.',
     parameters: Type.Object({
-      target: Type.String({ description: 'Session-owned agent task name.' }),
+      target: Type.String({ description: 'Current-session agent name, e.g. /review.' }),
     }),
     async execute(
       _id: string,

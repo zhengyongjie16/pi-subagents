@@ -227,6 +227,50 @@ test('uses the native render context for errors without changing successful tool
   );
 });
 
+test('keeps model-facing guidance compact without losing async contracts', () => {
+  probe(
+    hostFixture +
+      String.raw`
+    const f = host();
+    await extension(f.pi);
+    const spawn = f.tools.get("spawn_agent");
+    const description = spawn.description;
+    assert.ok(description.includes("not its conversation"));
+    assert.ok(description.includes("other assigned work if available"));
+    assert.ok(description.includes("wait_agent only when blocked"));
+    assert.ok(spawn.parameters.properties.message.description.includes("Concise, self-contained"));
+    const wait = f.tools.get("wait_agent");
+    assert.ok(wait.parameters.properties.targets.description.includes("any one, not all"));
+    assert.ok(wait.description.includes("already-finished"));
+    assert.ok(wait.description.includes("automatic notifications"));
+    assert.ok(wait.description.includes("does not stop agents"));
+    const read = f.tools.get("read_agent_response");
+    assert.ok(read.description.includes("Non-blocking"));
+    assert.ok(read.description.includes("programmatic access"));
+    assert.ok(f.tools.get("send_message").description.includes("input acceptance, not completion"));
+    assert.ok(f.tools.get("interrupt_agent").description.includes("cooperative cancellation"));
+    const checkBudget = () => {
+      let chars = 0;
+      for (const tool of f.tools.values()) {
+        JSON.stringify({ description: tool.description, parameters: tool.parameters, outputSchema: tool.outputSchema }, (key, value) => {
+          if (key === "description" && typeof value === "string") chars += value.length;
+          return value;
+        });
+      }
+      // Dependency-free size guard for built-in prose, not an exact token count.
+      assert.ok(chars <= 2000, "Built-in guidance without templates exceeds 2000 characters: " + chars);
+    };
+    checkBudget();
+    const config = path.join(f.ctx.cwd, "pi-subagents", "config.json");
+    fs.writeFileSync(config, JSON.stringify({ models: ["test/fake"] }));
+    await f.emit("session_start");
+    assert.equal(spawn.description, description, "routing belongs in parameter schemas, not duplicated prose");
+    checkBudget();
+    await f.emit("session_shutdown", { reason: "quit" });
+  `,
+  );
+});
+
 test('preserves the six schemas, dynamic routing, tool arguments, and return wrappers', () => {
   probe(
     hostFixture +
@@ -259,7 +303,7 @@ test('preserves the six schemas, dynamic routing, tool arguments, and return wra
     assert.deepEqual(spawnSchema.properties.thinking.enum, ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
     assert.deepEqual(spawnSchema.required, ["task_name", "message"]);
     const description = f.tools.get("spawn_agent").description;
-    assert.ok(description.includes("Skills are discovered automatically by the child session."));
+    assert.ok(description.includes("not its conversation"));
     assert.ok(!description.includes("Available parent skills"));
     assert.ok(!Object.hasOwn(spawnSchema.properties, "skills"));
     for (const skills of [
@@ -1025,6 +1069,8 @@ test.each(runtimes)(
       const spawnTool = () => session.getToolDefinition("spawn_agent");
       const schema = JSON.stringify(spawnTool().parameters);
       const checkDescription = (description, firstLine) => {
+        assert.ok(description.includes("other assigned work if available"));
+        assert.ok(description.includes("wait_agent only when blocked"));
         assert.ok(description.includes("  Description:\n    " + firstLine + "\n    <rules>\n      <rule>Reuse & trust.</rule>\n    </rules>\n    Give exact paths.\n    - Narrow scope."), description);
         assert.ok(description.includes("model: test/fake — thinking: off"), description);
         assert.ok(!description.includes("Child template instructions."));
