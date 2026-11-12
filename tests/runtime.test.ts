@@ -13,7 +13,7 @@ import type { OfflineFixtureConfig } from './fixtures/sdk-offline-extension.ts';
 const testFile = fileURLToPath(import.meta.url);
 // Run SDK contracts in a separate process to isolate environment changes and shared-method spies.
 if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
-  test('real Pi SDK 1.5 offline contracts (isolated from core module mocks)', () => {
+  test('real Pi SDK offline contracts (isolated from core module mocks)', () => {
     const args = process.versions.bun
       ? ['test', testFile, '--timeout', '60000']
       : ['--test', testFile];
@@ -37,13 +37,6 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
     console.log(output.trim());
   });
 } else {
-  test('contracts run against the pinned development Pi SDK', () => {
-    const manifest = new URL(
-      '../package.json',
-      import.meta.resolve('@earendil-works/pi-coding-agent'),
-    );
-    assert.equal(JSON.parse(fs.readFileSync(manifest, 'utf8')).version, '1.5.0');
-  });
   const originalFetch = globalThis.fetch;
   const fetchAttempts: string[] = [];
   globalThis.fetch = (async (input: unknown) => {
@@ -1305,9 +1298,9 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
       });
       assert.deepEqual(await prompt(session, 'fixture:abort-before-run'), ['started']);
       assert.deepEqual(settled, [true]);
-      // Pre-run cancellation reports settled.aborted with an error assistant message.
+      // Pre-run cancellation reports settled.aborted and an aborted assistant message.
       const assistant = session.messages.filter((message) => message.role === 'assistant').at(-1)!;
-      assert.equal(assistant.stopReason, 'error');
+      assert.equal(assistant.stopReason, 'aborted');
       assert.equal(
         f.events().filter((event) => event.type === 'request').length,
         0,

@@ -1968,8 +1968,8 @@ test('packs runtime.ts without an SDK copy and loads the extracted package throu
     expect(manifest.bundledDependencies).toBeUndefined();
     for (const name of ['pi-ai', 'pi-coding-agent', 'pi-tui']) {
       expect(manifest.peerDependencies['@earendil-works/' + name]).toBe('>=1.1.0');
-      expect(manifest.devDependencies['@earendil-works/' + name]).toBe('1.5.0');
     }
+    for (const version of Object.values(manifest.devDependencies)) expect(version).toBe('latest');
     expect(manifest.engines.node).toBe('>=22.19.0');
     expect(manifest.pi.extensions).toEqual(['./src/index.ts']);
     const packedEntry = path.join(temporary, 'package', 'src', 'index.ts');
