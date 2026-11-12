@@ -626,6 +626,110 @@ test('wait tools expose only status and waiting notifications preserve natural o
   );
 });
 
+test('only native parent cancellation suppresses notification wakeups until a real restart', () => {
+  probe(
+    hostFixture +
+      String.raw`
+    const success = { role: "assistant", content: [], stopReason: "stop" };
+    const failure = { ...success, stopReason: "error", errorMessage: "budget exceeded; retry aborted (ordinary model error)" };
+    const cases = [
+      ["normal success", false, async f => {
+        await f.emit("agent_end", { messages: [success] });
+        await f.emit("agent_settled", { aborted: false });
+      }],
+      ["ordinary model error, even with cancellation-like text", false, async f => {
+        await f.emit("turn_end", { message: failure, toolResults: [] });
+        await f.emit("agent_end", { messages: [failure] });
+        await f.emit("agent_settled", { aborted: false });
+      }],
+      ["ordinary tool error", false, async f => {
+        await f.emit("turn_end", { message: success, toolResults: [
+          { role: "toolResult", toolName: "read", isError: true, content: [{ type: "text", text: "budget exceeded" }] },
+        ] });
+        await f.emit("agent_settled", { aborted: false });
+      }],
+      ["ordinary retry lifecycle", false, async f => {
+        await f.emit("message_end", { message: failure });
+        await f.emit("agent_end", { messages: [failure] });
+        // Low-level retry events are not public extension events; model the next agent loop instead.
+        f.ctx.signal = new AbortController().signal;
+        await f.emit("agent_start");
+        await f.emit("message_end", { message: success });
+        await f.emit("agent_end", { messages: [success] });
+        await f.emit("agent_settled", { aborted: false });
+      }],
+      ["signal abort, before agent_settled", true, (_f, controller) => controller.abort()],
+      ["signal abort survives signal removal and non-aborted settlement", true, async (f, controller) => {
+        controller.abort();
+        f.ctx.signal = undefined;
+        await f.emit("agent_settled", { aborted: false });
+      }],
+      ["retry cancellation without a signal uses settled fallback", true, async f => {
+        f.ctx.signal = undefined;
+        await f.emit("agent_settled", { aborted: true });
+      }],
+      ["start with an already-aborted signal must not clear interruption", true, async (f, controller) => {
+        controller.abort();
+        await f.emit("agent_start");
+        f.ctx.signal = undefined;
+      }],
+      ["input and before_agent_start alone do not resume", true, async (f, controller) => {
+        controller.abort();
+        f.ctx.signal = new AbortController().signal;
+        await f.emit("input", { text: "handled input", source: "interactive" });
+        await f.emit("before_agent_start", { prompt: "not yet a real run" });
+      }],
+      ["new real agent_start resumes", false, async (f, controller) => {
+        controller.abort();
+        f.ctx.signal = new AbortController().signal;
+        await f.emit("before_agent_start", { prompt: "new work" });
+        await f.emit("agent_start");
+      }],
+      ["session_start clears interruption", false, async (f, controller) => {
+        controller.abort();
+        f.ctx.signal = undefined;
+        await f.emit("session_start");
+      }],
+      ["child failure does not interrupt the parent", false, f => {
+        options.onActivityChange({ parentSessionId: "parent", agentName: "/failed-child", active: false, status: "failed" });
+        options.onCompletion({ parentSessionId: "parent", agentName: "/failed-child", status: "failed", error: "child budget exceeded" });
+      }],
+    ];
+    for (const [label, interrupted, prepare] of cases) {
+      const f = host(), controller = new AbortController();
+      f.ctx.signal = controller.signal;
+      await extension(f.pi);
+      await f.emit("session_start");
+      await f.emit("agent_start");
+      try {
+        await prepare(f, controller);
+        const initial = f.messages.length;
+        let sent = 0;
+        for (const status of ["completed", "failed", "interrupted"]) {
+          for (const idle of [false, true]) {
+            f.ctx.isIdle = () => idle;
+            for (const waiting of [false, true]) {
+              const agentName = "/child-" + sent++;
+              options.onCompletion({ parentSessionId: "parent", agentName, status, finalResponse: "retained result" }, waiting);
+              assert.equal(f.messages.length, initial + sent, label + ": every notification is retained");
+              const { message, delivery } = f.messages.at(-1);
+              assert.equal(message.customType, "pi-subagent-completion", label);
+              assert.equal(message.display, true, label);
+              assert.ok(message.content.includes("retained result"), label);
+              assert.deepEqual(message.details, { agent_name: agentName, status }, label);
+              assert.deepEqual(delivery, { deliverAs: "steer", triggerTurn: !interrupted && (!waiting || idle) },
+                label + ": " + JSON.stringify({ status, waiting, idle }));
+            }
+          }
+        }
+      } finally {
+        await f.emit("session_shutdown", { reason: "quit" });
+      }
+    }
+  `,
+  );
+});
+
 test('keeps scoped notifications, bounded full output, and widget/shortcut integration', () => {
   probe(
     hostFixture +
@@ -1024,6 +1128,120 @@ test('reports persistence/cleanup errors on every shutdown reason even if widget
 
 const runtimes: Array<[string, string]> = [['Bun', process.execPath]];
 if (Bun.which('node')) runtimes.push(['Node', Bun.which('node')!]);
+
+test.each(runtimes)(
+  'keeps SDK children and notification history without waking a natively canceled parent (%s)',
+  (_name, executable) => {
+    probe(
+      String.raw`
+    import assert from "node:assert/strict";
+    import * as fs from "node:fs";
+    import * as path from "node:path";
+    import { setTimeout as delay } from "node:timers/promises";
+    process.env.PI_OFFLINE = "1";
+    const { createAgentSessionServices, createAgentSessionFromServices, SessionManager, SettingsManager } = await import(${JSON.stringify(sdkUrl)});
+    const { configureCoreFixture, waitUntil } = await import(${JSON.stringify(pathToFileURL(CORE_SDK_EXTENSION).href)});
+    const fixturePath = ${JSON.stringify(CORE_SDK_EXTENSION)};
+    const agentDir = process.env.PI_CODING_AGENT_DIR;
+    const config = path.join(agentDir, "pi-subagents", "config.json");
+    fs.mkdirSync(path.dirname(config), { recursive: true });
+    fs.writeFileSync(config, JSON.stringify({ maxIdleSessions: 0, defaults: { extensions: [fixturePath] } }));
+    const settings = { compaction: { enabled: false }, retry: { enabled: false }, cacheWarming: "off" };
+    fs.writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify(settings));
+    const textOf = message => typeof message.content === "string" ? message.content :
+      (message.content ?? []).filter(part => part.type === "text").map(part => part.text).join("\n");
+    for (const cancellation of ["session.abort (Esc)", "ctx.abort (budget controller)"]) {
+      let releaseChild, budgetAborts = 0, parentRun;
+      const childGate = new Promise(resolve => { releaseChild = resolve; });
+      const fixture = configureCoreFixture({ responseGate: childGate });
+      const starts = [], settled = [], errors = [];
+      const settingsManager = SettingsManager.inMemory(settings);
+      settingsManager.setProjectTrusted(true);
+      const services = await createAgentSessionServices({
+        cwd: agentDir, agentDir, settingsManager, resourceLoaderOptions: {
+          noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+          additionalExtensionPaths: [process.argv[2], fixturePath],
+          extensionFactories: [pi => {
+            pi.on("agent_start", (_event, ctx) => { starts.push(ctx.signal); });
+            pi.on("agent_settled", event => { settled.push(event.aborted); });
+            pi.on("message_update", (event, ctx) => {
+              // A budget controller uses native cancellation, not a special event or error text.
+              if (cancellation.startsWith("ctx.abort") && !budgetAborts &&
+                  event.assistantMessageEvent.type === "toolcall_delta") {
+                budgetAborts++;
+                ctx.abort();
+              }
+            });
+          }],
+        },
+      });
+      assert.deepEqual(services.resourceLoader.getExtensions().errors, []);
+      const model = (await services.modelRuntime.getAvailable("test")).find(model => model.id === "fake");
+      assert.ok(model);
+      const { session } = await createAgentSessionFromServices({ services, model, sessionManager: SessionManager.inMemory(agentDir) });
+      const notifications = () => session.messages.filter(message =>
+        message.role === "custom" && message.customType === "pi-subagent-completion");
+      const call = (name, args) => session.getToolDefinition(name).execute(
+        "cancellation-test", args, undefined, undefined, session.extensionRunner.createContext());
+      try {
+        await session.bindExtensions({ mode: "print", onError: error => errors.push(error) });
+        const parent = fixture.instances[0];
+        await call("spawn_agent", { task_name: "survivor", message: "hold child " + cancellation });
+        const child = fixture.instances.at(-1);
+        assert.notEqual(child, parent);
+        await waitUntil(() => child.activeStreams === 1);
+        parentRun = session.prompt("stream parent " + cancellation);
+        void parentRun.catch(() => {});
+        await waitUntil(() => parent.requests.length === 1);
+        if (cancellation.startsWith("session.abort")) await session.abort();
+        await parentRun;
+        await session.waitForIdle();
+        assert.deepEqual(settled, [true], cancellation);
+        assert.equal(starts.length, 1, cancellation);
+        assert.equal(starts[0].aborted, true, cancellation + ": native run signal is canceled");
+        assert.equal(session.extensionRunner.createContext().signal, undefined, "SDK clears the run signal after settlement");
+        assert.equal(budgetAborts, cancellation.startsWith("ctx.abort") ? 1 : 0);
+        assert.equal(parent.activeStreams, 0, cancellation);
+        assert.equal(child.activeStreams, 1, cancellation + ": parent abort must not cancel the child");
+        assert.ok(!child.events.includes("settled:aborted"), cancellation);
+        assert.equal((await call("list_agents", {})).details.agents[0].agent_status, "running", cancellation);
+        releaseChild();
+        await waitUntil(() => notifications().length === 1);
+        await session.waitForIdle();
+        await delay(100);
+        assert.equal(parent.requests.length, 1, cancellation + ": child completion must not wake the canceled parent");
+        assert.equal(child.activeStreams, 0, cancellation);
+        const notification = notifications()[0];
+        assert.deepEqual(notification.details, { agent_name: "/survivor", status: "completed" });
+        assert.equal(notification.display, true);
+        assert.ok(textOf(notification).includes("response:hold child " + cancellation), "completed child output stays in history");
+        await session.prompt("resume after " + cancellation);
+        await session.waitForIdle();
+        assert.equal(parent.requests.length, 2, "new user prompt starts a real parent run");
+        assert.ok(parent.requests[1].context.messages.some(message => textOf(message).includes(textOf(notification))),
+          "resumed parent can see the stored notification");
+        assert.equal(starts[1].aborted, false, "new run has a fresh cancellation signal");
+        await call("spawn_agent", { task_name: "after-resume", message: "idle child after " + cancellation });
+        await waitUntil(() => parent.requests.length === 3);
+        await session.waitForIdle();
+        assert.equal(notifications().length, 2);
+        assert.equal(parent.requests.length, 3, "normal idle notification wakeup resumes after a real agent_start");
+        assert.ok(parent.requests[2].context.messages.some(message => textOf(message).includes("response:idle child after " + cancellation)));
+        assert.deepEqual(settled, [true, false, false]);
+        assert.deepEqual(errors, []);
+      } finally {
+        releaseChild();
+        await session.abort();
+        await parentRun?.catch(() => {});
+        try { await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); }
+        finally { session.dispose(); }
+      }
+    }
+  `,
+      executable,
+    );
+  },
+);
 
 test.each(runtimes)(
   'preserves multiline template text through real SDK tools, reload and child input (%s)',

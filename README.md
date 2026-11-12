@@ -132,7 +132,7 @@ Unavailable allowlist entries produce warnings. A selected model is validated ag
 
 ## Behavior and limits
 
-- **Automatic results:** completed and failed runs notify the parent, including during a wait; an idle parent starts a continuation turn. Waiting returns one name/status, not the response text, and does not replay notifications. Interrupted runs can satisfy a wait without emitting a completion notification. Canceling a wait does not stop the agent.
+- **Automatic results:** completed and failed runs notify the parent, including during a wait; an uninterrupted idle parent starts a continuation turn. Waiting returns one name/status, not the response text, and does not replay notifications. Interrupted runs can satisfy a wait without emitting a completion notification. Canceling a wait does not stop the agent.
 - **Session reuse:** completion, ordinary model errors, and interruption leave sessions reusable once pending work drains. Reclaimed sessions reopen saved history; missing history is an error. Template edits do not change existing agents' saved configuration. Reused sessions keep loaded resources; rebuilt sessions reread the system prompt and rediscover skills.
 - **Shared process:** cancellation is cooperative and does not undo completed tool actions. Child extensions run headlessly and share the host's event loop and module state; unresponsive tools or extensions can affect the parent.
 - **Output:** notifications and response text use a 50 KB / 2,000-line truncation budget. Full output is saved under `storageDir/_outputs`, with a readable path in the notice. Structured response data remains complete even when the text preview is truncated.

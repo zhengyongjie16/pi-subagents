@@ -144,6 +144,8 @@ export default async function index_(pi: ExtensionAPI) {
   const completionMessageType = 'pi-subagent-completion';
   let activeContext: any;
   let widgetContext: any;
+  // Pi exposes cancellation events, but no persistent interrupted-state query.
+  let parentInterrupted = false;
   const agentStatuses = new Map<string, AgentInfo['status']>();
   const agentColors = new Map<string, string>();
   let widgetStatusCounts: AgentStatusCounts = {
@@ -245,8 +247,14 @@ export default async function index_(pi: ExtensionAPI) {
           ...(bounded.fullOutputPath ? { fullOutputPath: bounded.fullOutputPath } : {}),
         },
       },
-      // An active wait already guarantees a next turn. Append without another steering turn.
-      { deliverAs: 'steer', triggerTurn: !waiting || activeContext.isIdle() },
+      // Keep interrupted parents stopped; an active wait otherwise guarantees a next turn.
+      {
+        deliverAs: 'steer',
+        triggerTurn:
+          !parentInterrupted &&
+          activeContext.signal?.aborted !== true &&
+          (!waiting || activeContext.isIdle()),
+      },
     );
   };
 
@@ -475,8 +483,29 @@ ${getAgentDefinitionsDescription()}`;
     },
   };
 
+  pi.on('agent_start', (_event, ctx) => {
+    const signal = ctx.signal;
+    parentInterrupted = signal?.aborted === true;
+    const parentId = parentSessionId(ctx);
+    // Observe cancellation before tools drain and the native signal disappears.
+    // The SDK owns each signal; once its run is released, this listener is collectible.
+    signal?.addEventListener(
+      'abort',
+      () => {
+        if (isCurrentSession(parentId)) parentInterrupted = true;
+      },
+      { once: true },
+    );
+  });
+
+  pi.on('agent_settled', (event) => {
+    // A run may be aborted between low-level turns, when no turn signal exists.
+    if (event.aborted) parentInterrupted = true;
+  });
+
   pi.on('session_start', async (_event: any, ctx: any) => {
     activeContext = ctx;
+    parentInterrupted = false;
     agentStatuses.clear();
     agentColors.clear();
     widgetStatusCounts = { running: 0, completed: 0, failed: 0, interrupted: 0 };
