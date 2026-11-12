@@ -308,7 +308,7 @@ describe('summary content', () => {
     const f = host();
     controller(() => Object.freeze([agent]), errors).attach(f.ctx);
     const lines = f.render();
-    expect(lines[0]).toBe('● Agents · 1 running · /subagents');
+    expect(lines[0]).toBe('● Agents · 1 running · /subagents to view details');
     expect(lines[1]).toContain('/worker · openai-codex/gpt-6.1-sol/max');
     expect(lines[1]).toContain('33.8k token (62% · ↓1) · 12s');
     expect(lines[2]).toContain('reading, editing…');
@@ -657,7 +657,7 @@ describe('session status summary', () => {
             if (counts[status])
               expect(line).toContain(current.fg(color, `${counts[status]} ${status}`));
           }
-          expect(line).toEndWith(current.fg(active ? 'accent' : 'dim', ' · /subagents'));
+          expect(line).toEndWith(current.fg(active ? 'accent' : 'dim', ' · /subagents to view details'));
         };
         checkColors(theme);
         for (const width of [0, 1, 9, 10, 22, 32, 60, 80, 120]) {
@@ -697,7 +697,7 @@ describe('session status summary', () => {
     );
     widget.attach(f.ctx);
     expect(f.render()[0]).toBe(
-      '● Agents · 3 running · 3 completed · 3 failed · 3 interrupted · /subagents',
+      '● Agents · 3 running · 3 completed · 3 failed · 3 interrupted · /subagents to view details',
     );
     expect(f.render()).toHaveLength(7);
     const component = f.component;
@@ -705,7 +705,7 @@ describe('session status summary', () => {
     agents = [];
     counts = { running: 0, completed: 6, failed: 3, interrupted: 3 };
     widget.refresh();
-    expect(f.render()).toEqual(['○ Agents · 6 completed · 3 failed · 3 interrupted · /subagents']);
+    expect(f.render()).toEqual(['○ Agents · 6 completed · 3 failed · 3 interrupted · /subagents to view details']);
     expect(f.component).toBe(component);
     expect(f.setWidget).toHaveBeenCalledTimes(1);
     expect(clock!.timers.size).toBe(0);
@@ -729,7 +729,7 @@ describe('session status summary', () => {
       () => counts,
     );
     widget.attach(f.ctx);
-    expect(f.render()).toEqual(['○ Agents · 2 completed · /subagents']);
+    expect(f.render()).toEqual(['○ Agents · 2 completed · /subagents to view details']);
     expect(clock!.set).not.toHaveBeenCalled();
     counts = { running: 0, completed: 0, failed: 0, interrupted: 0 };
     widget.refresh();
@@ -738,7 +738,7 @@ describe('session status summary', () => {
     agents = [snapshot()];
     counts = { running: 1, completed: 0, failed: 0, interrupted: 0 };
     widget.refresh();
-    expect(f.render()[0]).toBe('● Agents · 1 running · /subagents');
+    expect(f.render()[0]).toBe('● Agents · 1 running · /subagents to view details');
     expect(f.render()).toHaveLength(3);
     expect(clock!.timers.size).toBe(2);
     expect(f.text()).not.toMatch(/0 completed|0 failed|0 interrupted/);
@@ -753,7 +753,7 @@ describe('session status summary', () => {
     ).attach(f.ctx);
     const lines = f.render(140);
     expect(lines[0]).toBe(
-      '● Agents · 6 running · 100 completed · 1 failed · 1 interrupted · /subagents',
+      '● Agents · 6 running · 100 completed · 1 failed · 1 interrupted · /subagents to view details',
     );
     expect(lines).toHaveLength(12);
     expect(lines[11]).toContain('+1 more');
@@ -784,7 +784,7 @@ describe('session status summary', () => {
     expect(errors).toHaveBeenCalledTimes(1);
     fail = false;
     clock!.tick();
-    expect(f.render()).toEqual(['○ Agents · 1 completed · /subagents']);
+    expect(f.render()).toEqual(['○ Agents · 1 completed · /subagents to view details']);
     expect(clock!.timers.size).toBe(0);
   });
 
@@ -824,7 +824,7 @@ describe('layout budgets', () => {
       widget.refresh();
       const lines = f.render(120);
       expect(lines).toHaveLength(count <= 5 ? 1 + count * 2 : 12);
-      expect(lines[0]).toBe(`● Agents · ${count} running · /subagents`);
+      expect(lines[0]).toBe(`● Agents · ${count} running · /subagents to view details`);
       expectFit(lines, 120);
       if (count > 5) {
         expect(lines[11]).toBe(`└─ +${count - 5} more · /subagents`);

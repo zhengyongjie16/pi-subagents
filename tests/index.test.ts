@@ -835,7 +835,7 @@ test('summarizes every current-session agent by latest status without polling hi
     const component = factory({ terminal: { rows: 50 }, requestRender() {} }, { fg: (_c, s) => s });
     const lines = () => component.render(140);
     const title = () => lines()[0];
-    assert.equal(title(), "● Agents · 3 running · 3 completed · 3 failed · 3 interrupted · /subagents");
+    assert.equal(title(), "● Agents · 3 running · 3 completed · 3 failed · 3 interrupted · /subagents to view details");
     assert.equal(lines().length, 7);
     assert.ok(lines().slice(1).join("\n").includes("/r0"));
     assert.ok(!lines().slice(1).join("\n").match(/\/[cfi][0-2]/));
@@ -845,14 +845,14 @@ test('summarizes every current-session agent by latest status without polling hi
     });
     update("/r1", "running"); update("/r1", "running"); update("/r0", "running");
     options.onActivityChange({ parentSessionId: "other", agentName: "/ignored", active: false, status: "failed" });
-    assert.equal(title(), "● Agents · 3 running · 3 completed · 3 failed · 3 interrupted · /subagents");
+    assert.equal(title(), "● Agents · 3 running · 3 completed · 3 failed · 3 interrupted · /subagents to view details");
     update("/r0", "completed");
-    assert.equal(title(), "● Agents · 2 running · 4 completed · 3 failed · 3 interrupted · /subagents");
+    assert.equal(title(), "● Agents · 2 running · 4 completed · 3 failed · 3 interrupted · /subagents to view details");
     update("/c0", "starting"); update("/c0", "running");
     update("/f0", "failed"); update("/i0", "interrupted");
-    assert.equal(title(), "● Agents · 3 running · 3 completed · 3 failed · 3 interrupted · /subagents");
+    assert.equal(title(), "● Agents · 3 running · 3 completed · 3 failed · 3 interrupted · /subagents to view details");
     update("/r1", "failed"); update("/r2", "interrupted"); update("/c0", "completed");
-    assert.deepEqual(lines(), ["○ Agents · 4 completed · 4 failed · 4 interrupted · /subagents"]);
+    assert.deepEqual(lines(), ["○ Agents · 4 completed · 4 failed · 4 interrupted · /subagents to view details"]);
     const stoppedAt = sampled;
     await new Promise(resolve => setTimeout(resolve, 450));
     assert.equal(sampled, stoppedAt, "settled heading must not keep sampling");
@@ -869,7 +869,7 @@ test('summarizes every current-session agent by latest status without polling hi
     options.onActivityChange({ parentSessionId: expectedParent, agentName: "/new", active: true, status: "running" });
     const newFactory = f.widgets.filter(([, content]) => typeof content === "function").at(-1)[1];
     const fresh = newFactory({}, { fg: (_c, s) => s });
-    assert.equal(fresh.render(140)[0], "● Agents · 1 running · /subagents");
+    assert.equal(fresh.render(140)[0], "● Agents · 1 running · /subagents to view details");
     assert.equal(listed, 2);
     await f.emit("session_shutdown", { reason: "quit" }, next);
     assert.equal(f.widgets.at(-1)[1], undefined);
@@ -893,7 +893,7 @@ test('restores a settled-only session heading without starting periodic history 
     await f.emit("session_start");
     const factory = f.widgets.at(-1)[1];
     const component = factory({}, { fg: (_c, s) => s });
-    assert.deepEqual(component.render(140), ["○ Agents · 1 completed · 1 failed · 1 interrupted · /subagents"]);
+    assert.deepEqual(component.render(140), ["○ Agents · 1 completed · 1 failed · 1 interrupted · /subagents to view details"]);
     const idle = samples;
     await new Promise(resolve => setTimeout(resolve, 450));
     assert.equal(samples, idle);

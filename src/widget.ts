@@ -193,7 +193,7 @@ function agentHeader(
 function heading(width: number, counts: AgentStatusCounts, theme?: Theme): string {
   const active = counts.running > 0;
   const baseColor = active ? 'accent' : 'dim';
-  const suffix = ' · /subagents';
+  const suffix = ' · /subagents to view details';
   const available = width - visibleWidth(suffix);
   if (available < visibleWidth('● Agents'))
     return paint(theme, baseColor, fitText('/subagents', width));

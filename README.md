@@ -17,7 +17,7 @@ pi install git:github.com/zhengyongjie16/pi-subagents@main
 A summary above the editor shows agent counts and active work:
 
 ```text
-● Agents · 2 running · 3 completed · 1 failed · 1 interrupted · /subagents
+● Agents · 2 running · 3 completed · 1 failed · 1 interrupted · /subagents to view details
 ├─ ⠹ /review-auth · openai-codex/gpt-6.1-sol/max · 33.8k token (62% · ↓1) · 12s
 │    ⎿ reading…
 └─ ⠹ /tests · anthropic/claude-sonnet-4-6/high · 8.2k token (12%) · 4s
