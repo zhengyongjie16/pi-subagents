@@ -58,11 +58,23 @@ Names are unique within each parent session. Read and control tools stay within 
 
 ## Agent templates
 
-Optional Markdown templates define roles, tools, model preferences, and badge colors. No templates are installed automatically.
+Three built-in templates are available without creating any template files:
+
+| Template | Purpose |
+| --- | --- |
+| `explorer` | Focused codebase questions and independent exploration |
+| `general` | General-purpose work |
+| `worker` | Implementation, fixes, and refactoring; its task prefix reminds it to preserve others' edits |
+
+Built-ins do not pin a provider, model, thinking level, tools, or extensions; they follow the normal inheritance rules below. Omitting `agent_type` still creates a generic subagent, without applying `general` or another template.
+
+Optional Markdown templates define additional roles or replace built-ins:
 
 ```text
 ~/.pi/agent/pi-subagents/agents/*.md
 ```
+
+A successfully loaded user template replaces the **entire** built-in definition with the same `name` (or filename when `name` is omitted). Omitted fields follow normal parent/default inheritance, not the built-in definition. Names are case-sensitive. If user files declare the same name, the first discovered definition is used. Removing all valid overrides for a name restores its built-in. Unreadable or invalid files are warned about and skipped, so a built-in may be used instead; resolve loading warnings when relying on custom behavior. Once a template loads, model, extension, or runtime failures remain errors and do not fall back to a built-in.
 
 Example `reviewer.md`:
 
@@ -89,7 +101,7 @@ A non-empty template extension list replaces `defaults.extensions`; an empty or 
 
 ### Prompts and resources
 
-The base system prompt comes from `~/.pi/agent/pi-subagents/SYSTEM.md`, created with a minimal default on first use. Template text is prepended to the first task message, not used as a separate system prompt.
+The base system prompt comes from `~/.pi/agent/pi-subagents/SYSTEM.md`, created with a minimal default on first use. Template `description` is shown to the parent as delegation guidance; only the Markdown body is prepended to the child's first task message, not used as a separate system prompt. Built-ins use the same distinction: worker ownership guidance stays in its description, while its collaboration reminder is in the task prefix.
 
 Skills follow Pi's native discovery, settings, and project trust; parent-session skill selections are not copied. Automatic extension, prompt-template, theme, and context-file discovery is disabled, including `AGENTS.md` and `CLAUDE.md`. Only explicitly configured extensions are loaded.
 

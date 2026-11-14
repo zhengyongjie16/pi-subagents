@@ -32,6 +32,7 @@ const {
   normalizeContextUsage,
   readInfoFile,
   getAgent,
+  getAgentDefinition,
   getAgentDefinitionsDescription,
   listAgentDefinitions,
   getRunsDir,
@@ -458,7 +459,10 @@ describe('agent templates', () => {
     const write = spyOn(fs, 'writeFileSync');
     const chmod = spyOn(fs, 'chmodSync');
     try {
-      listAgentDefinitions();
+      expect(listAgentDefinitions().map(({ name }) => name)).toEqual([
+        'explorer', 'general', 'worker',
+      ]);
+      expect(fs.readdirSync(path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents'))).toEqual([]);
       expect(mkdir.mock.calls.map(([directory]) => String(directory))).toEqual([
         path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents'),
       ]);
@@ -471,6 +475,105 @@ describe('agent templates', () => {
       write.mockRestore();
       chmod.mockRestore();
     }
+  });
+
+  test('built-ins inherit runtime settings and separate delegation from child instructions', () => {
+    const definitions = listAgentDefinitions();
+    for (const definition of definitions) {
+      expect(definition.provider).toBeUndefined();
+      expect(definition.model).toBeUndefined();
+      expect(definition.thinking).toBeUndefined();
+      expect(definition.tools).toBeUndefined();
+      expect(definition.extensions).toBeUndefined();
+    }
+    expect(getAgentDefinition('explorer')?.color).toBe('#10B981');
+    expect(getAgentDefinition('explorer')?.prompt).toBeUndefined();
+    expect(getAgentDefinition('general')?.color).toBe('#06B6D4');
+    expect(getAgentDefinition('general')?.prompt).toBeUndefined();
+    const worker = getAgentDefinition('worker')!;
+    expect(worker.color).toBe('#F43F5E');
+    expect(worker.description).toContain('Explicitly assign ownership');
+    expect(worker.description).not.toContain('You are not alone in the codebase');
+    expect(worker.prompt).toContain('You are not alone in the codebase');
+    expect(worker.prompt).toContain('you should not revert the edits made by others');
+    expect(getAgentDefinitionsDescription()).not.toContain(worker.prompt!);
+    expect(getAgentDefinition()).toBeUndefined();
+    expect(getAgentDefinition('generic')).toBeUndefined();
+    expect(getAgentDefinition('missing')).toBeUndefined();
+  });
+
+  test.each(['explorer', 'general', 'worker'])(
+    'a user template replaces the entire built-in %s definition by effective name',
+    (name) => {
+      const file = path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents', 'custom-override.md');
+      const text = '---\nname: ' + name + '\ndescription: Custom role.\n---\n';
+      const original = getAgentDefinition(name);
+      fs.writeFileSync(file, text);
+      try {
+        expect(getAgentDefinition(name)).toEqual(parseAgentDefinitionText(text, 'custom-override'));
+        expect(listAgentDefinitions().filter((definition) => definition.name === name)).toHaveLength(1);
+        const description = getAgentDefinitionsDescription();
+        expect(description.split('\n').filter((line) => line.startsWith('- `' + name + '`'))).toEqual([
+          '- `' + name + '` — Custom role.',
+        ]);
+        // Edits and deletion take effect for subsequent lookups without a cache.
+        fs.writeFileSync(file, text + 'Custom child instructions.');
+        expect(getAgentDefinition(name)?.prompt).toBe('Custom child instructions.');
+      } finally {
+        fs.rmSync(file, { force: true });
+      }
+      expect(getAgentDefinition(name)).toEqual(original);
+    },
+  );
+
+  test('duplicate user names retain first-discovered precedence and are listed only once', () => {
+    const directory = path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents');
+    const files = ['first-duplicate.md', 'second-duplicate.md'];
+    for (const file of files)
+      fs.writeFileSync(path.join(directory, file), '---\nname: worker\ndescription: ' + file + '\n---');
+    try {
+      const first = fs.readdirSync(directory).find((file) => files.includes(file))!;
+      expect(getAgentDefinition('worker')?.description).toBe(first);
+      expect(listAgentDefinitions().filter(({ name }) => name === 'worker')).toHaveLength(1);
+      expect(getAgentDefinitionsDescription().split('\n').filter((line) => line.startsWith('- `worker`'))).toEqual([
+        '- `worker` — ' + first,
+      ]);
+    } finally {
+      for (const file of files) fs.rmSync(path.join(directory, file), { force: true });
+    }
+  });
+
+  test('invalid overrides warn and leave built-ins and other valid templates available', () => {
+    const directory = path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents');
+    const invalid = path.join(directory, 'worker.md');
+    const valid = path.join(directory, 'valid-override.md');
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+    const worker = getAgentDefinition('worker');
+    try {
+      fs.writeFileSync(invalid, '---\nname: worker\ndescription: |0\n  Invalid.\n---');
+      fs.writeFileSync(valid, '---\nname: custom-valid\n---\nValid instructions.');
+      const definitions = listAgentDefinitions();
+      expect(definitions.find(({ name }) => name === 'worker')).toEqual(worker);
+      expect(definitions.find(({ name }) => name === 'custom-valid')?.prompt).toBe('Valid instructions.');
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][0])).toContain(invalid);
+    } finally {
+      warn.mockRestore();
+      fs.rmSync(invalid, { force: true });
+      fs.rmSync(valid, { force: true });
+    }
+  });
+
+  test('returned built-in definitions cannot mutate subsequent lookups', () => {
+    const worker = getAgentDefinition('worker')!;
+    const original = { ...worker };
+    worker.name = 'changed';
+    worker.model = 'unavailable';
+    worker.description = 'Changed description.';
+    worker.prompt = 'Changed prompt.';
+    worker.color = '#000000';
+    expect(getAgentDefinition('worker')).toEqual(original);
+    expect(getAgentDefinition('changed')).toBeUndefined();
   });
 
   test('parses optional routing and extension fields', () => {
@@ -1859,6 +1962,79 @@ describe('widget snapshots', () => {
 });
 
 describe('spawn model and thinking resolution', () => {
+  test.each([undefined, 'explorer', 'general', 'worker'] as const)(
+    'built-in selection %s uses normal SDK inheritance and applies its prefix only once',
+    async (agentType) => {
+      const parent = 'builtin-' + randomUUID();
+      const manager = new AgentManager();
+      const definition = getAgentDefinition(agentType);
+      try {
+        await manager.spawnAgent({
+          ...spawnParams(parent, 'builtin-child', 'first task'),
+          agent_type: agentType,
+          inheritedThinking: 'low',
+        });
+        const info = manager.getAgentInfo('builtin-child', parent);
+        await settled(manager, info);
+        expect(info).toMatchObject({
+          provider: 'test',
+          modelId: 'fake',
+          thinking: 'low',
+          extensions: [CORE_SDK_EXTENSION],
+          lastTaskMessage: 'first task',
+        });
+        expect(info.agentType).toBe(agentType);
+        expect(info.color).toBe(definition?.color);
+        expect(info.tools).toBeUndefined();
+        const firstInput = definition?.prompt ? definition.prompt + '\n\nfirst task' : 'first task';
+        expect(fixture.instances[0].inputs.map(({ text }) => text)).toEqual([firstInput]);
+        expect(manager.getAgentInfo('builtin-child', parent).status).toBe('completed');
+        await manager.sendMessage(parent, 'builtin-child', 'second task');
+        await settled(manager, info);
+        expect(fixture.instances[0].inputs.map(({ text }) => text)).toEqual([firstInput, 'second task']);
+      } finally {
+        await manager.shutdown();
+      }
+    },
+  );
+
+  test('a general override does not affect generic spawns and loaded failures never use the built-in', async () => {
+    const parent = 'general-override-' + randomUUID();
+    const file = path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents', 'custom-general.md');
+    const manager = new AgentManager();
+    fs.writeFileSync(
+      file,
+      '---\nname: general\nmodel: unavailable-user-model\nthinking: off\n---\nCustom general instructions.',
+    );
+    try {
+      await manager.spawnAgent({
+        ...spawnParams(parent, 'generic-child', 'first task'),
+        inheritedThinking: 'low',
+      });
+      const info = manager.getAgentInfo('generic-child', parent);
+      await settled(manager, info);
+      expect(info).toMatchObject({ provider: 'test', modelId: 'fake', thinking: 'low' });
+      expect(info.agentType).toBeUndefined();
+      expect(info.color).toBeUndefined();
+      expect(fixture.instances[0].inputs[0].text).toBe('first task');
+      await expect(
+        manager.spawnAgent({
+          ...spawnParams(parent, 'named-general', 'must not run'),
+          agent_type: 'general',
+        }),
+      ).rejects.toThrow('test/unavailable-user-model');
+      expect(manager.getAgentInfo('named-general', parent)).toMatchObject({
+        agentType: 'general',
+        status: 'failed',
+        modelId: 'unavailable-user-model',
+      });
+      expect(fixture.instances.flatMap((instance) => instance.inputs)).toHaveLength(1);
+    } finally {
+      await manager.shutdown();
+      fs.rmSync(file, { force: true });
+    }
+  });
+
   test('caller wins, then the template, then the inherited value, then the default', async () => {
     const parentSessionId = 'spawn-overrides';
     fs.rmSync(path.join(getRunsDir(), parentScopeKey(parentSessionId)), {

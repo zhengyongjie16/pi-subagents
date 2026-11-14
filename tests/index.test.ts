@@ -257,8 +257,11 @@ test('keeps model-facing guidance compact without losing async contracts', () =>
           return value;
         });
       }
-      // Dependency-free size guard for built-in prose, not an exact token count.
-      assert.ok(chars <= 2000, "Built-in guidance without templates exceeds 2000 characters: " + chars);
+      // Keep the shared-tool budget while allowing the three shipped role descriptions.
+      // These are dependency-free prose guards, not exact token counts.
+      const templateChars = spawn.description.split("\n\nAgent templates:\n")[1].length;
+      assert.ok(chars - templateChars <= 2000, "Shared tool guidance exceeds 2000 characters: " + (chars - templateChars));
+      assert.ok(chars <= 4000, "Guidance including built-in templates exceeds 4000 characters: " + chars);
     };
     checkBudget();
     const config = path.join(f.ctx.cwd, "pi-subagents", "config.json");
@@ -1292,6 +1295,11 @@ test.each(runtimes)(
         assert.ok(description.includes("  Description:\n    " + firstLine + "\n    <rules>\n      <rule>Reuse & trust.</rule>\n    </rules>\n    Give exact paths.\n    - Narrow scope."), description);
         assert.ok(description.includes("model: test/fake — thinking: off"), description);
         assert.ok(!description.includes("Child template instructions."));
+        assert.ok(description.includes("Use explorer for specific codebase questions."));
+        assert.ok(description.includes("General agent"));
+        assert.ok(description.includes("Use for execution and production work."));
+        assert.ok(description.includes("Explicitly assign ownership"));
+        assert.ok(!description.includes("You are not alone in the codebase"));
       };
       checkDescription(spawnTool().description, "First exploration line.");
       await session.prompt("Inspect template descriptions.");
