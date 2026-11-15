@@ -10,6 +10,9 @@
     "multi-agent",
     "coding-agent"
   ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "scripts": {
     "test": "bun test ./tests --timeout 60000",
     "test:node": "node --test ./tests/runtime.test.ts"

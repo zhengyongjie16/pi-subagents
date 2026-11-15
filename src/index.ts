@@ -122,6 +122,30 @@ function runtimeLabel(info: AgentInfo): string {
   return formatDuration(end - start);
 }
 
+function browserTimestamp(...values: (number | undefined)[]): number {
+  return values.find((value) => typeof value === 'number' && Number.isFinite(value)) ?? 0;
+}
+
+/** Presentation-only grouping; keep the public list tool's ordering unchanged. */
+function listBrowserAgents(manager: AgentManager, scopeId: string) {
+  const infos = manager.listAgentInfos(undefined, scopeId);
+  const active = infos.filter((info) => info.status === 'starting' || info.status === 'running');
+  active.sort(
+    (a, b) => browserTimestamp(b.createdAt) - browserTimestamp(a.createdAt) || a.id.localeCompare(b.id),
+  );
+  const done = infos.filter((info) =>
+    ['completed', 'failed', 'interrupted'].includes(info.status),
+  );
+  done.sort(
+    (a, b) =>
+      browserTimestamp(b.completedAt, b.updatedAt, b.createdAt) -
+        browserTimestamp(a.completedAt, a.updatedAt, a.createdAt) ||
+      browserTimestamp(b.createdAt) - browserTimestamp(a.createdAt) ||
+      a.id.localeCompare(b.id),
+  );
+  return { active, done };
+}
+
 export default async function index_(pi: ExtensionAPI) {
   let nativeCodemodeRenderers: ToolRenderers = {};
   // Collect native codemode presentation hooks.
@@ -867,8 +891,8 @@ ${getAgentDefinitionsDescription()}`;
   async function openAgentOverlay(
     ctx: any,
     task: string,
-    scopeId = parentSessionId(ctx),
-    includeAll = false,
+    scopeId: string,
+    isDisposed: () => boolean,
   ) {
     if (ctx.mode !== 'tui') {
       ctx.ui.notify('Subagent overlays require interactive TUI mode.', 'warning');
@@ -883,17 +907,26 @@ ${getAgentDefinitionsDescription()}`;
       return;
     }
 
-    while (true) {
+    while (!isDisposed()) {
       const { terminal, outputPad } = pi.getSettings();
+      let closeOverlay: (() => void) | undefined;
+      let overlay: SubagentPeekOverlay | undefined;
       const navigation = await ctx.ui.custom(
-        (tui: any, theme: any, _keybindings: any, done: any) =>
-          new SubagentPeekOverlay(tui, theme, info, done, nativeCodemodeRenderers, {
+        (tui: any, theme: any, _keybindings: any, done: any) => {
+          closeOverlay = () => done();
+          overlay = new SubagentPeekOverlay(tui, theme, info, done, nativeCodemodeRenderers, {
             showImages: terminal?.showImages,
             imageWidthCells: terminal?.imageWidthCells,
             outputPad,
-          }),
+          });
+          return overlay;
+        },
         {
           overlay: true,
+          // Pi installs overlays asynchronously; a UI reset may dispose the browser first.
+          onHandle: () => {
+            if (isDisposed()) closeOverlay?.();
+          },
           overlayOptions: {
             anchor: 'right-center',
             width: '45%',
@@ -902,22 +935,18 @@ ${getAgentDefinitionsDescription()}`;
             margin: { right: 2, top: 2, bottom: 2 },
           },
         },
-      );
-      if (navigation !== 'previous' && navigation !== 'next') return;
+      ).finally(() => overlay?.dispose()); // Also release timers if Pi rejects overlay mounting.
+      if (isDisposed() || (navigation !== 'previous' && navigation !== 'next')) return;
 
-      const currentSessionId = parentSessionId(ctx);
-      const entries = manager.listAgents(undefined, currentSessionId, includeAll);
+      const { active, done } = listBrowserAgents(manager, scopeId);
+      const entries = [...active, ...done];
       if (entries.length < 2) return;
-      const currentIndex = entries.findIndex(
-        (entry) =>
-          entry.agent_name === info.canonicalName &&
-          (entry.parent_session_id || currentSessionId) === info.parentSessionId,
-      );
+      const currentIndex = entries.findIndex((entry) => entry.id === info.id);
       if (currentIndex === -1) return;
       const offset = navigation === 'next' ? 1 : -1;
       const next = entries[(currentIndex + offset + entries.length) % entries.length];
       try {
-        info = manager.getAgentInfo(next.agent_name, next.parent_session_id || currentSessionId);
+        info = manager.getAgentInfo(next.canonicalName, scopeId);
       } catch (error) {
         ctx.ui.notify(formatAgentError(error), 'error');
         return;
@@ -925,22 +954,42 @@ ${getAgentDefinitionsDescription()}`;
     }
   }
 
-  type AgentSelection = { task: string; parentSessionId: string; includeAll: boolean };
+  type AgentSelection = { task: string; parentSessionId: string };
 
-  async function pickAgent(ctx: ExtensionContext): Promise<AgentSelection | undefined> {
+  async function openAgentBrowser(ctx: ExtensionContext): Promise<void> {
     const manager = ensureManager(ctx);
     const currentSessionId = parentSessionId(ctx);
-    return ctx.ui.custom<AgentSelection | undefined>((tui, factoryTheme, _keybindings, done) => {
+    return ctx.ui.custom<void>((tui, factoryTheme, _keybindings, done) => {
       let selected = 0;
-      let showAll = false;
+      let detailOpen = false;
+      let disposed = false;
       let displayedCount = 0;
       let displayedSelection: AgentSelection | undefined;
       let cached: string[] | undefined;
       let cachedWidth: number | undefined;
+      let snapshot: ReturnType<typeof listBrowserAgents> | undefined;
       const pageSize = 10;
-      const refresh = () => {
+      const redraw = () => {
         cached = undefined;
         tui.requestRender();
+      };
+      const openDetails = (selection: AgentSelection) => {
+        detailOpen = true;
+        void openAgentOverlay(ctx, selection.task, selection.parentSessionId, () => disposed)
+          .finally(() => {
+            detailOpen = false;
+            if (!disposed) {
+              snapshot = listBrowserAgents(manager, currentSessionId);
+              const entries = [...snapshot.active, ...snapshot.done];
+              const index = entries.findIndex((entry) => entry.canonicalName === selection.task);
+              selected = Math.max(0, Math.min(index === -1 ? selected : index, entries.length - 1));
+              displayedCount = entries.length;
+              redraw();
+            }
+          })
+          .catch((error) => {
+            if (!disposed) reportError(error, ctx);
+          });
       };
       return {
         render(availableWidth: number): string[] {
@@ -951,26 +1000,16 @@ ${getAgentDefinitionsDescription()}`;
           if (cached && cachedWidth === width) return cached;
           const theme = ctx.ui.theme ?? factoryTheme;
           const fg = theme.fg.bind(theme);
-          const entries = manager.listAgentInfos(undefined, currentSessionId, showAll);
+          // Navigation, resize and theme changes only repaint the current data snapshot.
+          const { active, done: settled } = snapshot ??= listBrowserAgents(manager, currentSessionId);
+          const entries = [...active, ...settled];
           selected = Math.max(0, Math.min(selected, entries.length - 1));
           displayedCount = entries.length;
           displayedSelection = undefined;
-          const scopeLabel = showAll ? 'all sessions' : 'this session';
           const lines = [
             fg('accent', '─'.repeat(width)),
-            fg('accent', theme.bold(' Subagents')) +
-              fg('dim', ` (${entries.length}, ${scopeLabel})`),
-            '',
+            fg('dim', ` Subagents (${active.length} Active · ${settled.length} Done)`),
           ];
-          if (!entries.length)
-            lines.push(
-              fg(
-                'dim',
-                showAll
-                  ? 'No subagents found.'
-                  : 'No subagents for this session. Press tab to show all.',
-              ),
-            );
           const viewStart =
             entries.length > pageSize
               ? Math.max(
@@ -982,104 +1021,110 @@ ${getAgentDefinitionsDescription()}`;
           const statusWidth = 11;
           const durationWidth = 6;
           const thinkingWidth = 7;
-          const fixedWidth =
-            2 + statusWidth + durationWidth + thinkingWidth + 4 + (showAll ? 9 : 0);
+          const fixedWidth = 2 + statusWidth + durationWidth + thinkingWidth + 4;
           const nameWidth = Math.min(28, Math.max(8, width - fixedWidth - 8));
           const modelWidth = Math.max(0, Math.min(28, width - fixedWidth - nameWidth));
-          if (viewStart > 0) lines.push(fg('dim', `  ↑ ${viewStart} more`));
-          for (let index = viewStart; index < viewEnd; index++) {
-            const info = entries[index];
-            if (typeof info.canonicalName !== 'string' || !info.canonicalName.trim()) continue;
-            const sessionId = showAll ? info.parentSessionId || '' : '';
-            if (index === selected)
-              displayedSelection = {
-                task: info.canonicalName,
-                parentSessionId: sessionId || currentSessionId,
-                includeAll: showAll,
-              };
-            const isSelected = index === selected;
-            const color = resolveAgentColor(info.color);
-            const pointer = isSelected ? fg('accent', '› ') : '  ';
-            const badge = renderAgentBadge(
-              formatColumn(info.canonicalName, nameWidth - (color ? 2 : 0)).trimEnd(),
-              theme,
-              color,
-              isSelected ? 'accent' : 'text',
-            );
-            const name = badge + ' '.repeat(Math.max(0, nameWidth - visibleWidth(badge)));
-            const parent = showAll ? ` ${sanitizeAgentText(sessionId.slice(-8))}` : '';
-            const details = [
-              formatColumn(runtimeLabel(info), durationWidth),
-              formatColumn(info.modelId || 'unknown', modelWidth),
-              formatColumn(info.thinking || 'off', thinkingWidth),
-            ].join(' ');
-            lines.push(
-              paintAgentLine(
-                pointer +
-                  name +
-                  ' ' +
-                  fg(
-                    agentStatusColor(info.status),
-                    sanitizeAgentText(info.status).padEnd(statusWidth),
-                  ) +
-                  ' ' +
-                  fg('dim', details + parent),
-                width,
+          let groupStart = 0;
+          for (const [label, group] of [['Active', active], ['Done', settled]] as const) {
+            if (label === 'Active' && !group.length) continue;
+            const groupEnd = groupStart + group.length;
+            lines.push(fg('dim', ` ${label} (${group.length})`));
+            if (!group.length) lines.push(fg('dim', `  No ${label.toLowerCase()} subagents.`));
+            const hiddenAbove = Math.max(0, Math.min(viewStart, groupEnd) - groupStart);
+            const hiddenBelow = Math.max(0, groupEnd - Math.max(viewEnd, groupStart));
+            if (hiddenAbove) lines.push(fg('dim', `  ↑ ${hiddenAbove} more`));
+            for (
+              let index = Math.max(viewStart, groupStart);
+              index < Math.min(viewEnd, groupEnd);
+              index++
+            ) {
+              const info = entries[index];
+              if (typeof info.canonicalName !== 'string' || !info.canonicalName.trim()) continue;
+              if (index === selected)
+                displayedSelection = {
+                  task: info.canonicalName,
+                  parentSessionId: currentSessionId,
+                };
+              const isSelected = index === selected;
+              const color = resolveAgentColor(info.color);
+              const pointer = isSelected ? fg('accent', '› ') : '  ';
+              const badge = renderAgentBadge(
+                formatColumn(info.canonicalName, nameWidth - (color ? 2 : 0)).trimEnd(),
                 theme,
-                isSelected,
-              ),
-            );
-            const preview = previewText(sanitizeAgentText(info.lastTaskMessage ?? ''));
-            if (preview)
+                color,
+                isSelected ? 'accent' : 'text',
+              );
+              const name = badge + ' '.repeat(Math.max(0, nameWidth - visibleWidth(badge)));
+              const details = [
+                formatColumn(runtimeLabel(info), durationWidth),
+                formatColumn(info.modelId || 'unknown', modelWidth),
+                formatColumn(info.thinking || 'off', thinkingWidth),
+              ].join(' ');
               lines.push(
                 paintAgentLine(
-                  '  ' + fg('dim', truncateToWidth(preview, Math.max(0, width - 4))),
+                  pointer +
+                    name +
+                    ' ' +
+                    fg(
+                      agentStatusColor(info.status),
+                      sanitizeAgentText(info.status).padEnd(statusWidth),
+                    ) +
+                    ' ' +
+                    fg('dim', details),
                   width,
                   theme,
                   isSelected,
                 ),
               );
+              const preview = previewText(sanitizeAgentText(info.lastTaskMessage ?? ''));
+              if (preview)
+                lines.push(
+                  paintAgentLine(
+                    '  ' + fg('dim', truncateToWidth(preview, Math.max(0, width - 4))),
+                    width,
+                    theme,
+                    isSelected,
+                  ),
+                );
+            }
+            if (hiddenBelow) lines.push(fg('dim', `  ↓ ${hiddenBelow} more`));
+            groupStart = groupEnd;
           }
-          if (viewEnd < entries.length)
-            lines.push(fg('dim', `  ↓ ${entries.length - viewEnd} more`));
-          lines.push(
-            '',
-            fg('dim', 'enter: open  tab: this/all sessions  r: refresh  q/esc: close'),
-          );
+          lines.push('', fg('dim', 'enter: open  r: refresh  q/esc: close'));
           cached = lines.map((line) => truncateToWidth(line, width));
           cachedWidth = width;
           return cached;
         },
         handleInput(data: string) {
+          if (disposed || detailOpen) return;
           if (matchesKey(data, 'escape') || data === 'q') {
-            done(undefined);
-            return;
-          }
-          if (matchesKey(data, 'tab') || data === '\t') {
-            showAll = !showAll;
-            selected = 0;
-            refresh();
+            done();
             return;
           }
           if (data === 'r') {
-            refresh();
+            snapshot = undefined;
+            redraw();
             return;
           }
           if (matchesKey(data, 'down') || data === 'j') {
             selected = Math.max(0, Math.min(displayedCount - 1, selected + 1));
-            refresh();
+            redraw();
             return;
           }
           if (matchesKey(data, 'up') || data === 'k') {
             selected = Math.max(0, selected - 1);
-            refresh();
+            redraw();
             return;
           }
-          // Open the selection from the last displayed frame.
-          if (matchesKey(data, 'return') && displayedSelection) done(displayedSelection);
+          // Keep the browser mounted beneath details; only q/Esc finishes this interaction.
+          if (matchesKey(data, 'return') && displayedSelection) openDetails(displayedSelection);
         },
         invalidate() {
           cached = undefined;
+        },
+        dispose() {
+          disposed = true;
+          snapshot = undefined;
         },
       };
     });
@@ -1090,9 +1135,7 @@ ${getAgentDefinitionsDescription()}`;
       ctx.ui.notify('Subagent overlays require interactive TUI mode.', 'warning');
       return;
     }
-    const selected = await pickAgent(ctx);
-    if (selected)
-      await openAgentOverlay(ctx, selected.task, selected.parentSessionId, selected.includeAll);
+    await openAgentBrowser(ctx);
   };
 
   const shortcut = loadSubagentConfig().shortcut?.trim();

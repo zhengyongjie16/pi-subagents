@@ -11,6 +11,7 @@ import {
   parseColor,
   TuiAltScreen,
   TuiMainScreen,
+  truncateToWidth,
   visibleWidth,
   type Terminal,
 } from '@earendil-works/pi-tui';
@@ -115,15 +116,16 @@ const hostFixture = `
   }
 `;
 
-test('awaits browser selection and cancellation before opening details through commands and shortcuts', () => {
+test('keeps the browser mounted beneath details through commands and shortcuts', () => {
   probe(
     hostFixture +
       String.raw`
     const config = path.join(process.env.PI_CODING_AGENT_DIR, "pi-subagents", "config.json");
     fs.mkdirSync(path.dirname(config), { recursive: true });
     fs.writeFileSync(config, JSON.stringify({ shortcut: "ctrl+shift+a" }));
+    AgentManager.prototype.listAgentInfos = () => [{ canonicalName: "/worker", status: "running" }];
     for (const entrypoint of ["command", "shortcut"]) {
-      for (const selected of [undefined, { task: "/worker", parentSessionId: "parent", includeAll: false }]) {
+      for (const openDetails of [false, true]) {
         const f = host();
         await extension(f.pi);
         const queries = [];
@@ -131,12 +133,24 @@ test('awaits browser selection and cancellation before opening details through c
           queries.push({ task, parentSessionId });
           return { canonicalName: task, parentSessionId };
         };
-        let select, closeDetails, overlays = 0, settled = false;
-        const selection = new Promise(resolve => { select = resolve; });
+        let browser, closeDetails, overlays = 0, settled = false, browserMounted = false;
         const details = new Promise(resolve => { closeDetails = resolve; });
-        f.ctx.ui.custom = (_create, options) => {
-          if (options?.overlay) { overlays++; return details; }
-          return selection;
+        f.ctx.ui.custom = (create, options) => {
+          if (options?.overlay) {
+            assert.equal(browserMounted, true, "details must retain their browser background");
+            overlays++;
+            return details;
+          }
+          return new Promise(resolve => {
+            browser = create({ requestRender() {} }, {
+              fg: (_color, text) => text, bold: text => text,
+            }, {}, () => {
+              browserMounted = false;
+              browser.dispose();
+              resolve();
+            });
+            browserMounted = true;
+          });
         };
         const run = entrypoint === "command"
           ? f.commands.get("subagents").handler("", f.ctx)
@@ -144,20 +158,30 @@ test('awaits browser selection and cancellation before opening details through c
         run.then(() => { settled = true; });
         try {
           await new Promise(resolve => setImmediate(resolve));
-          assert.equal(settled, false, "browser command must wait for the user's choice");
-          assert.deepEqual(queries, [], "no task lookup before selection");
-          assert.deepEqual(f.notifications, []);
-          select(selected);
-          await new Promise(resolve => setImmediate(resolve));
-          assert.equal(overlays, selected ? 1 : 0);
-          assert.deepEqual(queries, selected ? [{ task: "/worker", parentSessionId: "parent" }] : []);
-          assert.equal(settled, !selected, "a selected detail overlay must also be awaited");
-          closeDetails(undefined);
+          assert.equal(settled, false);
+          assert.deepEqual(queries, []);
+          browser.render(120);
+          if (openDetails) {
+            browser.handleInput("\r");
+            browser.handleInput("\r"); // A repeat Enter must not open another overlay.
+            await new Promise(resolve => setImmediate(resolve));
+            assert.equal(overlays, 1);
+            assert.deepEqual(queries, [{ task: "/worker", parentSessionId: "parent" }]);
+            assert.equal(browserMounted, true);
+            assert.equal(settled, false);
+            closeDetails();
+            await new Promise(resolve => setImmediate(resolve));
+            assert.equal(browserMounted, true, "closing details must reveal the same browser");
+            assert.equal(settled, false, "only closing the browser ends the command");
+          }
+          browser.handleInput("q");
           await run;
-          assert.deepEqual(f.notifications, [], "cancellation is not an error");
+          assert.equal(browserMounted, false);
+          assert.deepEqual(f.notifications, []);
         } finally {
-          select(undefined);
-          closeDetails(undefined);
+          closeDetails();
+          await new Promise(resolve => setImmediate(resolve));
+          browser?.handleInput("q");
           await run;
           await f.emit("session_shutdown", { reason: "quit" });
         }
@@ -2054,45 +2078,55 @@ describe('extension completion delivery and TUI', () => {
       };
       loaded.runtime.getSettings = mock(() => settings);
       let opened = 0;
+      let detail: SubagentPeekOverlay | undefined;
+      let keptOpen = false;
       const ctx: any = {
         mode: 'tui',
         sessionManager: { getSessionId: () => parentId },
         ui: {
           setWidget() {},
           async custom(create: any) {
-            const component = create(
+            let component: any;
+            let close!: () => void;
+            const closed = new Promise<void>((resolve) => { close = resolve; });
+            component = create(
               { terminal: { rows: 80 }, requestRender() {} },
               { fg: (_color: string, text: string) => text, bold: (text: string) => text },
               {},
-              () => {},
+              close,
             );
-            if (opened++ === 0)
-              return { task: 'contract', parentSessionId: parentId, includeAll: false };
+            opened++;
             try {
-              expect(component).toBeInstanceOf(SubagentPeekOverlay);
-              expect(component['nativeCodemodeRenderers']).toEqual(collected);
-              expect(Object.keys(component['nativeCodemodeRenderers'])).toEqual([
-                'renderShell',
-                'renderCall',
-                'renderResult',
-              ]);
-              expect(component['toolExecutionOptions']).toEqual({
-                showImages: false,
-                imageWidthCells: 42,
-                outputPad: 0,
-              });
-              component.handleInput('\x0f');
-              expect(component['disposed']).toBe(false);
+              if (component instanceof SubagentPeekOverlay) {
+                detail = component;
+                component.handleInput('\x0f');
+                keptOpen = !component['disposed'];
+                component.handleInput('q');
+              } else {
+                component.render(120);
+                component.handleInput('\r');
+                await new Promise((resolve) => setImmediate(resolve));
+                component.handleInput('q');
+              }
+              await closed;
             } finally {
-              component.dispose();
+              component.dispose?.();
             }
-            return undefined;
           },
         },
       };
       try {
         await subagents.commands.get('subagents')!.handler('', ctx);
         expect(opened).toBe(2);
+        expect(detail).toBeInstanceOf(SubagentPeekOverlay);
+        expect(detail!['nativeCodemodeRenderers']).toEqual(collected);
+        expect(Object.keys(detail!['nativeCodemodeRenderers'])).toEqual([
+          'renderShell', 'renderCall', 'renderResult',
+        ]);
+        expect(detail!['toolExecutionOptions']).toEqual({
+          showImages: false, imageWidthCells: 42, outputPad: 0,
+        });
+        expect(keptOpen).toBe(true);
         expect(loaded.runtime.getSettings).toHaveBeenCalledTimes(1);
       } finally {
         fs.rmSync(scope, { recursive: true, force: true });
@@ -2193,6 +2227,7 @@ describe('extension completion delivery and TUI', () => {
           thinking: 'off',
           createdAt: now,
           updatedAt: now,
+          completedAt: overrides.createdAt ?? now,
           messageCount: 0,
           infoFile: path.join(scope, `${id}.info.json`),
           sessionFile: path.join(scope, `${id}.jsonl`),
@@ -2234,8 +2269,16 @@ describe('extension completion delivery and TUI', () => {
       };
       const ctx: any = {
         mode: 'tui',
+        hasUI: true,
         sessionManager: { getSessionId: () => parentId },
         ui: { notify, setWidget() {} },
+      };
+      const detailRuns: Promise<unknown>[] = [];
+      const flushDetails = async () => {
+        do {
+          await Promise.all(detailRuns.splice(0));
+          await new Promise((resolve) => setImmediate(resolve));
+        } while (detailRuns.length);
       };
       const fixture = {
         tools,
@@ -2249,6 +2292,7 @@ describe('extension completion delivery and TUI', () => {
         theme,
         requestRender,
         notify,
+        flushDetails,
         tui: { terminal: { rows: 40 }, requestRender } as any,
         remove(info: AgentInfo) {
           fs.rmSync(info.infoFile, { force: true });
@@ -2258,26 +2302,35 @@ describe('extension completion delivery and TUI', () => {
           interact: (browser: any) => any,
           overlay?: (component: any, index: number) => any,
         ) {
-          ctx.ui.custom = async (create: any) => {
+          ctx.ui.custom = (create: any, options: any) => {
             let component: any;
             let result: any;
+            let closed = false;
             const done = (value: any) => {
+              if (closed) return;
+              closed = true;
               result = value;
-              if (!(component instanceof SubagentPeekOverlay)) selections.push(value);
+              if (!options?.overlay) selections.push(value);
               component?.dispose?.();
             };
             component = create(fixture.tui, fixture.theme, {}, done);
-            try {
-              if (component instanceof SubagentPeekOverlay) {
-                opened.push(component['info']);
-                await overlay?.(component, opened.length - 1);
-              } else {
-                await interact(component);
+            const interaction = (async () => {
+              try {
+                if (options?.overlay) {
+                  opened.push(component['info']);
+                  await overlay?.(component, opened.length - 1);
+                } else {
+                  await interact(component);
+                  await flushDetails();
+                  if (!closed) done(undefined);
+                }
+                return result;
+              } finally {
+                component.dispose?.();
               }
-              return result;
-            } finally {
-              component.dispose?.();
-            }
+            })();
+            if (options?.overlay) detailRuns.push(interaction);
+            return interaction;
           };
           await fixture.command();
         },
@@ -2315,11 +2368,241 @@ describe('extension completion delivery and TUI', () => {
           .find((line: string) => stripVTControlCharacters(line).startsWith('› ')) ?? '',
       );
 
+    const browserNames = (browser: any) =>
+      browser.render(120)
+        .map(stripVTControlCharacters)
+        .filter((line: string) => /^[› ] \//.test(line))
+        .map((line: string) => line.trim().replace(/^› /, '').split(/\s+/)[0]);
+
+    test('always groups Active before Done with presentation-only ordering', async () => {
+      await withBrowser(async (f) => {
+        await f.open(async (browser: any) => {
+          // Seed after manager initialization so recovery does not interrupt display fixtures.
+          f.put('running', { status: 'running', createdAt: 100, lastActivity: 9999 });
+          f.put('starting', { status: 'starting', createdAt: 200, completedAt: 99999 });
+          f.put('completed', { createdAt: 30, completedAt: 300 });
+          f.put('failed', { status: 'failed', createdAt: 20, completedAt: 500 });
+          f.put('interrupted', { status: 'interrupted', createdAt: 10, completedAt: 400 });
+          expect(browserNames(browser)).toEqual([
+            '/starting', '/running', '/failed', '/interrupted', '/completed',
+          ]);
+          const lines = browser.render(120);
+          expect(lines).toContain(' Active (2)');
+          expect(lines).toContain(' Done (3)');
+          expect(lines.join('\n')).toContain('2 Active · 3 Done');
+          expect(selectedRow(browser)).toContain('/starting');
+          browser.handleInput('j');
+          expect(selectedRow(browser)).toContain('/running');
+          browser.handleInput('j');
+          expect(selectedRow(browser)).toContain('/failed'); // The group heading is not selectable.
+          const tool = await f.tools.get('list_agents').execute('list', {}, undefined, undefined, f.ctx);
+          expect(tool.details.agents.map((entry: any) => entry.agent_name)).toEqual([
+            '/starting', '/running', '/completed', '/failed', '/interrupted',
+          ]);
+          browser.handleInput('q');
+        });
+      });
+    });
+
+    test.each([undefined, NaN, 'invalid'])(
+      'malformed Done creation time cannot disturb Active or detail order (%s)', async (createdAt) => {
+        await withBrowser(async (f) => {
+          await f.open(
+            (browser: any) => {
+              const scope = path.join(getRunsDir(), parentScopeKey(f.parentId));
+              f.put('older', {
+                id: 'a', status: 'running', createdAt: 100, infoFile: path.join(scope, 'a.info.json'),
+              });
+              f.put('missing', {
+                id: 'b', createdAt: createdAt as any, infoFile: path.join(scope, 'b.info.json'),
+              });
+              f.put('newer', {
+                id: 'c', status: 'starting', createdAt: 200, infoFile: path.join(scope, 'c.info.json'),
+              });
+              expect(browserNames(browser)).toEqual(['/newer', '/older', '/missing']);
+              browser.handleInput('\r');
+            },
+            (overlay: any, index: number) =>
+              overlay.handleInput(['\x1b[C', '\x1b[C', '\x1b[C', 'q'][index]),
+          );
+          expect(f.opened.map((info: AgentInfo) => info.canonicalName)).toEqual([
+            '/newer', '/older', '/missing', '/newer',
+          ]);
+        });
+      },
+    );
+
+    test('sorts Done by finite end times with legacy fallbacks and deterministic ties', async () => {
+      await withBrowser(async (f) => {
+        await f.open((browser: any) => {
+          const records = [
+            f.put('latest', { createdAt: 1, completedAt: 900, updatedAt: 1 }),
+            f.put('legacy', { createdAt: 2, completedAt: undefined, updatedAt: 800 }),
+            f.put('invalid', { createdAt: 3, completedAt: '99999' as any, updatedAt: 700 }),
+            f.put('created-only', { createdAt: 600, completedAt: Infinity, updatedAt: NaN }),
+            f.put('tie-new', { createdAt: 50, completedAt: 500 }),
+            f.put('tie-b', { id: 'tie-b', createdAt: 20, completedAt: 500 }),
+            f.put('tie-a', { id: 'tie-a', createdAt: 20, completedAt: 500 }),
+            f.put('zero', { createdAt: 10, completedAt: 0, updatedAt: 99999 }),
+            f.put('missing', { createdAt: undefined, completedAt: undefined, updatedAt: undefined }),
+          ];
+          const before = records.map((info) => fs.readFileSync(info.infoFile, 'utf8'));
+          const expected = [
+            '/latest', '/legacy', '/invalid', '/created-only', '/tie-new',
+            '/tie-a', '/tie-b', '/zero', '/missing',
+          ];
+          expect(browserNames(browser)).toEqual(expected);
+          browser.handleInput('r');
+          expect(browserNames(browser)).toEqual(expected);
+          expect(records.map((info) => fs.readFileSync(info.infoFile, 'utf8'))).toEqual(before);
+          browser.handleInput('q');
+        });
+      });
+    });
+
+    test.each(['empty', 'active', 'done'])(
+      'hides empty Active but keeps the Done group (%s)', async (kind) => {
+        await withBrowser(async (f) => {
+          await f.open((browser: any) => {
+            if (kind !== 'empty') f.put('only', { status: kind === 'active' ? 'running' : 'failed' });
+            const lines = browser.render(120);
+            const titleIndex = lines.findIndex((line: string) => line.includes('Subagents'));
+            expect(lines[titleIndex + 1]).toBe(kind === 'active' ? ' Active (1)' : ' Done (' + Number(kind === 'done') + ')');
+            if (kind === 'active') expect(lines).toContain(' Active (1)');
+            else expect(lines.some((line: string) => /^\s*Active \(/.test(line))).toBe(false);
+            expect(lines).toContain(' Done (' + Number(kind === 'done') + ')');
+            expect(lines.join('\n')).not.toContain('No active subagents.');
+            if (kind !== 'done') expect(lines).toContain('  No done subagents.');
+            if (kind === 'empty') {
+              for (const key of ['j', 'k', '\r']) browser.handleInput(key);
+              expect(f.selections).toEqual([]);
+              expect(selectedRow(browser)).toBe('');
+            } else expect(selectedRow(browser)).toContain('/only');
+            browser.handleInput('q');
+          });
+        });
+      },
+    );
+
+    test.each(['dark', 'light'] as const)(
+      'renders dim headings without bold, aligned and compact under the %s theme', async (appearance) => {
+        await withBrowser(async (f) => {
+          f.theme = f.ctx.ui.theme = nativeTheme(appearance);
+          await f.open((browser: any) => {
+            f.put('working', { status: 'running', lastTaskMessage: 'working preview' });
+            f.put('finished');
+            for (const width of [32, 38, 50, 80, 120]) {
+              const rendered = browser.render(width);
+              const lines = rendered.map(stripVTControlCharacters);
+              const title = lines.find((line: string) => /^\s*Subagents\b/.test(line));
+              const headings = lines.filter((line: string) => /^\s*(Active|Done) \(/.test(line));
+              expect(title.indexOf('Subagents')).toBe(1);
+              expect(headings).toHaveLength(2);
+              const dimTitle = f.theme.fg('dim', ' Subagents (1 Active · 1 Done)');
+              expect(rendered[lines.indexOf(title)]).toBe(truncateToWidth(dimTitle, width));
+              for (const heading of headings)
+                expect(rendered[lines.indexOf(heading)]).toBe(f.theme.fg('dim', heading));
+              expect(headings.map((line: string) => line.search(/\S/))).toEqual([1, 1]);
+              expect(lines[lines.indexOf(title) + 1]).toBe(' Active (1)');
+              expect(lines[lines.indexOf(' Done (1)') - 1].trimEnd()).toBe('  working preview');
+              expect(lines.at(-2)).toBe(''); // Keep separation from the keyboard hints.
+            }
+            browser.handleInput('q');
+          });
+        });
+      },
+    );
+
+    test('uses one ten-agent window across groups without hiding either heading', async () => {
+      await withBrowser(async (f) => {
+        await f.open((browser: any) => {
+          for (let index = 0; index < 12; index++)
+            f.put('active/' + index, { status: 'running', createdAt: 100 - index });
+          for (let index = 0; index < 12; index++)
+            f.put('done/' + index, { completedAt: 100 - index });
+          const check = () => {
+            const lines = browser.render(120);
+            expect(lines).toContain(' Active (12)');
+            expect(lines).toContain(' Done (12)');
+            expect(lines.join('\n')).not.toContain('No ');
+            expect(browserNames(browser)).toHaveLength(10);
+            return lines;
+          };
+          expect(check()).toContain('  ↓ 12 more'); // Done is below the initial window, not empty.
+          for (let index = 0; index < 12; index++) {
+            browser.handleInput('j');
+            check();
+          }
+          expect(selectedRow(browser)).toContain('/done/0');
+          expect(browserNames(browser).some((name: string) => name.startsWith('/active/'))).toBe(true);
+          for (let index = 0; index < 11; index++) {
+            browser.handleInput('j');
+            check();
+          }
+          expect(selectedRow(browser)).toContain('/done/11');
+          expect(check()).toContain('  ↑ 12 more');
+          browser.handleInput('q');
+        });
+      });
+    });
+
+    test('refresh moves reused agents between groups and orders their latest finish', async () => {
+      await withBrowser(async (f) => {
+        await f.open((browser: any) => {
+          f.put('worker', { status: 'running', createdAt: 100 });
+          f.put('other', { createdAt: 200, completedAt: 500 });
+          const initial = browser.render(120);
+          f.put('worker', { status: 'completed', completedAt: 400 });
+          expect(browser.render(120)).toBe(initial);
+          browser.handleInput('r');
+          expect(browserNames(browser)).toEqual(['/other', '/worker']);
+          expect(browser.render(120).join('\n')).not.toMatch(/^\s*Active \(/m);
+          expect(browser.render(120)).toContain(' Done (2)');
+          f.put('worker', { status: 'starting' }); // A stale prior completion does not make it Done.
+          browser.handleInput('r');
+          expect(browser.render(120)).toContain(' Active (1)');
+          expect(browser.render(120)).toContain(' Done (1)');
+          f.put('worker', { status: 'running', completedAt: undefined });
+          browser.handleInput('r');
+          expect(browserNames(browser)).toEqual(['/worker', '/other']);
+          f.put('worker', { status: 'interrupted', completedAt: 700 });
+          browser.handleInput('r');
+          expect(browserNames(browser)).toEqual(['/worker', '/other']);
+          browser.handleInput('q');
+        });
+      });
+    });
+
+    test('detail navigation shares group ordering and remains bound to its selected session', async () => {
+      await withBrowser(async (f) => {
+        await f.open(
+          (browser: any) => {
+            f.put('running', { status: 'running', createdAt: 100 });
+            f.put('starting', { status: 'starting', createdAt: 200 });
+            f.put('late', { createdAt: 1, completedAt: 600 });
+            f.put('early', { createdAt: 999, completedAt: 500 });
+            f.put('late', { completedAt: 99999 }, f.otherId);
+            expect(browserNames(browser)).toEqual(['/starting', '/running', '/late', '/early']);
+            browser.handleInput('\r');
+          },
+          (overlay: any, index: number) => {
+            f.ctx.sessionManager.getSessionId = () => f.otherId;
+            // The selected agent can finish while its details remain open.
+            if (index === 0) f.put('starting', { status: 'completed', completedAt: 700 });
+            overlay.handleInput(['\x1b[C', '\x1b[D', '\x1b[D', '\x1b[C', 'q'][index]);
+          },
+        );
+        expect(f.opened.map((info: AgentInfo) => info.canonicalName)).toEqual([
+          '/starting', '/late', '/starting', '/running', '/starting',
+        ]);
+        expect(f.opened.every((info: AgentInfo) => info.parentSessionId === f.parentId)).toBe(true);
+      });
+    });
+
     test.each(['dark', 'light'] as const)(
       'native %s browser uses configured name badges and independent two-line selection',
       async (appearance) => {
         await withBrowser(async (f) => {
-          // Keep all-session fixtures newer than unrelated history in this shared directory.
           const now = Date.now() + 1000;
           const review = f.put('review', {
             color: 'red',
@@ -2345,11 +2628,6 @@ describe('extension completion delivery and TUI', () => {
             createdAt: now + 100,
             lastTaskMessage: 'malformed preview',
           });
-          const other = f.put(
-            'review',
-            { color: 'red', agentType: 'reviewer', createdAt: now + 600 },
-            f.otherId,
-          );
           for (const mode of ['truecolor', '256color'] as const) {
             const theme = nativeTheme(appearance, mode);
             f.theme = theme;
@@ -2405,12 +2683,8 @@ describe('extension completion delivery and TUI', () => {
                 expect(
                   browser.render(width).every((line: string) => visibleWidth(line) <= width),
                 ).toBe(true);
-              browser.handleInput('\t');
-              const all = browser.render(120);
-              const otherLine = all.find((line: string) =>
-                stripVTControlCharacters(line).includes(other.parentSessionId.slice(-8)),
-              );
-              expect(otherLine).toContain(badgeBg);
+              browser.handleInput('k');
+              checkRow('/tests', 'red', true);
               // Theme invalidation changes selection/text, not explicit configured identity RGB.
               const replacement = nativeTheme(appearance === 'dark' ? 'light' : 'dark', mode);
               f.ctx.ui.theme = replacement;
@@ -2541,9 +2815,9 @@ describe('extension completion delivery and TUI', () => {
       });
     });
 
-    test('reads each metadata file once per browser frame and never on a cache hit', async () => {
+    test('reads metadata once per data refresh, not on navigation, resize or theme redraw', async () => {
       await withBrowser(async (f) => {
-        const own = Array.from({ length: 12 }, (_, index) => f.put(`history/${index}`));
+        const own = Array.from({ length: 12 }, (_, index) => f.put('history/' + index));
         const other = f.put('history/0', { modelId: 'other-model' }, f.otherId);
         const tracked = new Set([...own, other].map((info) => info.infoFile));
         await f.open((browser: any) => {
@@ -2556,43 +2830,79 @@ describe('extension completion delivery and TUI', () => {
             return originalRead.apply(fs, args as any);
           }) as typeof fs.readFileSync);
           const getInfo = spyOn(AgentManager.prototype, 'getAgentInfo');
-          const renderSnapshot = (width: number, expected = own) => {
+          const renderSnapshot = (width: number, expected: AgentInfo[] = []) => {
             reads.length = 0;
             const lines = browser.render(width);
-            expect(reads).toHaveLength(expected.length);
             expect([...reads].sort()).toEqual(
-              expected.map((info: AgentInfo) => info.infoFile).sort(),
+              expected.map((info) => info.infoFile).sort(),
             );
             return lines;
           };
           try {
-            const first = renderSnapshot(120);
+            const first = renderSnapshot(120, own);
+            const lists = f.list.mock.calls.length;
             reads.length = 0;
             expect(browser.render(120)).toBe(first);
             expect(reads).toEqual([]);
-            for (const key of ['j', 'k', 'r']) {
+            for (const key of ['j', 'k', '\x1b[B', '\x1b[A']) {
               browser.handleInput(key);
               expect(reads).toEqual([]);
               renderSnapshot(120);
-              reads.length = 0;
             }
             renderSnapshot(80);
-            reads.length = 0;
             browser.invalidate();
             expect(reads).toEqual([]);
-            renderSnapshot(80);
-            reads.length = 0;
+            const cached = renderSnapshot(80);
             browser.handleInput('\t');
+            expect(browser.render(80)).toBe(cached);
             expect(reads).toEqual([]);
-            const all = renderSnapshot(120, [...own, other]);
+            expect(f.list).toHaveBeenCalledTimes(lists);
+            browser.handleInput('r');
+            expect(reads).toEqual([]);
+            renderSnapshot(80, own);
+            expect(f.list).toHaveBeenCalledTimes(lists + 1);
             reads.length = 0;
-            expect(browser.render(120)).toBe(all);
             browser.handleInput('q');
             expect(reads).toEqual([]);
             expect(getInfo).not.toHaveBeenCalled();
           } finally {
             read.mockRestore();
             getInfo.mockRestore();
+          }
+        });
+      });
+    });
+
+    test('navigation updates elapsed display without reloading statuses or order until r', async () => {
+      await withBrowser(async (f) => {
+        await f.open((browser: any) => {
+          const now = Date.now();
+          f.put('worker', {
+            status: 'running', createdAt: 200, startedAt: now - 5000,
+            lastTaskMessage: 'original preview',
+          });
+          f.put('done', { createdAt: 100, completedAt: 100 });
+          const clock = spyOn(Date, 'now').mockReturnValue(now);
+          try {
+            expect(browser.render(120).find((line: string) => line.includes('/worker'))).toMatch(/running\s+5s/);
+            const lists = f.list.mock.calls.length;
+            f.put('worker', { status: 'completed', completedAt: now, lastTaskMessage: 'updated preview' });
+            f.put('new', { status: 'running', createdAt: 300 });
+            clock.mockReturnValue(now + 5000);
+            browser.handleInput('j');
+            expect(selectedRow(browser)).toContain('/done');
+            expect(browser.render(120).find((line: string) => line.includes('/worker'))).toMatch(/running\s+10s/);
+            expect(browserNames(browser)).toEqual(['/worker', '/done']);
+            expect(browser.render(120).join('\n')).toContain('original preview');
+            expect(f.list).toHaveBeenCalledTimes(lists);
+            browser.handleInput('r');
+            expect(browserNames(browser)).toEqual(['/new', '/worker', '/done']);
+            expect(browser.render(120).join('\n')).toContain('updated preview');
+            expect(browser.render(120).find((line: string) => line.includes('/worker'))).toMatch(/completed\s+5s/);
+            expect(f.list).toHaveBeenCalledTimes(lists + 1);
+            browser.handleInput('q');
+          } finally {
+            clock.mockRestore();
           }
         });
       });
@@ -2690,7 +3000,7 @@ describe('extension completion delivery and TUI', () => {
           expect(selectedRow(browser)).toContain('/history/9');
           for (const info of history) f.remove(info);
           browser.handleInput('r');
-          expect(browser.render(80).join('\n')).toContain('No subagents for this session');
+          expect(browser.render(80).join('\n')).toContain('No done subagents.');
           for (const key of ['j', 'k', '\x1b[A', '\x1b[B', '\r']) browser.handleInput(key);
           expect(f.selections).toEqual([]);
           f.put('returned');
@@ -2702,7 +3012,7 @@ describe('extension completion delivery and TUI', () => {
       });
     });
 
-    test.each(['unrefreshed', 'r pending', 'scope pending', 'selection pending'])(
+    test.each(['unrefreshed', 'r pending', 'Tab ignored', 'selection pending'])(
       'Enter uses the displayed item after insertion (%s)',
       async (refresh) => {
         await withBrowser(async (f) => {
@@ -2714,15 +3024,13 @@ describe('extension completion delivery and TUI', () => {
             expect(selectedRow(browser)).toContain('/target');
             f.put('inserted', { createdAt: 300 });
             if (refresh === 'r pending') browser.handleInput('r');
-            if (refresh === 'scope pending') browser.handleInput('\t');
+            if (refresh === 'Tab ignored') browser.handleInput('\t');
             if (refresh === 'selection pending') browser.handleInput('k');
             const reads = f.list.mock.calls.length;
             browser.handleInput('\r');
             expect(f.list).toHaveBeenCalledTimes(reads);
           });
-          expect(f.selections).toEqual([
-            { task: '/target', parentSessionId: f.parentId, includeAll: false },
-          ]);
+          expect(f.selections).toEqual([undefined]);
           expect(f.opened[0].canonicalName).toBe('/target');
         });
       },
@@ -2784,7 +3092,7 @@ describe('extension completion delivery and TUI', () => {
           f.remove(gone);
           browser.handleInput('\r');
         });
-        expect(f.selections[0].task).toBe('/gone');
+        expect(f.selections).toEqual([undefined]);
         expect(f.opened).toEqual([]);
         expect(f.notify).toHaveBeenCalledWith(expect.stringContaining('Agent not found'), 'error');
       });
@@ -2798,9 +3106,9 @@ describe('extension completion delivery and TUI', () => {
         const previous = f.put('previous', { createdAt: 300 });
         f.put('middle', { createdAt: 200 });
         const next = f.put('next', { createdAt: 100 });
-        const list = AgentManager.prototype.listAgents;
+        const list = AgentManager.prototype.listAgentInfos;
         let navigating = false;
-        AgentManager.prototype.listAgents = function (...args) {
+        AgentManager.prototype.listAgentInfos = function (...args) {
           const entries = list.apply(this, args);
           if (navigating) f.remove(direction === 'next' ? next : previous);
           return entries;
@@ -2822,16 +3130,18 @@ describe('extension completion delivery and TUI', () => {
       });
     });
 
-    test('all-session browsing distinguishes identical names and remains read-only', async () => {
+    test('browser and detail navigation stay session-scoped and read-only', async () => {
       await withBrowser(async (f) => {
-        const own = f.put('same', { modelId: 'own-model' });
+        const own = f.put('same', { modelId: 'own-model', createdAt: 200 });
+        const second = f.put('second', { status: 'failed', createdAt: 100 });
         const other = f.put('same', { modelId: 'other-model' }, f.otherId);
-        const before = [own, other].map((info) => fs.readFileSync(info.infoFile, 'utf8'));
+        const records = [own, second, other];
+        const before = records.map((info) => fs.readFileSync(info.infoFile, 'utf8'));
         const controlNames = ['spawnAgent', 'sendMessage', 'interruptAgent'] as const;
         const originals = controlNames.map((name) => (AgentManager.prototype as any)[name]);
         const controls = controlNames.map((name) => {
           const control = mock(() => {
-            throw new Error(`Browser must not call ${name}`);
+            throw new Error('Browser must not call ' + name);
           });
           (AgentManager.prototype as any)[name] = control;
           return control;
@@ -2839,34 +3149,32 @@ describe('extension completion delivery and TUI', () => {
         try {
           await f.open(
             (browser: any) => {
-              expect(browser.render(120).join('\n')).not.toContain('other-model');
-              browser.handleInput('\t');
-              const lines = browser.render(120).join('\n');
-              expect(lines).toContain('own-model');
-              expect(lines).toContain('other-model');
-              expect(selectedRow(browser)).toEndWith(f.otherId.slice(-8));
+              const first = browser.render(120);
+              expect(first.join('\n')).toContain('own-model');
+              expect(first.join('\n')).not.toContain('other-model');
+              expect(first.join('\n')).not.toMatch(/all sessions|tab:/i);
               browser.handleInput('j');
-              expect(selectedRow(browser)).toEndWith(f.parentId.slice(-8));
+              expect(selectedRow(browser)).toContain('/second');
+              const frame = browser.render(120);
+              const reads = f.list.mock.calls.length;
+              const renders = f.requestRender.mock.calls.length;
               browser.handleInput('\t');
-              expect(selectedRow(browser)).toContain('/same');
-              browser.handleInput('\t');
-              expect(selectedRow(browser)).toEndWith(f.otherId.slice(-8));
+              expect(browser.render(120)).toBe(frame);
+              expect(f.list).toHaveBeenCalledTimes(reads);
+              expect(f.requestRender).toHaveBeenCalledTimes(renders);
+              expect(selectedRow(browser)).toContain('/second');
               browser.handleInput('\r');
             },
             (overlay: any, index: number) => overlay.handleInput(['\x1b[C', '\x1b[D', 'q'][index]),
           );
-          expect(f.selections).toEqual([
-            { task: '/same', parentSessionId: f.otherId, includeAll: true },
+          expect(f.selections).toEqual([undefined]);
+          expect(f.opened.map((info: AgentInfo) => info.canonicalName)).toEqual([
+            '/second', '/same', '/second',
           ]);
-          expect(f.opened.map((info: AgentInfo) => info.parentSessionId)).toEqual([
-            f.otherId,
-            f.parentId,
-            f.otherId,
-          ]);
+          expect(f.opened.every((info: AgentInfo) => info.parentSessionId === f.parentId)).toBe(true);
+          for (const call of f.list.mock.calls) expect(call).toEqual([undefined, f.parentId]);
           for (const control of controls) expect(control).not.toHaveBeenCalled();
-          expect([own, other].map((info) => fs.readFileSync(info.infoFile, 'utf8'))).toEqual(
-            before,
-          );
+          expect(records.map((info) => fs.readFileSync(info.infoFile, 'utf8'))).toEqual(before);
         } finally {
           controlNames.forEach((name, index) => {
             (AgentManager.prototype as any)[name] = originals[index];
@@ -2907,11 +3215,10 @@ describe('extension completion delivery and TUI', () => {
           const narrow = browser.render(50).find((line: string) => line.includes('/history/0'));
           expect(narrow).toContain('high');
           expect(narrow).not.toContain('MiniMax-M3');
-          browser.handleInput('\t');
           const all = browser.render(80).find((line: string) => line.includes('/history/0'));
           expect(all).toContain('MiniMax-M3');
           expect(all).toContain('high');
-          expect(all.trimEnd()).toEndWith(f.parentId.slice(-8));
+          expect(all).not.toContain(f.parentId.slice(-8));
           browser.handleInput('q');
         });
         const list = (params: any) =>
@@ -3036,6 +3343,369 @@ describe('extension completion delivery and TUI', () => {
       },
     );
 
+    test.each(['regular', 'fullscreen'] as const)(
+      'real Pi custom UI retains the browser and restores focus after details (%s)', async (mode) => {
+        await withBrowser(async (f) => {
+          const { InteractiveMode } = await import(new URL('./modes/interactive/interactive-mode.js', sdkUrl).href);
+          codingAgent.initTheme('dark', false);
+          for (let index = 0; index < 12; index++) f.put('history/' + index, { createdAt: 100 - index });
+          let input: (data: string) => void = () => {};
+          const writes: string[] = [];
+          const terminal: Terminal = {
+            columns: 120, rows: 40, kittyProtocolActive: false,
+            start(onInput) { input = onInput; },
+            stop() {}, async drainInput() {},
+            write(data) { writes.push(data); },
+            moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {},
+            clearFromCursor() {}, clearScreen() {}, setTitle() {}, setProgress() {}, setProgramStatus() {},
+          };
+          const tui = mode === 'regular' ? new TuiMainScreen(terminal) : new TuiAltScreen(terminal);
+          let browser: any;
+          let mounted = false;
+          let mounts = 0;
+          let settled = false;
+          const host: any = {
+            editor: { getText: () => '', setText() {} },
+            ui: tui,
+            extensionOverlays: new Map(),
+            pushExtensionDialog(component: any) {
+              browser = component;
+              mounted = true;
+              mounts++;
+              tui.addChild(component);
+              tui.setFocus(component);
+            },
+            removeExtensionDialog(component: any) {
+              mounted = false;
+              tui.removeChild(component);
+              tui.setFocus(null);
+            },
+          };
+          f.ctx.ui.custom = (factory: any, options: any) =>
+            InteractiveMode.prototype.showExtensionCustom.call(host, factory, options);
+          tui.start();
+          const command = f.command();
+          command.then(() => { settled = true; });
+          const tick = () => new Promise((resolve) => setImmediate(resolve));
+          try {
+            await tick();
+            for (let index = 0; index < 7; index++) {
+              browser.render(120);
+              input('j');
+            }
+            const selected = selectedRow(browser);
+            expect(selected).toContain('/history/7');
+            for (const closeKey of ['\x1b', 'q']) {
+              input('\r');
+              input('\r');
+              await tick();
+              expect(mounted).toBe(true);
+              expect(mounts).toBe(1);
+              expect(settled).toBe(false);
+              expect(tui.getFocusedComponent()).toBeInstanceOf(SubagentPeekOverlay);
+              expect(host.extensionOverlays.size).toBe(1);
+              writes.length = 0;
+              tui.renderNow(true);
+              expect(stripVTControlCharacters(writes.join(''))).toContain('Subagents');
+              input(closeKey);
+              await tick();
+              expect(host.extensionOverlays.size).toBe(0);
+              expect(tui.getFocusedComponent()).toBe(browser);
+              expect(mounted).toBe(true);
+              expect(settled).toBe(false);
+              expect(selectedRow(browser)).toBe(selected);
+            }
+            input('j');
+            expect(selectedRow(browser)).toContain('/history/8');
+            input('q');
+            await command;
+            expect(mounted).toBe(false);
+            expect(settled).toBe(true);
+          } finally {
+            const focused = tui.getFocusedComponent();
+            if (focused instanceof SubagentPeekOverlay) focused.handleInput('q');
+            await tick();
+            browser?.handleInput('q');
+            await command;
+            tui.stop();
+          }
+        });
+      },
+    );
+
+    test('details do not finish the browser and selection survives a changed sort order', async () => {
+      await withBrowser(async (f) => {
+        f.put('first', { createdAt: 200 });
+        f.put('target', { createdAt: 100 });
+        let release!: () => void;
+        const hold = new Promise<void>((resolve) => { release = resolve; });
+        await f.open(async (browser: any) => {
+          browser.render(120);
+          browser.handleInput('j');
+          const frame = browser.render(120);
+          browser.handleInput('\r');
+          browser.handleInput('\r');
+          browser.handleInput('q'); // The background list cannot close while details own input.
+          expect(f.selections).toEqual([]);
+          expect(f.opened).toHaveLength(1);
+          expect(browser.render(120)).toBe(frame);
+          release();
+          await f.flushDetails();
+          expect(selectedRow(browser)).toContain('/target');
+          expect(f.selections).toEqual([]);
+          browser.handleInput('\r');
+          await f.flushDetails();
+          expect(f.opened).toHaveLength(2);
+          browser.handleInput('q');
+        }, async (overlay: any, index: number) => {
+          if (index === 0) {
+            f.put('inserted', { createdAt: 300 });
+            await hold;
+          }
+          overlay.handleInput('q');
+        });
+        expect(f.selections).toEqual([undefined]);
+      });
+    });
+
+    test.each(['render', 'navigate', 'refresh'])(
+      'detail return uses a coherent snapshot when agents arrive before its first frame (%s)', async (action) => {
+        await withBrowser(async (f) => {
+          f.put('target', { createdAt: 200 });
+          f.put('other', { createdAt: 100 });
+          await f.open(async (browser: any) => {
+            expect(selectedRow(browser)).toContain('/target');
+            const reads = f.list.mock.calls.length;
+            f.requestRender.mockImplementationOnce(() => {
+              // The return selection has been restored, but its frame has not rendered yet.
+              f.put('inserted', { createdAt: 300 });
+            });
+            browser.handleInput('\r');
+            await f.flushDetails();
+            expect(f.list).toHaveBeenCalledTimes(reads + 1);
+            if (action === 'navigate') browser.handleInput('j');
+            if (action === 'refresh') browser.handleInput('r');
+            const expected = action === 'navigate' ? '/other' : action === 'refresh' ? '/inserted' : '/target';
+            expect(selectedRow(browser)).toContain(expected);
+            if (action === 'refresh') {
+              expect(f.list).toHaveBeenCalledTimes(reads + 2);
+              expect(browserNames(browser)).toContain('/inserted');
+            } else {
+              expect(f.list).toHaveBeenCalledTimes(reads + 1);
+              expect(browserNames(browser)).not.toContain('/inserted');
+              browser.handleInput('k');
+              browser.render(80);
+              browser.invalidate();
+              browser.render(80);
+              expect(f.list).toHaveBeenCalledTimes(reads + 1);
+              expect(browserNames(browser)).not.toContain('/inserted');
+            }
+            browser.handleInput('q');
+          }, (overlay: any) => overlay.handleInput('q'));
+        });
+      },
+    );
+
+    test('last Active finishing in details returns to its position in a long Done group', async () => {
+      await withBrowser(async (f) => {
+        await f.open(async (browser: any) => {
+          f.put('target', { status: 'running', createdAt: 1 });
+          for (let index = 0; index < 15; index++)
+            f.put('done/' + index, { completedAt: 100 - index });
+          expect(selectedRow(browser)).toContain('/target');
+          browser.handleInput('\r');
+          await f.flushDetails();
+          expect(selectedRow(browser)).toContain('/target');
+          const lines = browser.render(120);
+          expect(lines.join('\n')).not.toMatch(/^\s*Active \(/m);
+          expect(lines).toContain(' Done (16)');
+          expect(browserNames(browser)).toHaveLength(10);
+          const hidden = lines.reduce((count: number, line: string) =>
+            count + Number(line.match(/[↑↓] (\d+) more/)?.[1] ?? 0), 0);
+          expect(hidden + browserNames(browser).length).toBe(16);
+          browser.handleInput('q');
+        }, (overlay: any) => {
+          f.put('target', { status: 'completed', completedAt: 1 });
+          overlay.handleInput('q');
+        });
+      });
+    });
+
+    test('failed detail creation leaves the browser usable for another attempt', async () => {
+      await withBrowser(async (f) => {
+        f.put('worker');
+        await f.open(async (browser: any) => {
+          browser.render(120);
+          const custom = f.ctx.ui.custom;
+          f.ctx.ui.custom = (create: any, options: any) => options?.overlay
+            ? Promise.reject(new Error('detail creation failed')) : custom(create, options);
+          browser.handleInput('\r');
+          await f.flushDetails();
+          expect(f.selections).toEqual([]);
+          expect(f.notify).toHaveBeenCalledWith(expect.stringContaining('detail creation failed'), 'error');
+          expect(selectedRow(browser)).toContain('/worker');
+          f.ctx.ui.custom = custom;
+          browser.handleInput('\r');
+          await f.flushDetails();
+          expect(f.opened).toHaveLength(1);
+          browser.handleInput('q');
+        });
+      });
+    });
+
+    test('closing details restores navigation before the return frame is rendered', async () => {
+      await withBrowser(async (f) => {
+        f.put('first', { createdAt: 300 });
+        f.put('middle', { createdAt: 200 });
+        f.put('last', { createdAt: 100 });
+        await f.open(async (browser: any) => {
+          browser.render(120);
+          browser.handleInput('j');
+          expect(selectedRow(browser)).toContain('/middle');
+          browser.handleInput('\r');
+          await f.flushDetails();
+          browser.handleInput('j'); // No render between closing details and the next key.
+          expect(selectedRow(browser)).toContain('/last');
+          browser.handleInput('\r');
+          await f.flushDetails();
+          browser.handleInput('k');
+          expect(selectedRow(browser)).toContain('/middle');
+          browser.handleInput('q');
+        });
+      });
+    });
+
+    test.each(['pending selection', 'inserted item'])(
+      'return navigation is independent of render timing (%s)', async (change) => {
+        await withBrowser(async (f) => {
+          f.put('a', { createdAt: 300 });
+          f.put('b', { createdAt: 200 });
+          f.put('c', { createdAt: 100 });
+          await f.open(async (browser: any) => {
+            browser.render(120);
+            if (change === 'pending selection') browser.handleInput('j');
+            browser.handleInput('\r'); // Open the actual displayed /a, not an unrendered index.
+            await f.flushDetails();
+            expect(f.opened[0].canonicalName).toBe('/a');
+            browser.handleInput('j'); // No return-frame render before navigation.
+            expect(selectedRow(browser)).toContain('/b');
+            browser.handleInput('q');
+          }, (overlay: any) => {
+            if (change === 'inserted item') f.put('inserted', { createdAt: 400 });
+            overlay.handleInput('q');
+          });
+        });
+      },
+    );
+
+    test('detail navigation cannot reopen an overlay after its browser was disposed', async () => {
+      await withBrowser(async (f) => {
+        f.put('first', { createdAt: 200 });
+        f.put('second', { createdAt: 100 });
+        let browser: any;
+        await f.open((component: any) => {
+          browser = component;
+          browser.render(120);
+          browser.handleInput('\r');
+        }, (overlay: any, index: number) => {
+          if (index === 0) {
+            overlay.handleInput('\x1b[C');
+            browser.dispose(); // Simulate UI reset before the resolved navigation resumes.
+          } else overlay.handleInput('q');
+        });
+        expect(f.opened.map((info: AgentInfo) => info.canonicalName)).toEqual(['/first']);
+      });
+    });
+
+    test.each(['browser disposed', 'mount failed'])(
+      'real Pi overlay setup releases polling resources (%s)', async (failure) => {
+        await withBrowser(async (f) => {
+          const { InteractiveMode } = await import(new URL('./modes/interactive/interactive-mode.js', sdkUrl).href);
+          codingAgent.initTheme('dark', false);
+          f.put('worker');
+          let browser: any;
+          let detail: any;
+          let closeBrowser: (() => void) | undefined;
+          let hides = 0;
+          const host: any = {
+            editor: { getText: () => '', setText() {} },
+            ui: { ...f.tui, showOverlay() {
+              if (failure === 'mount failed') throw new Error('overlay mounting failed');
+              return { hide() { hides++; } };
+            } },
+            extensionOverlays: new Map(),
+            pushExtensionDialog(component: any) { browser = component; },
+            removeExtensionDialog() {},
+          };
+          f.ctx.ui.custom = (factory: any, options: any) =>
+            InteractiveMode.prototype.showExtensionCustom.call(host,
+              (tui: any, theme: any, keys: any, done: any) => {
+                if (!options?.overlay) closeBrowser = done;
+                const component = factory(tui, theme, keys, done);
+                if (options?.overlay) detail = component;
+                return component;
+              }, options);
+          const command = f.command();
+          try {
+            await new Promise((resolve) => setImmediate(resolve));
+            browser.render(120);
+            browser.handleInput('\r');
+            if (failure === 'browser disposed') browser.dispose(); // Before Pi installs the overlay.
+            await new Promise((resolve) => setImmediate(resolve));
+            expect(host.extensionOverlays.size).toBe(0);
+            expect(detail['disposed']).toBe(true);
+            expect(detail['pollInterval']).toBeNull();
+            if (failure === 'mount failed') {
+              expect(f.notify).toHaveBeenCalledWith(expect.stringContaining('overlay mounting failed'), 'error');
+              expect(selectedRow(browser)).toContain('/worker');
+            } else expect(hides).toBe(1);
+          } finally {
+            detail?.dispose();
+            closeBrowser?.();
+            await command;
+          }
+        });
+      },
+    );
+
+    test('a failed return-frame render request is reported without an unhandled promise', async () => {
+      await withBrowser(async (f) => {
+        f.put('worker');
+        await f.open(async (browser: any) => {
+          browser.render(120);
+          f.requestRender.mockImplementationOnce(() => { throw new Error('return-frame request failed'); });
+          browser.handleInput('\r');
+          await f.flushDetails();
+          expect(f.notify).toHaveBeenCalledWith(expect.stringContaining('return-frame request failed'), 'error');
+          expect(selectedRow(browser)).toContain('/worker');
+          browser.handleInput('\r');
+          await f.flushDetails();
+          expect(f.opened).toHaveLength(2);
+          browser.handleInput('q');
+        });
+      });
+    });
+
+    test('late detail closure cannot render a disposed browser', async () => {
+      await withBrowser(async (f) => {
+        f.put('worker');
+        let release!: () => void;
+        const hold = new Promise<void>((resolve) => { release = resolve; });
+        await f.open(async (browser: any) => {
+          browser.render(120);
+          browser.handleInput('\r');
+          browser.dispose();
+          const renders = f.requestRender.mock.calls.length;
+          release();
+          await f.flushDetails();
+          expect(f.requestRender).toHaveBeenCalledTimes(renders);
+        }, async (overlay: any) => {
+          await hold;
+          overlay.handleInput('q');
+        });
+      });
+    });
+
     test('does not construct a browser outside TUI mode', async () => {
       await withBrowser(async (f) => {
         f.ctx.mode = 'rpc';
@@ -3122,9 +3792,13 @@ test('six public tools carry native usage through metadata and the detail footer
     expect(sent).toHaveLength(beforeRead);
     expect((await execute('list_agents', {})).content[0].text).not.toContain('contextUsage');
     let detailOpened = 0;
+    let detailClosed = Promise.resolve();
+    let detailError: unknown;
     ctx.ui.custom = async (create: any) => {
       let component: any;
       let result: any;
+      let close!: () => void;
+      const closed = new Promise<void>((resolve) => { close = resolve; });
       const frames: string[] = [];
       const tui = {
         terminal: { rows: 35 },
@@ -3136,9 +3810,11 @@ test('six public tools carry native usage through metadata and the detail footer
       component = create(tui, theme, {}, (value: any) => {
         result = value;
         component.dispose?.();
+        close();
       });
       try {
         if (component instanceof SubagentPeekOverlay) {
+          detailClosed = closed;
           detailOpened++;
           expect(component.render(80).at(-2)).toContain('│ 12%/500k │ ←/→ agent');
           expect(
@@ -3156,9 +3832,17 @@ test('six public tools carry native usage through metadata and the detail footer
           ).toBe('prompt');
           await done(12);
           component.handleInput('\r');
+          await detailClosed;
+          await new Promise((resolve) => setImmediate(resolve));
+          if (detailError) throw detailError;
+          component.handleInput('q');
         }
         return result;
+      } catch (error) {
+        detailError = error;
+        throw error;
       } finally {
+        close();
         component.dispose?.();
       }
     };
@@ -3178,6 +3862,8 @@ test('six public tools carry native usage through metadata and the detail footer
     ctx.ui.custom = async (create: any) => {
       let component: any;
       let result: any;
+      let close!: () => void;
+      const closed = new Promise<void>((resolve) => { close = resolve; });
       component = create(
         { terminal: { rows: 35 }, requestRender() {} },
         theme,
@@ -3185,15 +3871,28 @@ test('six public tools carry native usage through metadata and the detail footer
         (value: any) => {
           result = value;
           component.dispose?.();
+          close();
         },
       );
       try {
         if (component instanceof SubagentPeekOverlay) {
+          detailClosed = closed;
           expect(component.render(80).at(-2)).toContain('│ 14%/500k │ ←/→ agent');
           component.handleInput('q');
-        } else component.handleInput('\r');
+        } else {
+          component.render(80);
+          component.handleInput('\r');
+          await detailClosed;
+          await new Promise((resolve) => setImmediate(resolve));
+          if (detailError) throw detailError;
+          component.handleInput('q');
+        }
         return result;
+      } catch (error) {
+        detailError = error;
+        throw error;
       } finally {
+        close();
         component.dispose?.();
       }
     };

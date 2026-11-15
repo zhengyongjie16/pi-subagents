@@ -28,15 +28,14 @@ Each active row shows the model, thinking level, elapsed time, and current activ
 
 ### Browser and live overlay
 
-`/subagents` opens the current session's agent browser, with status, elapsed time, model, thinking level, and task previews. It also offers a read-only all-sessions view.
+`/subagents` groups current-session agents into **Active** (`starting`, `running`) first, then **Done** (`completed`, `failed`, `interrupted`). The Active group is hidden when empty; Done is always shown. Active agents are newest-created first; Done agents are latest-finished first, using the latest run's `completedAt` (older records fall back to `updatedAt`, then `createdAt`). Each row shows status, elapsed time, model, thinking level, and a task preview. Visible group headings stay aligned with the browser title while scrolling through a shared ten-agent window; an empty Done group shows an empty-state message. Press `r` to refresh saved statuses and ordering.
 
-The live overlay shows conversation and tool activity, including output already streaming when opened. Tool results use Pi's native collapsed previews and the child's working directory. These views are available in interactive TUI mode.
+Enter opens details over the existing browser without closing it. Esc or q in details closes only the overlay and returns focus to the same list and selected agent; Esc or q in the browser exits it. The live overlay shows conversation and tool activity, including output already streaming when opened. Tool results use Pi's native collapsed previews and the child's working directory. These views are available in interactive TUI mode.
 
 | View | Keys | Action |
 | --- | --- | --- |
-| Browser | Tab | Switch between current and all sessions |
 | Browser | Enter / r | Open an agent / refresh the list |
-| Overlay | Left / Right | Switch agents within the browser scope |
+| Overlay | Left / Right | Cycle through current-session agents in browser order (Active, then Done) |
 | Overlay | g / G | Jump to the top / follow the latest output |
 | Both | Up / Down or j / k | Move selection or scroll output |
 | Both | q / Esc | Close the view |
@@ -53,8 +52,6 @@ An optional `shortcut` setting opens the browser directly; no shortcut is assign
 | `read_agent_response` | Read the latest run status and available response/error without waiting |
 | `send_message` | Steer active work or continue a saved session |
 | `interrupt_agent` | Request cooperative cancellation while preserving history |
-
-Names are unique within each parent session. Read and control tools stay within that scope; cross-session access through `list_agents(include_all: true)` and the browser is read-only.
 
 ## Agent templates
 
