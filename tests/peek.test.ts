@@ -37,6 +37,7 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter, once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
 import { stripVTControlCharacters } from 'node:util';
 import type { AgentInfo } from '../src/core.js';
 import { ObserverJsonlDecoder, useTestAgentDir, waitUntil } from './fixtures/core-sdk-fixture.js';
@@ -978,13 +979,16 @@ describe('footer context information and metadata polling', () => {
 
   test('socket close reads immediately and the existing poll can pick up a later final snapshot', () => {
     const { overlay, requestRender, writeInfo, infoFile } = createSavedOverlay();
-    const socket = Object.assign(new EventEmitter(), { destroy: mock(() => {}) });
+    const socket = Object.assign(new EventEmitter(), {
+      setEncoding() {},
+      destroy: mock(() => {}),
+    });
     const connect = spyOn(net, 'connect').mockReturnValue(socket as any);
     const read = spyOn(fs, 'readFileSync');
     try {
       overlay['connectSocket']();
       const close = socket.listeners('close')[0] as () => void;
-      const data = socket.listeners('data')[0] as (data: Buffer) => void;
+      const data = socket.listeners('data')[0] as (data: string) => void;
       const error = socket.listeners('error')[0] as () => void;
       writeInfo({ contextUsage: { tokens: 60_000, contextWindow: 500_000, percent: 12 } });
       close();
@@ -1004,7 +1008,7 @@ describe('footer context information and metadata polling', () => {
       const usage = overlay['contextUsage'];
       clock!.advance(1000);
       close();
-      data(Buffer.from(JSON.stringify({ type: 'message_start', message: assistant() }) + '\n'));
+      data(JSON.stringify({ type: 'message_start', message: assistant() }) + '\n');
       error();
       queuedPoll.callback();
       expect(overlay['refreshContextUsage']()).toBe(false);
@@ -1712,7 +1716,7 @@ describe('overlay creation paths and native lifecycle', () => {
     '%s clears streaming state before native renderer cleanup can fail',
     (transition) => {
       const { overlay } = createOverlay();
-      const socket = Object.assign(new EventEmitter(), { destroy() {} });
+      const socket = Object.assign(new EventEmitter(), { setEncoding() {}, destroy() {} });
       const connect = spyOn(net, 'connect').mockReturnValue(socket as any);
       try {
         overlay['connectSocket']();
@@ -2049,6 +2053,7 @@ describe('overlay creation paths and native lifecycle', () => {
       const file = session.getSessionFile()!;
       const original = fs.readFileSync(file, 'utf8');
       const socket = Object.assign(new EventEmitter(), {
+        setEncoding() {},
         connecting: false,
         destroyed: false,
         destroy() {},
@@ -2157,6 +2162,49 @@ describe('overlay creation paths and native lifecycle', () => {
       expectNativeLines(restored, reference);
     },
   );
+});
+
+test('preserves UTF-8 text and tool arguments across every socket byte boundary', () => {
+  const { overlay } = createOverlay();
+  // Use a real stream decoder without relying on TCP to preserve write boundaries.
+  const socket = new PassThrough();
+  const connect = spyOn(net, 'connect').mockReturnValue(socket as any);
+  const handleEvent = spyOn(overlay as any, 'handleEvent').mockImplementation(() => {});
+  const events = [
+    {
+      type: 'message_update',
+      assistantMessageEvent: {
+        type: 'text_delta',
+        contentIndex: 0,
+        delta: 'ASCII é 中文 😀\n"quoted" \\path',
+      },
+    },
+    {
+      type: 'tool_execution_start',
+      toolCallId: 'utf8-call',
+      toolName: 'read',
+      args: { path: '中文目录/😀.ts' },
+    },
+  ];
+  const payload = Buffer.from(events.map((event) => JSON.stringify(event)).join('\n') + '\n');
+  try {
+    overlay['connectSocket']();
+    for (let split = 1; split <= payload.length; split++) {
+      handleEvent.mockClear();
+      socket.write(payload.subarray(0, split));
+      socket.write(payload.subarray(split));
+      expect(handleEvent.mock.calls.map(([event]) => event)).toEqual(events);
+      expect(overlay['socketBuffer']).toBe('');
+    }
+    handleEvent.mockClear();
+    for (const byte of payload) socket.write(Buffer.from([byte]));
+    expect(handleEvent.mock.calls.map(([event]) => event)).toEqual(events);
+    expect(overlay['socketBuffer']).toBe('');
+  } finally {
+    overlay.dispose();
+    connect.mockRestore();
+    handleEvent.mockRestore();
+  }
 });
 
 describe('observer socket integration', () => {
@@ -2583,8 +2631,8 @@ describe('observer socket integration', () => {
       sockets.push(socket);
       const decoder = new ObserverJsonlDecoder();
       let synced = false;
-      const onData = (chunk: Buffer) => {
-        for (const line of decoder.push(chunk)) {
+      const onData = (chunk: string) => {
+        for (const line of decoder.push(Buffer.from(chunk))) {
           if (JSON.parse(line).type === 'sync') synced = true;
         }
       };

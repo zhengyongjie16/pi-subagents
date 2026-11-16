@@ -832,7 +832,7 @@ describe('layout budgets', () => {
         expect(lines.join('\n')).not.toContain('/worker5');
       } else {
         expect(lines.at(-2)!).toStartWith('└─');
-        expect(lines.at(-1)!).toStartWith('     ⎿');
+        expect(lines.at(-1)!).toStartWith('     └─');
       }
     }
   });

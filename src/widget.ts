@@ -377,7 +377,7 @@ export class AgentSummaryWidget {
         const snapshot = this.snapshots[index];
         const color = resolveAgentColor(snapshot.color);
         lines.push(agentHeader(snapshot, width, prefix, theme, color));
-        lines.push(paint(theme, 'dim', (last ? '   ' : '│  ') + '  ⎿  ' + activity(snapshot)));
+        lines.push(paint(theme, 'dim', (last ? '   ' : '│  ') + '  └─  ' + activity(snapshot)));
       }
       if (hidden) lines.push(paint(theme, 'dim', `└─ +${hidden} more · /subagents`));
       const fitted = lines.map((line) => truncateToWidth(line, width, '…'));

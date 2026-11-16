@@ -229,6 +229,7 @@ export class SubagentPeekOverlay {
     this.lastConnectAttemptAt = Date.now();
     try {
       const socket = net.connect(getSocketPath(this.info.id));
+      socket.setEncoding('utf8');
       this.socket = socket;
       this.socketBuffer = '';
       socket.on('error', () => {
@@ -248,7 +249,7 @@ export class SubagentPeekOverlay {
       });
       socket.on('data', (data) => {
         if (this.disposed || this.socket !== socket) return;
-        this.socketBuffer += data.toString();
+        this.socketBuffer += data;
         const lines = this.socketBuffer.split('\n');
         this.socketBuffer = lines.pop() ?? '';
         for (const line of lines) {

@@ -1280,6 +1280,7 @@ describe('run storage', () => {
 async function readSocketEvents(socketPath: string, count: number): Promise<any[]> {
   return await new Promise((resolve, reject) => {
     const socket = net.connect(socketPath);
+    socket.setEncoding('utf8');
     const events: any[] = [];
     let buffer = '';
     const finish = (error?: Error) => {
@@ -1290,7 +1291,7 @@ async function readSocketEvents(socketPath: string, count: number): Promise<any[
     socket.setTimeout(1000, () => finish(new Error('Timed out waiting for subagent events.')));
     socket.on('error', (error) => finish(error));
     socket.on('data', (chunk) => {
-      buffer += chunk.toString();
+      buffer += chunk;
       while (events.length < count) {
         const newline = buffer.indexOf('\n');
         if (newline === -1) return;
