@@ -219,8 +219,6 @@ interface RunState {
   finalizedRun: boolean;
   awaitingPrompt: boolean;
   accepted: boolean;
-  /** Hidden while input is tentative; keep its identity until acceptance or rollback. */
-  suspendedCompletion?: AgentCompletionEvent;
   candidateResponse: string;
   candidateError?: string;
   settledAborted: boolean;
@@ -255,13 +253,11 @@ interface LiveAgent {
 }
 
 export interface AgentCompletionEvent {
-  id: string;
   parentSessionId: string;
   agentName: string;
   status: AgentRuntimeStatus;
   finalResponse?: string;
   error?: string;
-  createdAt: number;
 }
 
 export interface AgentActivityEvent {
@@ -274,16 +270,10 @@ export interface AgentActivityEvent {
 
 export interface AgentManagerOptions {
   onActivityChange?: (event: AgentActivityEvent) => void;
-  onCompletion?: (event: AgentCompletionEvent, waiting: boolean) => void;
+  onCompletion?: (event: AgentCompletionEvent) => void;
   modelResponseTimeoutMs?: number;
   projectTrusted?: (cwd: string) => boolean | undefined;
   onError?: (error: Error) => void;
-}
-
-interface Waiter {
-  parentSessionId: string;
-  targets?: Set<string>;
-  resolve: (event: AgentCompletionEvent) => void;
 }
 
 export function formatAgentError(error: unknown): string {
@@ -1320,30 +1310,8 @@ export function previewText(text: string | undefined, maxLength = 180): string |
     : `${normalized.slice(0, Math.max(0, maxLength - 1))}…`;
 }
 
-function canonicalAgentName(target: string): string {
-  return target.startsWith('/') ? target : `/${target}`;
-}
-
-function targetMatches(event: AgentCompletionEvent, targets?: Set<string>): boolean {
-  return !targets || targets.has(event.agentName);
-}
-
-export function consumeFirstMatchingMailboxEvent(
-  events: AgentCompletionEvent[],
-  parentSessionId: string,
-  targets?: Set<string>,
-): AgentCompletionEvent | undefined {
-  const index = events.findIndex(
-    (event) => event.parentSessionId === parentSessionId && targetMatches(event, targets),
-  );
-  if (index === -1) return undefined;
-  return events.splice(index, 1)[0];
-}
-
 export class AgentManager {
   private readonly live = new Map<string, LiveAgent>();
-  private readonly mailbox: AgentCompletionEvent[] = [];
-  private waiters: Waiter[] = [];
   private readonly shutdownController = new AbortController();
   private readonly reconciliation: Promise<void>;
   private readonly maxIdleSessions: number;
@@ -1388,9 +1356,9 @@ export class AgentManager {
     }
   }
 
-  private notifyCompletion(event: AgentCompletionEvent, waiting: boolean): void {
+  private notifyCompletion(event: AgentCompletionEvent): void {
     try {
-      this.options.onCompletion?.(event, waiting);
+      this.options.onCompletion?.(event);
     } catch (error) {
       this.reportError(undefined, error);
     }
@@ -1556,20 +1524,15 @@ export class AgentManager {
         try {
           saveInfo(info);
         } catch {
-          // Keep the creation failure visible; waiters are still released below.
+          // Keep the creation failure visible even if persistence fails.
         }
         this.notifyStatusChange(info);
-        this.pushMailbox(
-          {
-            id: randomUUID(),
-            parentSessionId: info.parentSessionId,
-            agentName: info.canonicalName,
-            status: 'failed',
-            error: message,
-            createdAt: Date.now(),
-          },
-          true,
-        );
+        this.notifyCompletion({
+          parentSessionId: info.parentSessionId,
+          agentName: info.canonicalName,
+          status: 'failed',
+          error: message,
+        });
         throw error;
       }
     }
@@ -1690,26 +1653,6 @@ export class AgentManager {
           try {
             saveInfo(previous);
           } finally {
-            const completion = run.suspendedCompletion;
-            delete run.suspendedCompletion;
-            if (completion) this.pushMailbox(completion, false);
-            else {
-              for (const waiter of this.waiters.filter(
-                (waiter) =>
-                  waiter.parentSessionId === previous.parentSessionId &&
-                  waiter.targets?.has(previous.canonicalName),
-              )) {
-                waiter.resolve({
-                  id: randomUUID(),
-                  parentSessionId: previous.parentSessionId,
-                  agentName: previous.canonicalName,
-                  status: previous.status,
-                  finalResponse: previous.finalResponse,
-                  error: previous.error,
-                  createdAt: Date.now(),
-                });
-              }
-            }
             this.notifyStatusChange(previous);
           }
         } else if (!run.finalizedRun) {
@@ -1745,11 +1688,6 @@ export class AgentManager {
     displayMessage: string,
   ): Promise<void> {
     const session = live.session!;
-    run.suspendedCompletion = consumeFirstMatchingMailboxEvent(
-      this.mailbox,
-      live.info.parentSessionId,
-      new Set([live.info.canonicalName]),
-    );
     live.info.status = 'running';
     live.info.lastTaskMessage = displayMessage;
     live.info.lastActivity = Date.now();
@@ -1771,7 +1709,6 @@ export class AgentManager {
     if (live.closing || live.run !== run) throw new Error('Child session is closing.');
     const promptFinished = promptChildSession(session, message, () => {
       if (live.run !== run || this.live.get(live.info.id) !== live) return;
-      delete run.suspendedCompletion;
       run.accepted = true;
       resolveAccepted();
       if (run.cancellation.signal.aborted || live.closing) this.requestAbort(live);
@@ -2078,7 +2015,6 @@ export class AgentManager {
     if (this.live.get(live.info.id) !== live || live.run !== run || run.finalizedRun) return;
     // Close only this run's admission before invoking reentrant callbacks.
     run.finalizedRun = true;
-    delete run.suspendedCompletion;
     this.clearModelResponseTimer(run);
     live.info.status = status;
     if (status === 'completed') live.info.finalResponse = run.candidateResponse;
@@ -2090,46 +2026,17 @@ export class AgentManager {
     try {
       saveInfo(live.info);
     } finally {
-      // Publish status and resolve waits even when persistence fails.
+      // Publish status and completion even when persistence fails.
       this.notifyStatusChange(live.info);
-      this.pushMailbox(
-        {
-          id: randomUUID(),
+      if (status !== 'interrupted')
+        this.notifyCompletion({
           parentSessionId: live.info.parentSessionId,
           agentName: live.info.canonicalName,
           status,
           ...(status === 'completed' ? { finalResponse: live.info.finalResponse } : {}),
           ...(error !== undefined ? { error: live.info.error } : {}),
-          createdAt: Date.now(),
-        },
-        status !== 'interrupted',
-      );
+        });
     }
-  }
-
-  private removeMailboxEvents(parentSessionId: string, agentName: string): void {
-    for (let index = this.mailbox.length - 1; index >= 0; index--) {
-      const event = this.mailbox[index];
-      if (event.parentSessionId === parentSessionId && event.agentName === agentName)
-        this.mailbox.splice(index, 1);
-    }
-  }
-
-  private pushMailbox(event: AgentCompletionEvent, notify = true): void {
-    this.removeMailboxEvents(event.parentSessionId, event.agentName);
-    const waiterIndex = this.waiters.findIndex(
-      (waiter) =>
-        waiter.parentSessionId === event.parentSessionId && targetMatches(event, waiter.targets),
-    );
-    if (waiterIndex !== -1) {
-      const [waiter] = this.waiters.splice(waiterIndex, 1);
-      // Queue the result before waking the wait tool; it returns only status to the model.
-      if (notify) this.notifyCompletion(event, true);
-      waiter.resolve(event);
-      return;
-    }
-    this.mailbox.push(event);
-    if (notify) this.notifyCompletion(event, false);
   }
 
   /** Memory-only summaries. Cache writes below are presentation-only, never saveInfo(). */
@@ -2238,105 +2145,6 @@ export class AgentManager {
       ...(info.error ? { error: info.error } : {}),
       last_task_message: previewText(info.lastTaskMessage),
     };
-  }
-
-  private waitTargetInfo(info: AgentInfo): AgentInfo {
-    const live = this.live.get(info.id);
-    if (live) return live.info;
-    const event = this.mailbox.find(
-      (event) =>
-        event.parentSessionId === info.parentSessionId && event.agentName === info.canonicalName,
-    );
-    return event
-      ? {
-          ...info,
-          status: event.status,
-          finalResponse: event.finalResponse,
-          error: event.error,
-          completedAt: event.createdAt,
-        }
-      : info;
-  }
-
-  private checkWaitTarget(info: AgentInfo): void {
-    if (!FINAL_STATUSES.has(info.status) && !this.live.has(info.id) && !isRunActive(info.id)) {
-      throw new Error(
-        `Agent ${info.canonicalName} has no active session but its saved status is ${info.status}. A status save may have failed; inspect the subagent log before retrying.`,
-      );
-    }
-  }
-
-  async waitAgent(
-    parentSessionId: string,
-    targets?: string[],
-    signal?: AbortSignal,
-  ): Promise<{ message: string; event: AgentCompletionEvent }> {
-    const waitSignal = signal
-      ? AbortSignal.any([signal, this.shutdownController.signal])
-      : this.shutdownController.signal;
-    throwIfAborted(waitSignal);
-    const normalizedTargets = targets?.length
-      ? new Set(targets.map(canonicalAgentName))
-      : undefined;
-    const existing = consumeFirstMatchingMailboxEvent(
-      this.mailbox,
-      parentSessionId,
-      normalizedTargets,
-    );
-    if (existing) {
-      return {
-        message: `Wait completed: ${existing.agentName} ${existing.status}.`,
-        event: existing,
-      };
-    }
-    if (normalizedTargets) {
-      const targetInfos = readScopeInfos(parentSessionId)
-        .filter((info) => normalizedTargets.has(info.canonicalName))
-        .map((info) => this.waitTargetInfo(info));
-      if (!targetInfos.length)
-        throw new Error(
-          `Agent not found in this parent session: ${Array.from(normalizedTargets).join(', ')}`,
-        );
-      const finalInfo = targetInfos.find((info) => FINAL_STATUSES.has(info.status));
-      if (!finalInfo) for (const info of targetInfos) this.checkWaitTarget(info);
-      if (finalInfo) {
-        return {
-          message: `Wait completed: ${finalInfo.canonicalName} ${finalInfo.status}.`,
-          event: {
-            id: randomUUID(),
-            parentSessionId,
-            agentName: finalInfo.canonicalName,
-            status: finalInfo.status,
-            finalResponse: finalInfo.finalResponse,
-            error: finalInfo.error,
-            createdAt: Date.now(),
-          },
-        };
-      }
-    }
-    return await new Promise((resolve, reject) => {
-      let waiter: Waiter;
-      let settled = false;
-      const settle = (callback: () => void) => {
-        if (settled) return;
-        settled = true;
-        waitSignal.removeEventListener('abort', onAbort);
-        this.waiters = this.waiters.filter((candidate) => candidate !== waiter);
-        callback();
-      };
-      const onAbort = () => settle(() => reject(abortError(waitSignal)));
-      waiter = {
-        parentSessionId,
-        targets: normalizedTargets,
-        resolve: (event) =>
-          settle(() =>
-            resolve({ message: `Wait completed: ${event.agentName} ${event.status}.`, event }),
-          ),
-      };
-      this.waiters.push(waiter);
-      waitSignal.addEventListener('abort', onAbort, { once: true });
-      if (waitSignal.aborted) onAbort();
-    });
   }
 
   async sendMessage(
@@ -2503,16 +2311,6 @@ export class AgentManager {
       delete persisted.error;
       saveInfo(persisted);
       this.notifyStatusChange(persisted);
-      this.pushMailbox(
-        {
-          id: randomUUID(),
-          parentSessionId,
-          agentName: persisted.canonicalName,
-          status: 'interrupted',
-          createdAt: Date.now(),
-        },
-        false,
-      );
     }
     return { previous_status: previous };
   }

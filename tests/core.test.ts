@@ -5,12 +5,11 @@ import { once } from 'node:events';
 import {
   configureCoreFixture,
   ObserverJsonlDecoder,
-  deferred,
   useTestAgentDir,
   waitUntil,
   type CoreFixtureState,
 } from './fixtures/core-sdk-fixture.js';
-import type { AgentInfo } from '../src/core.js';
+import type { AgentInfo, AgentResponseEntry } from '../src/core.js';
 import { parseStreamingJson, type AssistantMessage } from '@earendil-works/pi-ai';
 import * as fs from 'node:fs';
 import * as net from 'node:net';
@@ -26,7 +25,6 @@ const {
   AgentManager,
   EventBroadcaster,
   RpcAssistantStreamState,
-  consumeFirstMatchingMailboxEvent,
   formatAgentError,
   formatContextUsage,
   normalizeContextUsage,
@@ -1604,8 +1602,6 @@ describe('widget snapshots', () => {
       live.info.contextUsage = { tokens: 22, contextWindow: 500000, percent: 0.0044 };
       const before = structuredClone(live.info),
         otherBefore = structuredClone(other.info);
-      const mailbox = structuredClone(manager['mailbox']);
-      expect(mailbox).toHaveLength(1);
       const savedInfo = fs.readFileSync(info.infoFile, 'utf8');
       const savedSession = fs.readFileSync(info.sessionFile, 'utf8');
       const scan = spyOn(store, 'getEntries'),
@@ -1643,7 +1639,6 @@ describe('widget snapshots', () => {
         for (const operation of io) expect(operation).not.toHaveBeenCalled();
         expect(live.info).toEqual(before);
         expect(other.info).toEqual(otherBefore);
-        expect(manager['mailbox']).toEqual(mailbox);
       } finally {
         live.session = source;
         other.session = replacement;
@@ -1670,8 +1665,8 @@ describe('widget snapshots', () => {
     'restores historical tokens/compactions on real resume, resetting only the display clock (idle cap %s)',
     async (cap) => {
       writeConfig({ maxIdleSessions: cap });
-      const gate = deferred(),
-        next = deferred();
+      const gate = Promise.withResolvers<void>(),
+        next = Promise.withResolvers<void>();
       fixture.responseGate = gate.promise;
       fixture.tokens = (text) => (text === 'first' ? 50 : 70);
       const parent = 'widget-resume-' + randomUUID();
@@ -1740,7 +1735,7 @@ describe('widget snapshots', () => {
   );
 
   test('does not reset elapsed time for steer, native retry, or repeated reads', async () => {
-    const gate = deferred();
+    const gate = Promise.withResolvers<void>();
     fixture.responseGate = gate.promise;
     fixture.tokens = 20;
     fixture.onLoad = (pi) => {
@@ -1788,7 +1783,7 @@ describe('widget snapshots', () => {
   test('isolates parent scopes, includes starting/running memory only, and omits every final status', async () => {
     const parent = 'widget-scope-' + randomUUID(),
       foreign = 'widget-foreign-' + randomUUID();
-    const startup = deferred();
+    const startup = Promise.withResolvers<void>();
     const manager = new AgentManager();
     let starting: Promise<unknown> | undefined;
     try {
@@ -1876,10 +1871,10 @@ describe('widget snapshots', () => {
   });
 
   test.each(['completed', 'failed'] as const)(
-    'display getter failures cannot change %s results, completion delivery, waits or cleanup',
+    'display getter failures cannot change %s results, completion delivery or cleanup',
     async (status) => {
       writeConfig({ maxIdleSessions: 0 });
-      const gate = deferred();
+      const gate = Promise.withResolvers<void>();
       fixture.responseGate = gate.promise;
       const parent = 'widget-fault-' + randomUUID();
       const notices: any[] = [],
@@ -1932,23 +1927,18 @@ describe('widget snapshots', () => {
             expect(manager.getWidgetSnapshot(parent)[0].tokens).toBeUndefined();
           }
         });
-        const waiting = manager.waitAgent(parent, ['worker']);
         gate.resolve();
-        const { event } = await waiting;
         await settled(manager, info);
         unsubscribe();
-        expect(event).toMatchObject({
+        expect(notices[0]).toMatchObject({
           status,
           ...(status === 'completed'
             ? { finalResponse: 'response:hold outcome' }
             : { error: 'original model failure' }),
         });
         expect(notices).toHaveLength(1);
-        expect(notices[0].id).toBe(event.id);
         expect(errors).toEqual([]);
         expect(manager.getAgentInfo('worker', parent).status).toBe(status);
-        expect(manager['mailbox']).toEqual([]);
-        expect(manager['waiters']).toEqual([]);
         expect(manager['live'].has(info.id)).toBe(false);
         expect(fixture.instances[0].shutdowns).toBe(1);
         expect(fs.existsSync(activeMarker(info.id))).toBe(false);
@@ -2172,7 +2162,6 @@ describe('SDK model validation', () => {
         expect(completions).toEqual([
           expect.objectContaining({ status: 'failed', error: info.error }),
         ]);
-        expect((await manager.waitAgent(parent, ['worker'])).event?.id).toBe(completions[0].id);
         expect(fs.existsSync(activeMarker(info.id))).toBe(false);
       } finally {
         await manager.shutdown();
@@ -2267,7 +2256,6 @@ describe('SDK model validation', () => {
         await settled(manager, initial);
         expect(manager.getAgentInfo('worker', parent).status).toBe(prior);
         fixture = configureCoreFixture({ routes: [['test', 'other']] });
-        let previousId = manager['mailbox'].at(-1)!.id;
         for (let attempt = 0; attempt < 2; attempt++) {
           const before = completions.length;
           await expect(manager.sendMessage(parent, 'worker', 'must not run')).rejects.toThrow(
@@ -2280,9 +2268,6 @@ describe('SDK model validation', () => {
           expect(completions.slice(before)).toEqual([
             expect.objectContaining({ status: 'failed', error: info.error }),
           ]);
-          expect(completions.at(-1).id).not.toBe(previousId);
-          previousId = completions.at(-1).id;
-          expect((await manager.waitAgent(parent, ['worker'])).event?.id).toBe(previousId);
         }
         expect(fixture.instances.flatMap((instance) => instance.inputs)).toEqual([]);
       } finally {
@@ -2297,8 +2282,8 @@ describe('native hot session lifecycle', () => {
     test.each(['send', 'interrupt', 'shutdown'] as const)(
       'native settled barrier protects ' + kind + ' work during %s',
       async (action) => {
-        const entered = deferred(),
-          gate = deferred();
+        const entered = Promise.withResolvers<void>(),
+          gate = Promise.withResolvers<void>();
         const notices: any[] = [],
           errors: Error[] = [];
         const manager = new AgentManager({
@@ -2409,10 +2394,10 @@ describe('native hot session lifecycle', () => {
   }
 
   test('native settled barrier retains a run while late steer preflight exits and clears its old queue', async () => {
-    const response = deferred(),
-      entered = deferred(),
-      gate = deferred(),
-      input = deferred();
+    const response = Promise.withResolvers<void>(),
+      entered = Promise.withResolvers<void>(),
+      gate = Promise.withResolvers<void>(),
+      input = Promise.withResolvers<void>();
     fixture.responseGate = response.promise;
     fixture.input = async (event) => {
       if (event.text === 'late steer') await input.promise;
@@ -2606,8 +2591,8 @@ describe('native hot session lifecycle', () => {
     'native compaction returns to safe idle and trims the existing Map after %s',
     async (outcome) => {
       writeConfig({ maxIdleSessions: 1 });
-      const entered = deferred(),
-        gate = deferred();
+      const entered = Promise.withResolvers<void>(),
+        gate = Promise.withResolvers<void>();
       fixture.onStart = (pi) => {
         if (fixture.instances.length !== 1) return;
         pi.on('session_before_compact', async (event) => {
@@ -2686,10 +2671,10 @@ describe('native hot session lifecycle', () => {
       'public compact failed-hook drain protects ' + outcome + ' during %s',
       async (action) => {
         if (action === 'trim') writeConfig({ maxIdleSessions: 1 });
-        const beforeEntered = deferred(),
-          beforeGate = deferred();
-        const failedEntered = deferred(),
-          failedGate = deferred();
+        const beforeEntered = Promise.withResolvers<void>(),
+          beforeGate = Promise.withResolvers<void>();
+        const failedEntered = Promise.withResolvers<void>(),
+          failedGate = Promise.withResolvers<void>();
         const callback = Promise.withResolvers<{ error?: Error; result?: unknown }>();
         let hookExited = false,
           callbackCount = 0,
@@ -2824,9 +2809,9 @@ describe('native hot session lifecycle', () => {
 
   test('public compact reentry registers first and each overlapping failed hook keeps its own drain', async () => {
     writeConfig({ maxIdleSessions: 1 });
-    const entered = [deferred(), deferred()],
-      gates = [deferred(), deferred()];
-    const callbacks = [deferred(), deferred()];
+    const entered = [Promise.withResolvers<void>(), Promise.withResolvers<void>()],
+      gates = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+    const callbacks = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
     const observed: number[] = [];
     let failedHooks = 0,
       reentered = false;
@@ -2898,9 +2883,9 @@ describe('native hot session lifecycle', () => {
 
   test('an old native barrier cannot clear newer no-run work or trim inside its settled hook', async () => {
     writeConfig({ maxIdleSessions: 1 });
-    const oldDelivery = deferred(),
-      entered = deferred(),
-      gate = deferred();
+    const oldDelivery = Promise.withResolvers<void>(),
+      entered = Promise.withResolvers<void>(),
+      gate = Promise.withResolvers<void>();
     let backgroundStarted = false;
     fixture.onStart = (pi) => {
       if (fixture.instances.length !== 1) return;
@@ -3175,7 +3160,7 @@ describe('native hot session lifecycle', () => {
 
   test('eviction marks closing before a shutdown hook reenters send and holds JSONL ownership', async () => {
     writeConfig({ maxIdleSessions: 1 });
-    const gate = deferred();
+    const gate = Promise.withResolvers<void>();
     const manager = new AgentManager();
     const parent = 'eviction-reentry-' + randomUUID();
     let reentered: Promise<unknown> | undefined;
@@ -3221,7 +3206,7 @@ describe('native hot session lifecycle', () => {
   });
 
   test('two concurrent idle sends claim one run before asynchronous input preflight', async () => {
-    const gate = deferred();
+    const gate = Promise.withResolvers<void>();
     const manager = new AgentManager();
     const parent = 'two-idle-sends-' + randomUUID();
     let first: Promise<unknown> | undefined;
@@ -3322,7 +3307,7 @@ describe('native hot session lifecycle', () => {
   });
 
   test('old response timers and finish callbacks cannot touch the next run', async () => {
-    const gate = deferred();
+    const gate = Promise.withResolvers<void>();
     fixture.responseGate = gate.promise;
     const callbacks: Array<() => void> = [];
     const original = globalThis.setTimeout;
@@ -3369,8 +3354,8 @@ describe('native hot session lifecycle', () => {
   });
 
   test('one observer connection spans native runs and handled input without duplicate settled rows', async () => {
-    const gate = deferred();
-    const interruptionGate = deferred();
+    const gate = Promise.withResolvers<void>();
+    const interruptionGate = Promise.withResolvers<void>();
     fixture.responseGate = gate.promise;
     const manager = new AgentManager();
     const parent = 'hot-observer-' + randomUUID();
@@ -3429,7 +3414,7 @@ describe('native hot session lifecycle', () => {
 
   test('manager shutdown drains mixed active/idle/closing sessions despite save and hook failures', async () => {
     writeConfig({ maxIdleSessions: 1 });
-    const gate = deferred();
+    const gate = Promise.withResolvers<void>();
     const errors: Error[] = [];
     const completions: any[] = [];
     const manager = new AgentManager({
@@ -3604,19 +3589,17 @@ describe('native hot session lifecycle', () => {
     }
   });
 
-  test('warm unaccepted rollback restores a targeted waiter without replaying consumed completion', async () => {
-    const gate = deferred();
+  test('warm unaccepted rollback restores the previous result without another completion', async () => {
+    const gate = Promise.withResolvers<void>();
     const notices: any[] = [];
     const manager = new AgentManager({ onCompletion: (e) => notices.push(e) });
     const parent = 'hot-rollback-' + randomUUID();
-    const controller = new AbortController();
     let pending: Promise<unknown> | undefined;
-    let anyWait: Promise<unknown> | undefined;
     try {
       await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
       const info = manager.getAgentInfo('worker', parent);
       await settled(manager, info);
-      await manager.waitAgent(parent, ['worker']);
+      const before = manager.readAgentResponse('worker', parent);
       fixture.input = async (event) => {
         if (event.text === 'unaccepted') await gate.promise;
       };
@@ -3625,31 +3608,27 @@ describe('native hot session lifecycle', () => {
       const session = manager['live'].get(info.id)!.session!;
       spyOn(session.modelRuntime, 'hasConfiguredAuth').mockReturnValue(false);
       spyOn(session.modelRuntime, 'checkAuth').mockResolvedValue(undefined);
-      anyWait = manager.waitAgent(parent, undefined, controller.signal).catch((e) => e);
-      const targeted = manager.waitAgent(parent, ['worker'], controller.signal);
       gate.resolve();
       expect(await pending).toBeInstanceOf(Error);
-      expect((await targeted).event).toMatchObject({
+      await released(manager, info);
+      expect(manager.readAgentResponse('worker', parent)).toEqual(before);
+      expect(manager.getAgentInfo('worker', parent)).toMatchObject({
         status: 'completed',
+        messageCount: 1,
         finalResponse: 'response:first',
       });
-      await released(manager, info);
-      expect(manager['waiters']).toHaveLength(1);
-      expect(manager['mailbox']).toEqual([]);
       expect(notices).toHaveLength(1);
       expect(fixture.instances).toHaveLength(1);
       expect(fixture.instances[0].requests).toHaveLength(1);
     } finally {
       gate.resolve();
-      controller.abort();
       await pending;
-      await anyWait;
       await manager.shutdown();
     }
   });
 
   test('a warm acceptance timeout closes conservatively and late input cannot leak into recovery', async () => {
-    const gate = deferred();
+    const gate = Promise.withResolvers<void>();
     const manager = new AgentManager({ onError() {} });
     const parent = 'hot-acceptance-timeout-' + randomUUID();
     let timers: ReturnType<typeof spyOn> | undefined;
@@ -3696,7 +3675,7 @@ describe('native hot session lifecycle', () => {
 
 describe('SDK lifecycle and cancellation races', () => {
   test('spawn returns on native acceptance, then reuses the same native session and history', async () => {
-    const gate = deferred();
+    const gate = Promise.withResolvers<void>();
     fixture = configureCoreFixture({ responseGate: gate.promise });
     const parent = 'lifecycle-' + randomUUID();
     const manager = new AgentManager();
@@ -3752,7 +3731,7 @@ describe('SDK lifecycle and cancellation races', () => {
   });
 
   test('steers a running native session without opening a second session', async () => {
-    const gate = deferred();
+    const gate = Promise.withResolvers<void>();
     fixture = configureCoreFixture({ responseGate: gate.promise });
     const parent = 'steer-' + randomUUID();
     const completions: any[] = [];
@@ -3830,7 +3809,7 @@ describe('SDK lifecycle and cancellation races', () => {
   });
 
   test('handled input that starts native work is not finalized or disposed before native idle', async () => {
-    const gate = deferred();
+    const gate = Promise.withResolvers<void>();
     fixture = configureCoreFixture({ responseGate: gate.promise });
     const parent = 'handled-work-' + randomUUID();
     const manager = new AgentManager();
@@ -3856,7 +3835,7 @@ describe('SDK lifecycle and cancellation races', () => {
   test.each(['initialization', 'input'])(
     'interrupt tracks late %s until it exits, without rollback or duplicate completion',
     async (phase) => {
-      const gate = deferred();
+      const gate = Promise.withResolvers<void>();
       fixture = configureCoreFixture(
         phase === 'initialization'
           ? { startupGate: gate.promise }
@@ -3893,8 +3872,7 @@ describe('SDK lifecycle and cancellation races', () => {
         await settled(manager, info);
         expect(manager.getAgentInfo('worker', parent).status).toBe('interrupted');
         expect(completions).toEqual([]);
-        expect((await manager.waitAgent(parent, ['worker'])).event?.status).toBe('interrupted');
-        expect(manager['mailbox'].filter((event) => event.parentSessionId === parent)).toEqual([]);
+        expect(manager.readAgentResponse('worker', parent).status).toBe('interrupted');
         expect(fixture.instances[0].shutdowns).toBe(1);
         expect(fixture.instances[0].activeStreams).toBe(0);
         if (phase === 'initialization') expect(fixture.instances[0].inputs).toEqual([]);
@@ -3909,7 +3887,7 @@ describe('SDK lifecycle and cancellation races', () => {
   test.each(['initialization', 'input'])(
     'startup timeout follows late %s to actual release',
     async (phase) => {
-      const gate = deferred();
+      const gate = Promise.withResolvers<void>();
       fixture = configureCoreFixture(
         phase === 'initialization'
           ? { startupGate: gate.promise }
@@ -3959,7 +3937,7 @@ describe('SDK lifecycle and cancellation races', () => {
   );
 
   test('non-cooperative cancellation returns finitely and blocks reopening until actual release', async () => {
-    const gate = deferred();
+    const gate = Promise.withResolvers<void>();
     fixture = configureCoreFixture({ responseGate: gate.promise, ignoreAbort: true });
     const parent = 'non-cooperative-' + randomUUID();
     const errors: Error[] = [];
@@ -3998,7 +3976,7 @@ describe('SDK lifecycle and cancellation races', () => {
   });
 
   test('publishes completion before extension shutdown, but closing cannot reopen the JSONL', async () => {
-    const gate = deferred();
+    const gate = Promise.withResolvers<void>();
     fixture = configureCoreFixture({ shutdownGate: gate.promise });
     const parent = 'shutdown-gate-' + randomUUID();
     const completions: any[] = [];
@@ -4030,8 +4008,8 @@ describe('SDK lifecycle and cancellation races', () => {
   });
 
   test('a late steer cannot claim queued success or dispose the session before its input exits', async () => {
-    const response = deferred();
-    const input = deferred();
+    const response = Promise.withResolvers<void>();
+    const input = Promise.withResolvers<void>();
     fixture = configureCoreFixture({
       responseGate: response.promise,
       input: async (event) => {
@@ -4080,8 +4058,8 @@ describe('SDK lifecycle and cancellation races', () => {
   test.each([false, true])(
     'steer timeout cancels the run and owns late input until cleanup (ignoreAbort=%s)',
     async (ignoreAbort) => {
-      const response = deferred();
-      const input = deferred();
+      const response = Promise.withResolvers<void>();
+      const input = Promise.withResolvers<void>();
       fixture = configureCoreFixture({
         responseGate: response.promise,
         ignoreAbort,
@@ -4167,7 +4145,7 @@ describe('SDK lifecycle and cancellation races', () => {
   );
 
   test('ordinary steer rejection preserves the active run, even with timeout-like error text', async () => {
-    const response = deferred();
+    const response = Promise.withResolvers<void>();
     fixture = configureCoreFixture({ responseGate: response.promise });
     const parent = 'steer-rejection-' + randomUUID();
     const manager = new AgentManager();
@@ -4202,8 +4180,8 @@ describe('SDK lifecycle and cancellation races', () => {
   test.each(['completed', 'interrupted'])(
     'a later steer timeout cannot replace an already %s run',
     async (status) => {
-      const response = deferred();
-      const input = deferred();
+      const response = Promise.withResolvers<void>();
+      const input = Promise.withResolvers<void>();
       fixture = configureCoreFixture({
         responseGate: response.promise,
         input: async (event) => {
@@ -4275,7 +4253,7 @@ describe('SDK lifecycle and cancellation races', () => {
   );
 
   test('shutdown takes ownership of pending initialization and refuses all new submissions', async () => {
-    const gate = deferred();
+    const gate = Promise.withResolvers<void>();
     fixture = configureCoreFixture({ startupGate: gate.promise });
     const parent = 'manager-shutdown-' + randomUUID();
     const manager = new AgentManager();
@@ -4312,7 +4290,7 @@ describe('SDK lifecycle and cancellation races', () => {
     const parent = 'concurrent-resume-' + randomUUID();
     writeConfig({ maxIdleSessions: 0 }); // This contract exercises actual cold disposal/reopening.
     const manager = new AgentManager();
-    const gate = deferred();
+    const gate = Promise.withResolvers<void>();
     try {
       await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
       const info = manager.getAgentInfo('worker', parent);
@@ -4399,7 +4377,7 @@ describe('SDK lifecycle and cancellation races', () => {
   });
 
   test('observer exceptions stay outside native persistence and cannot skip cleanup', async () => {
-    const gate = deferred();
+    const gate = Promise.withResolvers<void>();
     fixture = configureCoreFixture({ responseGate: gate.promise });
     const parent = 'observer-failure-' + randomUUID();
     const errors: Error[] = [];
@@ -4471,7 +4449,8 @@ describe('startup storage failures', () => {
     const scope = path.join(getRunsDir(), parentScopeKey(parentSessionId));
     const socketDir = path.join(TEST_AGENT_DIR, 'pi-subagents', os.userInfo().username, 'sockets');
     fs.rmSync(scope, { recursive: true, force: true });
-    const manager = new AgentManager();
+    const completions: any[] = [];
+    const manager = new AgentManager({ onCompletion: (event) => completions.push(event) });
     await manager.ready();
     fs.rmSync(socketDir, { recursive: true, force: true });
     fs.mkdirSync(path.dirname(socketDir), { recursive: true });
@@ -4488,11 +4467,9 @@ describe('startup storage failures', () => {
       expect(failed.status).toBe('failed');
       expect(failed.error).toBe(returnedError);
       expect(manager['live'].has(failed.id)).toBe(false);
-      expect((await manager.waitAgent(parentSessionId, ['worker'])).event).toMatchObject({
-        agentName: '/worker',
-        status: 'failed',
-        error: failed.error,
-      });
+      expect(completions).toEqual([
+        expect.objectContaining({ agentName: '/worker', status: 'failed', error: failed.error }),
+      ]);
 
       fs.rmSync(socketDir, { force: true });
       fs.mkdirSync(socketDir, { recursive: true });
@@ -4569,7 +4546,7 @@ describe('startup storage failures', () => {
     }
   });
 
-  test('a first-spawn JSONL creation failure records a failed completion and releases every waiter', async () => {
+  test('a first-spawn JSONL creation failure publishes a failed completion and inactive status', async () => {
     const parentSessionId = 'lifecycle-jsonl-creation-' + randomUUID();
     const scope = path.join(getRunsDir(), parentScopeKey(parentSessionId));
     fs.rmSync(scope, { recursive: true, force: true });
@@ -4611,11 +4588,6 @@ describe('startup storage failures', () => {
       expect(completions).toEqual([
         expect.objectContaining({ agentName: '/worker', status: 'failed', error: returnedError }),
       ]);
-      expect((await manager.waitAgent(parentSessionId, ['worker'])).event).toMatchObject({
-        agentName: '/worker',
-        status: 'failed',
-        error: failed.error,
-      });
     } finally {
       open.mockRestore();
       await manager.shutdown();
@@ -4625,7 +4597,7 @@ describe('startup storage failures', () => {
 });
 
 describe('completion delivery', () => {
-  test('publishes successful and failed completions without a waiter', async () => {
+  test('publishes successful and failed completions', async () => {
     const parentSessionId = 'completion-callbacks';
     const scope = path.join(getRunsDir(), parentScopeKey(parentSessionId));
     fs.rmSync(scope, { recursive: true, force: true });
@@ -4658,33 +4630,39 @@ describe('completion delivery', () => {
   });
 
   test.each(['completed', 'failed'] as const)(
-    'publishes %s content before waking a completion waiter',
+    'publishes %s content once before settlement using a single event argument',
     async (status) => {
-      const parentSessionId = 'completion-waits-' + randomUUID();
+      const parentSessionId = 'completion-settlement-' + randomUUID();
       const completions: any[] = [];
       const order: string[] = [];
       const manager = new AgentManager({
-        onCompletion: (event, waiting) => {
-          completions.push({ event, waiting });
+        onCompletion: (...events) => {
+          completions.push(events);
           order.push('notification');
         },
       });
       try {
-        const waiting = manager.waitAgent(parentSessionId).then((result) => {
-          order.push('wait');
-          return result;
-        });
         await manager.spawnAgent(
           spawnParams(parentSessionId, 'one', status === 'failed' ? 'crash now' : 'first'),
         );
-        const waited = await waiting;
-        expect(waited.event).toMatchObject({ agentName: '/one', status });
-        expect(completions).toEqual([{ event: waited.event, waiting: true }]);
-        expect(order).toEqual(['notification', 'wait']);
-        if (status === 'completed')
-          expect(completions[0].event.finalResponse).toBe('response:first');
-        else expect(completions[0].event.error).toContain('fixture failure');
-        await manager.waitAgent(parentSessionId, ['one']);
+        await settled(manager, manager.getAgentInfo('one', parentSessionId));
+        order.push('settlement');
+        expect(completions).toEqual([
+          [
+            expect.objectContaining({
+              parentSessionId,
+              agentName: '/one',
+              status,
+            }),
+          ],
+        ]);
+        expect(order).toEqual(['notification', 'settlement']);
+        const [event] = completions[0];
+        if (status === 'completed') expect(event.finalResponse).toBe('response:first');
+        else expect(event.error).toContain('fixture failure');
+        const response = manager.readAgentResponse('one', parentSessionId);
+        expect(response).toMatchObject({ status });
+        expect(manager.readAgentResponse('one', parentSessionId)).toEqual(response);
         expect(completions).toHaveLength(1);
       } finally {
         await manager.shutdown();
@@ -4692,7 +4670,8 @@ describe('completion delivery', () => {
     },
   );
 
-  test('a notification callback failure cannot strand a completion waiter', async () => {
+  test('a notification callback failure cannot change the saved result or strand cleanup', async () => {
+    writeConfig({ maxIdleSessions: 0 });
     const parent = 'notification-failure-' + randomUUID();
     const errors: Error[] = [];
     const manager = new AgentManager({
@@ -4702,44 +4681,18 @@ describe('completion delivery', () => {
       onError: (error) => errors.push(error),
     });
     try {
-      const waiting = manager.waitAgent(parent);
       await manager.spawnAgent(spawnParams(parent, 'one', 'first'));
-      expect((await waiting).event.status).toBe('completed');
+      const info = manager.getAgentInfo('one', parent);
+      await settled(manager, info);
+      expect(manager.readAgentResponse('one', parent)).toMatchObject({
+        status: 'completed',
+        finalResponse: 'response:first',
+      });
+      expect(manager['live'].has(info.id)).toBe(false);
+      expect(fixture.instances[0].shutdowns).toBe(1);
+      expect(fs.existsSync(activeMarker(info.id))).toBe(false);
       expect(errors.some((error) => error.message === 'notification rejected')).toBe(true);
     } finally {
-      await manager.shutdown();
-    }
-  });
-
-  test('a canceled waiter leaves later completion on the normal automatic channel', async () => {
-    const gate = deferred();
-    fixture = configureCoreFixture({ responseGate: gate.promise });
-    const parent = 'canceled-wait-notification-' + randomUUID();
-    const completions: any[] = [];
-    const manager = new AgentManager({
-      onCompletion: (event, waiting) => completions.push({ event, waiting }),
-    });
-    const controller = new AbortController();
-    try {
-      await manager.spawnAgent(spawnParams(parent, 'one', 'hold completion'));
-      const info = manager.getAgentInfo('one', parent);
-      const waiting = manager.waitAgent(parent, ['one'], controller.signal);
-      controller.abort(new Error('cancel only waiting'));
-      await expect(waiting).rejects.toThrow('cancel only waiting');
-      expect(manager.getAgentInfo('one', parent).status).toBe('running');
-      gate.resolve();
-      await settled(manager, info);
-      expect(completions).toEqual([
-        {
-          event: expect.objectContaining({
-            status: 'completed',
-            finalResponse: 'response:hold completion',
-          }),
-          waiting: false,
-        },
-      ]);
-    } finally {
-      gate.resolve();
       await manager.shutdown();
     }
   });
@@ -4790,32 +4743,6 @@ describe('completion delivery', () => {
       await manager.shutdown();
       fs.rmSync(scope, { recursive: true, force: true });
     }
-  });
-});
-
-describe('completion mailbox', () => {
-  test('waits until explicitly cancelled when no completion exists', async () => {
-    const manager = new AgentManager();
-    const controller = new AbortController();
-    setTimeout(() => controller.abort(new Error('cancelled')), 10);
-    await expect(manager.waitAgent('empty-parent', undefined, controller.signal)).rejects.toThrow(
-      'cancelled',
-    );
-    await manager.shutdown();
-  });
-
-  test('consumes one matching completion without dropping siblings', () => {
-    const events = [
-      { id: '1', parentSessionId: 'parent', agentName: '/one', status: 'completed', createdAt: 1 },
-      { id: '2', parentSessionId: 'parent', agentName: '/two', status: 'completed', createdAt: 2 },
-      { id: '3', parentSessionId: 'other', agentName: '/one', status: 'completed', createdAt: 3 },
-    ] as any[];
-    expect(consumeFirstMatchingMailboxEvent(events, 'parent')?.agentName).toBe('/one');
-    expect(events.map((event) => event.id)).toEqual(['2', '3']);
-    expect(consumeFirstMatchingMailboxEvent(events, 'parent', new Set(['/two']))?.agentName).toBe(
-      '/two',
-    );
-    expect(events.map((event) => event.id)).toEqual(['3']);
   });
 });
 
@@ -5336,7 +5263,7 @@ describe('context usage formatting', () => {
   });
 });
 
-describe('SDK business scope, waits and resources', () => {
+describe('SDK business scope and resources', () => {
   test('identical task names stay parent-scoped; all-sessions is only a read view', async () => {
     const parentA = 'scope-a-' + randomUUID();
     const parentB = 'scope-b-' + randomUUID();
@@ -5375,19 +5302,18 @@ describe('SDK business scope, waits and resources', () => {
       ).rejects.toThrow(/already exists/);
       await manager.interruptAgent(parentA, 'review/api');
       expect(manager.getAgentInfo('review/api', parentB).status).toBe('running');
-      expect((await manager.waitAgent(parentA, ['review/api'])).event?.status).toBe('interrupted');
+      expect(manager.readAgentResponse('review/api', parentA).status).toBe('interrupted');
       expect(fixture.instances[1].shutdowns).toBe(0);
     } finally {
       await manager.shutdown();
     }
   });
 
-  test('read is non-consuming and wait cancellation leaves work alive across parent sessions', async () => {
-    const parent = 'wait-contract-' + randomUUID();
-    const other = 'wait-other-' + randomUUID();
+  test('reads are non-consuming and interruption leaves work alive in other parent sessions', async () => {
+    const parent = 'read-contract-' + randomUUID();
+    const other = 'read-other-' + randomUUID();
     const completions: any[] = [];
     const manager = new AgentManager({ onCompletion: (event) => completions.push(event) });
-    const controller = new AbortController();
     try {
       await manager.spawnAgent(spawnParams(parent, 'one', 'first'));
       const info = manager.getAgentInfo('one', parent);
@@ -5395,18 +5321,15 @@ describe('SDK business scope, waits and resources', () => {
       const first = manager.readAgentResponse('one', parent);
       expect(manager.readAgentResponse('one', parent)).toEqual(first);
       expect(completions).toHaveLength(1);
-      expect((await manager.waitAgent(parent, ['one'])).event?.id).toBe(completions[0].id);
-      expect(manager.readAgentResponse('one', parent)).toEqual(first);
-      await manager.spawnAgent(spawnParams(parent, 'two', 'hold waiting'));
+      await manager.spawnAgent(spawnParams(parent, 'two', 'hold active'));
       await manager.spawnAgent(spawnParams(other, 'foreign', 'hold other'));
-      const waiting = manager.waitAgent(parent, ['two'], controller.signal);
-      controller.abort();
-      await expect(waiting).rejects.toThrow(/abort/i);
+      const running = manager.readAgentResponse('two', parent);
+      expect(manager.readAgentResponse('two', parent)).toEqual(running);
       expect(manager.getAgentInfo('two', parent).status).toBe('running');
       expect(manager.getAgentInfo('foreign', other).status).toBe('running');
       await manager.interruptAgent(parent, 'two');
-      expect((await manager.waitAgent(parent, ['two'])).event).toMatchObject({
-        agentName: '/two',
+      expect(manager.readAgentResponse('two', parent)).toMatchObject({
+        agent_name: '/two',
         status: 'interrupted',
       });
       expect(manager.getAgentInfo('foreign', other).status).toBe('running');
@@ -5675,7 +5598,7 @@ describe('SDK native context usage and failure cleanup', () => {
     const parent = 'compacted-' + randomUUID();
     writeConfig({ maxIdleSessions: 0 }); // This contract exercises actual cold disposal/reopening.
     const manager = new AgentManager();
-    const gate = deferred();
+    const gate = Promise.withResolvers<void>();
     try {
       await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
       const info = manager.getAgentInfo('worker', parent);
@@ -5706,7 +5629,7 @@ describe('SDK native context usage and failure cleanup', () => {
   });
 
   test('a failed final context sample is visible but cannot prevent completion or disposal', async () => {
-    const gate = deferred();
+    const gate = Promise.withResolvers<void>();
     fixture = configureCoreFixture({ responseGate: gate.promise });
     const parent = 'sampling-error-' + randomUUID();
     const completions: any[] = [];
@@ -5866,7 +5789,7 @@ describe('SDK acceptance and observer edge cases', () => {
   );
 
   test('a delayed unaccepted rejection cannot restore a completed snapshot over explicit interrupt', async () => {
-    const gate = deferred();
+    const gate = Promise.withResolvers<void>();
     const parent = 'reject-after-interrupt-' + randomUUID();
     const manager = new AgentManager();
     let prompt: ReturnType<typeof spyOn> | undefined;
@@ -5894,7 +5817,6 @@ describe('SDK acceptance and observer edge cases', () => {
       await settled(manager, info);
       expect(manager.readAgentResponse('worker', parent)).toMatchObject({ status: 'interrupted' });
       expect(manager.getAgentInfo('worker', parent).finalResponse).toBeUndefined();
-      expect((await manager.waitAgent(parent, ['worker'])).event?.status).toBe('interrupted');
     } finally {
       gate.resolve();
       await pending;
@@ -5904,7 +5826,7 @@ describe('SDK acceptance and observer edge cases', () => {
   });
 
   test('a rejection after acceptance fails this run rather than restoring the previous answer', async () => {
-    const gate = deferred();
+    const gate = Promise.withResolvers<void>();
     const parent = 'accepted-rejection-' + randomUUID();
     const completions: any[] = [];
     const manager = new AgentManager({ onCompletion: (event) => completions.push(event) });
@@ -6006,7 +5928,7 @@ describe('SDK acceptance and observer edge cases', () => {
   });
 
   test('nested native tool activity is retained by the manager but filtered only from observer state', async () => {
-    const gate = deferred();
+    const gate = Promise.withResolvers<void>();
     fixture = configureCoreFixture({ responseGate: gate.promise });
     const parent = 'nested-native-' + randomUUID();
     const completions: any[] = [];
@@ -6049,9 +5971,6 @@ describe('SDK acceptance and observer edge cases', () => {
       expect(manager.readAgentResponse('worker', parent).finalResponse).toBe(
         'response:hold nested',
       );
-      expect((await manager.waitAgent(parent, ['worker'])).event).toMatchObject({
-        status: 'completed',
-      });
     } finally {
       gate.resolve();
       await manager.shutdown();
@@ -6059,7 +5978,7 @@ describe('SDK acceptance and observer edge cases', () => {
   });
 
   test('an uncooperative manager shutdown is bounded, refuses new work, and finishes late cleanup', async () => {
-    const gate = deferred();
+    const gate = Promise.withResolvers<void>();
     fixture = configureCoreFixture({ responseGate: gate.promise, ignoreAbort: true });
     const parent = 'uncooperative-shutdown-' + randomUUID();
     const errors: Error[] = [];
@@ -6090,20 +6009,18 @@ describe('SDK acceptance and observer edge cases', () => {
 });
 
 describe('reviewed SDK lifecycle regressions', () => {
-  test('a failed final save still publishes status, wakes wait_agent, and exposes consumed-mailbox/disk inconsistency', async () => {
-    const gate = deferred();
+  test('a failed final save still publishes terminal status and result despite stale disk state', async () => {
+    const gate = Promise.withResolvers<void>();
     fixture = configureCoreFixture({ responseGate: gate.promise });
-    const parent = 'failed-final-save-wait-' + randomUUID();
+    const parent = 'failed-final-save-' + randomUUID();
     const errors: Error[] = [];
-    const activity: boolean[] = [];
+    const activity: Array<{ active: boolean; status?: string }> = [];
     const notifications: any[] = [];
     const manager = new AgentManager({
       onError: (error) => errors.push(error),
-      onActivityChange: (event) => activity.push(event.active),
+      onActivityChange: (event) => activity.push(event),
       onCompletion: (event) => notifications.push(event),
     });
-    const controller = new AbortController();
-    const deadline = setTimeout(() => controller.abort(), 2000);
     let save: ReturnType<typeof spyOn> | undefined;
     try {
       await manager.spawnAgent(spawnParams(parent, 'worker', 'hold final save'));
@@ -6118,14 +6035,9 @@ describe('reviewed SDK lifecycle regressions', () => {
           throw new Error('final status fixture save failure');
         return rename(from, to);
       });
-      const waiting = manager.waitAgent(parent, ['worker'], controller.signal);
       gate.resolve();
-      expect((await waiting).event).toMatchObject({
-        status: 'completed',
-        finalResponse: 'response:hold final save',
-      });
       await settled(manager, info);
-      expect(activity.at(-1)).toBe(false);
+      expect(activity.at(-1)).toMatchObject({ active: false, status: 'completed' });
       expect(notifications).toEqual([
         expect.objectContaining({ status: 'completed', finalResponse: 'response:hold final save' }),
       ]);
@@ -6135,29 +6047,23 @@ describe('reviewed SDK lifecycle regressions', () => {
       expect(manager.getAgentInfo('worker', parent).status).toBe('running');
       expect(manager['live'].size).toBe(0);
       expect(fs.existsSync(activeMarker(info.id))).toBe(false);
-      await expect(manager.waitAgent(parent, ['worker'], controller.signal)).rejects.toThrow(
-        /persisted status|saved status|inconsistent/i,
-      );
+      expect(manager.readAgentResponse('worker', parent)).toMatchObject({ status: 'running' });
       expect(fixture.instances[0].shutdowns).toBe(1);
     } finally {
-      clearTimeout(deadline);
-      controller.abort();
       save?.mockRestore();
       gate.resolve();
       await manager.shutdown();
     }
   });
 
-  test('unaccepted resume rejection wakes a waiter registered during native input with the old final event, without renotifying', async () => {
-    const gate = deferred();
-    const parent = 'resume-waiter-rollback-' + randomUUID();
+  test('unaccepted cold resume rejection restores the previous final result without renotifying', async () => {
+    const gate = Promise.withResolvers<void>();
+    const parent = 'resume-rollback-' + randomUUID();
     const notifications: any[] = [];
     writeConfig({ maxIdleSessions: 0 }); // This contract exercises actual cold disposal/reopening.
     const manager = new AgentManager({
       onCompletion: (event) => notifications.push(event),
     });
-    const controller = new AbortController();
-    const deadline = setTimeout(() => controller.abort(), 2000);
     let resuming: Promise<unknown> | undefined;
     try {
       await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
@@ -6178,18 +6084,16 @@ describe('reviewed SDK lifecycle regressions', () => {
       // Fail native auth preflight after the input hook returns.
       spyOn(live.session!.modelRuntime, 'hasConfiguredAuth').mockReturnValue(false);
       spyOn(live.session!.modelRuntime, 'checkAuth').mockResolvedValue(undefined);
-      const waiting = manager.waitAgent(parent, ['worker'], controller.signal);
-      expect(manager['waiters']).toHaveLength(1);
       gate.resolve();
       const error = (await resuming) as Error;
       expect(error).toBeInstanceOf(Error);
       expect(error.message).toMatch(/API key|authentication/i);
-      expect((await waiting).event).toMatchObject({
-        agentName: '/worker',
+      await settled(manager, info);
+      expect(manager.readAgentResponse('worker', parent)).toMatchObject({
+        agent_name: '/worker',
         status: 'completed',
         finalResponse: 'response:first',
       });
-      await settled(manager, info);
       expect(manager.getAgentInfo('worker', parent)).toMatchObject({
         status: 'completed',
         messageCount: 1,
@@ -6199,8 +6103,6 @@ describe('reviewed SDK lifecycle regressions', () => {
       expect(fixture.instances[0].requests).toEqual([]);
       expect(fixture.instances[0].shutdowns).toBe(1);
     } finally {
-      clearTimeout(deadline);
-      controller.abort();
       gate.resolve();
       await resuming;
       await manager.shutdown();
@@ -6212,9 +6114,9 @@ describe('reviewed SDK lifecycle regressions', () => {
     function rejectAfterInput(
       manager: InstanceType<typeof AgentManager>,
       info: AgentInfo,
-      gate: ReturnType<typeof deferred>,
+      gate: PromiseWithResolvers<void>,
     ) {
-      const entered = deferred();
+      const entered = Promise.withResolvers<void>();
       fixture = configureCoreFixture({
         input: async () => {
           entered.resolve();
@@ -6236,17 +6138,17 @@ describe('reviewed SDK lifecycle regressions', () => {
       return { entered: entered.promise, resuming, state };
     }
 
-    test('commits rollback before an activity callback consumes it', async () => {
-      const gate = deferred();
-      const parent = 'rollback-activity-consumer-' + randomUUID();
+    test('commits rollback before an activity callback reads the previous result', async () => {
+      const gate = Promise.withResolvers<void>();
+      const parent = 'rollback-activity-read-' + randomUUID();
       const notifications: any[] = [];
       let observeRollback = false;
-      let callbackWait: Promise<any> | undefined;
+      let callbackResponse: AgentResponseEntry | undefined;
       const manager = new AgentManager({
         onCompletion: (event) => notifications.push(event),
         onActivityChange(event) {
           if (!observeRollback || event.parentSessionId !== parent || event.active) return;
-          callbackWait = manager.waitAgent(parent, ['worker']);
+          callbackResponse = manager.readAgentResponse('worker', parent);
         },
       });
       let resuming: Promise<unknown> | undefined;
@@ -6254,7 +6156,7 @@ describe('reviewed SDK lifecycle regressions', () => {
         await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
         const info = manager.getAgentInfo('worker', parent);
         await settled(manager, info);
-        const original = manager['mailbox'].find((event) => event.agentName === '/worker')!;
+        const original = manager.readAgentResponse('worker', parent);
         const rejected = rejectAfterInput(manager, info, gate);
         resuming = rejected.resuming;
         await rejected.entered;
@@ -6262,40 +6164,35 @@ describe('reviewed SDK lifecycle regressions', () => {
         gate.resolve();
         expect(await resuming).toBeInstanceOf(Error);
         await settled(manager, info);
-        expect(callbackWait).toBeDefined();
-        const result = await callbackWait;
-        expect(result.event).toMatchObject({
-          id: original.id,
+        expect(callbackResponse).toEqual(original);
+        expect(callbackResponse).toMatchObject({
+          status: 'completed',
           finalResponse: 'response:first',
         });
-        expect(manager['mailbox']).toEqual([]);
         expect(notifications).toHaveLength(1);
         expect(rejected.state.instances[0].requests).toEqual([]);
       } finally {
         observeRollback = false;
         gate.resolve();
         await resuming;
-        await callbackWait;
         await manager.shutdown();
       }
     });
 
-    test('does not replay a completion already consumed by wait_agent', async () => {
-      const gate = deferred();
-      const parent = 'consumed-rollback-' + randomUUID();
+    test('a rejected resume retains the old result and a subsequent accepted turn publishes a fresh completion', async () => {
+      const gate = Promise.withResolvers<void>();
+      const parent = 'subsequent-turn-rollback-' + randomUUID();
       const notifications: any[] = [];
       const manager = new AgentManager({
         onCompletion: (event) => notifications.push(event),
       });
-      const controller = new AbortController();
       let resuming: Promise<unknown> | undefined;
-      let waiting: Promise<any> | undefined;
       try {
         await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
         const info = manager.getAgentInfo('worker', parent);
         await settled(manager, info);
-        await manager.waitAgent(parent, ['worker']);
-        expect(manager['mailbox']).toEqual([]);
+        const original = manager.readAgentResponse('worker', parent);
+        expect(manager.readAgentResponse('worker', parent)).toEqual(original);
         const rejected = rejectAfterInput(manager, info, gate);
         resuming = rejected.resuming;
         await rejected.entered;
@@ -6303,79 +6200,24 @@ describe('reviewed SDK lifecycle regressions', () => {
         expect(await resuming).toBeInstanceOf(Error);
         await settled(manager, info);
         expect(rejected.state.instances[0].requests).toEqual([]);
-        expect(manager['mailbox']).toEqual([]);
         expect(notifications).toHaveLength(1);
         expect(manager.readAgentResponse('worker', parent).finalResponse).toBe('response:first');
 
-        // A next-completion wait belongs to the next accepted turn.
-        waiting = manager.waitAgent(parent, undefined, controller.signal);
-        expect(manager['waiters']).toHaveLength(1);
         fixture = configureCoreFixture();
         await manager.sendMessage(parent, 'worker', 'second');
-        expect((await waiting).event).toMatchObject({
+        await settled(manager, info);
+        expect(notifications).toHaveLength(2);
+        expect(notifications[1]).toMatchObject({
           status: 'completed',
           finalResponse: 'response:second',
         });
-        await settled(manager, info);
-        expect(notifications).toHaveLength(2);
-      } finally {
-        controller.abort();
-        gate.resolve();
-        await resuming;
-        await waiting?.catch(() => {});
-        await manager.shutdown();
-      }
-    });
-
-    test('restores a targeted waiter without satisfying an unscoped next-completion waiter', async () => {
-      const gate = deferred();
-      const parent = 'rollback-waiter-kinds-' + randomUUID();
-      const manager = new AgentManager();
-      const controller = new AbortController();
-      let resuming: Promise<unknown> | undefined;
-      let anyWait: Promise<any> | undefined;
-      let targetedWait: Promise<any> | undefined;
-      let anyResult: any;
-      let targetedResult: any;
-      try {
-        await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
-        const info = manager.getAgentInfo('worker', parent);
-        await settled(manager, info);
-        await manager.waitAgent(parent, ['worker']);
-        const rejected = rejectAfterInput(manager, info, gate);
-        resuming = rejected.resuming;
-        await rejected.entered;
-        anyWait = manager.waitAgent(parent, undefined, controller.signal).then(
-          (result) => {
-            anyResult = result;
-            return result;
-          },
-          (error) => error,
-        );
-        targetedWait = manager.waitAgent(parent, ['worker'], controller.signal).then(
-          (result) => {
-            targetedResult = result;
-            return result;
-          },
-          (error) => error,
-        );
-        expect(manager['waiters']).toHaveLength(2);
-        gate.resolve();
-        expect(await resuming).toBeInstanceOf(Error);
-        await settled(manager, info);
-        expect(anyResult).toBeUndefined();
-        expect(targetedResult?.event).toMatchObject({
+        expect(manager.readAgentResponse('worker', parent)).toMatchObject({
           status: 'completed',
-          finalResponse: 'response:first',
+          finalResponse: 'response:second',
         });
-        expect(manager['waiters']).toHaveLength(1);
-        expect(manager['mailbox']).toEqual([]);
       } finally {
-        controller.abort();
         gate.resolve();
         await resuming;
-        await anyWait;
-        await targetedWait;
         await manager.shutdown();
       }
     });
@@ -6384,7 +6226,7 @@ describe('reviewed SDK lifecycle regressions', () => {
   test.each(['before', 'after'])(
     'a compaction-only busy session cannot report steer acceptance (%s await)',
     async (phase) => {
-      const gate = deferred();
+      const gate = Promise.withResolvers<void>();
       const parent = 'compaction-only-steer-' + phase + '-' + randomUUID();
       const manager = new AgentManager();
       let session: any;
@@ -6510,8 +6352,8 @@ describe('SDK cleanup ownership regressions', () => {
   }
 
   test('R1: startup abort reentry owns one cleanup chain until idempotent extension shutdown releases', async () => {
-    const failStartup = deferred();
-    const shutdownGate = deferred();
+    const failStartup = Promise.withResolvers<void>();
+    const shutdownGate = Promise.withResolvers<void>();
     const tracked = trackLogStreams();
     const parent = 'reentrant-cleanup-owner-' + randomUUID();
     writeConfig({ maxIdleSessions: 0 }); // This contract exercises actual cold disposal/reopening.
@@ -6628,8 +6470,8 @@ describe('SDK cleanup ownership regressions', () => {
   });
 
   test('R3: logging works while closing, but a closed logger stays inert when a new session appends', async () => {
-    const responseGate = deferred();
-    const shutdownGate = deferred();
+    const responseGate = Promise.withResolvers<void>();
+    const shutdownGate = Promise.withResolvers<void>();
     fixture = configureCoreFixture({
       responseGate: responseGate.promise,
       shutdownGate: shutdownGate.promise,
@@ -6724,7 +6566,7 @@ describe('SDK cleanup ownership regressions', () => {
   });
 
   test('R3: repeated close before the first write cannot mkdir or create a stream', async () => {
-    const gate = deferred();
+    const gate = Promise.withResolvers<void>();
     fixture = configureCoreFixture({ responseGate: gate.promise });
     const tracked = trackLogStreams();
     const manager = new AgentManager();
@@ -6758,7 +6600,7 @@ describe('SDK cleanup ownership regressions', () => {
   test.each(['onError', 'console'] as const)(
     'R3: shutdown timeout and late hook errors reach %s without reopening any log stream',
     async (sink) => {
-      const gate = deferred();
+      const gate = Promise.withResolvers<void>();
       const lateError = 'late cleanup hook failure ' + sink;
       fixture = configureCoreFixture({
         shutdownGate: gate.promise,
@@ -6838,7 +6680,7 @@ describe('SDK cleanup ownership regressions', () => {
     const { registerSessionResourceCleanup } = await import(
       new URL('session-resources.js', import.meta.resolve('@earendil-works/pi-ai')).href
     );
-    const gate = deferred();
+    const gate = Promise.withResolvers<void>();
     let hookExited = false;
     fixture = configureCoreFixture({
       shutdownGate: gate.promise,

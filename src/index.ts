@@ -47,6 +47,12 @@ import {
 import { AgentSummaryWidget, type AgentStatusCounts } from './widget.js';
 
 type ToolRenderContext = Parameters<NonNullable<ToolRenderers['renderResult']>>[3];
+type InputActivity = 'MailboxActivity' | 'Steered';
+type InputWaitOutcome = InputActivity | 'TimedOut';
+
+const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
+const MIN_WAIT_TIMEOUT_MS = 10_000;
+const MAX_WAIT_TIMEOUT_MS = 3_600_000;
 
 const agentStatusSchema = Type.Unsafe<AgentInfo['status']>(
   StringEnum(['starting', 'running', 'completed', 'failed', 'interrupted']),
@@ -86,12 +92,6 @@ function boundedTextResult(text: string, details?: any) {
 
 function cleanTarget(target: string): string {
   return target.trim().replace(/^\/+/, '');
-}
-
-function parseTargets(value: unknown): string[] | undefined {
-  return Array.isArray(value)
-    ? value.map((target) => cleanTarget(String(target))).filter(Boolean)
-    : undefined;
 }
 
 function parentSessionId(ctx: any): string {
@@ -170,6 +170,57 @@ export default async function index_(pi: ExtensionAPI) {
   let widgetContext: any;
   // Pi exposes cancellation events, but no persistent interrupted-state query.
   let parentInterrupted = false;
+  let pendingActivity: InputActivity | undefined;
+  const inputWaiters = new Set<{
+    resolve: (outcome: InputWaitOutcome) => void;
+    cancel: (reason: unknown) => void;
+  }>();
+
+  const recordInputActivity = (activity: InputActivity) => {
+    if (!inputWaiters.size) {
+      pendingActivity = activity;
+      return;
+    }
+    // One activity wakes every current wait; it is not replayed to the next wait.
+    for (const waiter of inputWaiters) waiter.resolve(activity);
+  };
+
+  const waitForInput = (timeoutMs: number, signal?: AbortSignal): Promise<InputWaitOutcome> => {
+    signal?.throwIfAborted();
+    if (pendingActivity !== undefined) {
+      const activity = pendingActivity;
+      pendingActivity = undefined;
+      return Promise.resolve(activity);
+    }
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        inputWaiters.delete(waiter);
+      };
+      const waiter = {
+        resolve(outcome: InputWaitOutcome) {
+          cleanup();
+          resolve(outcome);
+        },
+        cancel(reason: unknown) {
+          cleanup();
+          reject(reason);
+        },
+      };
+      const onAbort = () => waiter.cancel(signal?.reason);
+      const timer = setTimeout(() => waiter.resolve('TimedOut'), timeoutMs);
+      inputWaiters.add(waiter);
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
+  };
+
+  const clearInputActivity = () => {
+    pendingActivity = undefined;
+    for (const waiter of inputWaiters)
+      waiter.cancel(new DOMException('Session lifecycle changed.', 'AbortError'));
+  };
+
   const agentStatuses = new Map<string, AgentInfo['status']>();
   const agentColors = new Map<string, string>();
   let widgetStatusCounts: AgentStatusCounts = {
@@ -247,8 +298,9 @@ export default async function index_(pi: ExtensionAPI) {
     agentWidget.attach(activeContext);
   };
 
-  const deliverCompletion = (event: AgentCompletionEvent, waiting = false) => {
+  const deliverCompletion = (event: AgentCompletionEvent) => {
     if (!isCurrentSession(event.parentSessionId)) return;
+    const waiting = inputWaiters.size > 0;
     const payload = JSON.stringify(
       {
         agent_name: event.agentName,
@@ -280,6 +332,7 @@ export default async function index_(pi: ExtensionAPI) {
           (!waiting || activeContext.isIdle()),
       },
     );
+    recordInputActivity('MailboxActivity');
   };
 
   const reportError = (error: unknown, ctx = activeContext) => {
@@ -380,7 +433,7 @@ export default async function index_(pi: ExtensionAPI) {
     name: 'spawn_agent',
     label: 'Spawn Agent',
     get description() {
-      return `Spawn a fresh-context subagent sharing the parent's working directory, not its conversation. Returns on task acceptance; success/error results arrive automatically. Continue other assigned work if available; use wait_agent only when blocked.
+      return `Spawn a subagent for a well-scoped task, sharing the parent's working directory but not its conversation. Returns on task acceptance; results and errors arrive automatically. Continue other assigned work; use wait_agent only when blocked.
 
 Agent templates:
 ${getAgentDefinitionsDescription()}`;
@@ -389,13 +442,13 @@ ${getAgentDefinitionsDescription()}`;
       return Type.Object({
         task_name: Type.String({
           description:
-            'Unique within this parent session. Use ASCII letters, digits, _, -, and / separators.',
+            'Unique in this parent session; use ASCII letters, digits, _, -, and /.',
         }),
         message: Type.String({
-          description: 'Concise, self-contained task: relevant context, paths, constraints, expected output.',
+          description: 'Self-contained task: context, paths, constraints, and expected output.',
         }),
         agent_type: Type.Optional(
-          Type.String({ description: 'Matching listed template; omit for a generic subagent.' }),
+          Type.String({ description: 'Listed template name; omit for a generic subagent.' }),
         ),
         ...(spawnModels.size
           ? {
@@ -507,6 +560,15 @@ ${getAgentDefinitionsDescription()}`;
     },
   };
 
+  pi.on('input', () => {
+    recordInputActivity('Steered');
+  });
+
+  pi.on('context', () => {
+    // Earlier activity is now observed, even when providers omit payload callbacks.
+    pendingActivity = undefined;
+  });
+
   pi.on('agent_start', (_event, ctx) => {
     const signal = ctx.signal;
     parentInterrupted = signal?.aborted === true;
@@ -528,6 +590,7 @@ ${getAgentDefinitionsDescription()}`;
   });
 
   pi.on('session_start', async (_event: any, ctx: any) => {
+    clearInputActivity();
     activeContext = ctx;
     parentInterrupted = false;
     agentStatuses.clear();
@@ -556,6 +619,7 @@ ${getAgentDefinitionsDescription()}`;
   });
 
   pi.on('session_shutdown', async (_event, ctx) => {
+    clearInputActivity();
     const shutdownContext = activeContext ?? ctx;
     activeContext = undefined;
     agentStatuses.clear();
@@ -581,52 +645,57 @@ ${getAgentDefinitionsDescription()}`;
     name: 'wait_agent',
     label: 'Wait Agent',
     description:
-      'Wait for one subagent completion; already-finished targets return immediately. Returns only agent_name and status; text/errors use automatic notifications. Use only when blocked. Canceling this wait does not stop agents.',
-    parameters: Type.Object({
-      targets: Type.Optional(
-        Type.Array(Type.String(), {
-          description:
-            'Current-session agent names; any one, not all. Omit for any queued or next completion.',
-        }),
-      ),
-    }),
-    outputSchema: Type.Object(
+      'Wait for a subagent notification, input, or timeout. Returns message and timed_out, not content. Use only when blocked; canceling does not stop agents. When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.',
+    parameters: Type.Object(
       {
-        agent_name: Type.String(),
-        status: Type.Unsafe<'completed' | 'failed' | 'interrupted'>(
-          StringEnum(['completed', 'failed', 'interrupted']),
+        timeout_ms: Type.Optional(
+          Type.Union([Type.Integer(), Type.Null()], {
+            description:
+              `Timeout in ms. Default ${DEFAULT_WAIT_TIMEOUT_MS} (omitted/null); min ${MIN_WAIT_TIMEOUT_MS} (clamped); max ${MAX_WAIT_TIMEOUT_MS}.`,
+          }),
         ),
       },
       { additionalProperties: false },
     ),
-    async execute(
-      _id: string,
-      params: any,
-      signal: AbortSignal | undefined,
-      _onUpdate: any,
-      ctx: any,
-    ) {
-      try {
-        const result = await ensureManager(ctx).waitAgent(
-          parentSessionId(ctx),
-          parseTargets(params.targets),
-          signal,
-        );
-        const data = { agent_name: result.event.agentName, status: result.event.status };
-        return {
-          ...textResult(JSON.stringify(data), { message: result.message }),
-          structuredContent: data,
-        };
-      } catch (error) {
-        if (signal?.aborted) throw error;
-        throw new Error(`wait_agent failed: ${formatAgentError(error)}`);
-      }
+    outputSchema: Type.Object(
+      {
+        message: Type.String(),
+        timed_out: Type.Boolean(),
+      },
+      { additionalProperties: false },
+    ),
+    prepareArguments(args: any) {
+      const timeoutMs = args?.timeout_ms;
+      if (timeoutMs !== undefined && timeoutMs !== null && !Number.isInteger(timeoutMs))
+        throw new Error('timeout_ms must be an integer or null');
+      return args;
+    },
+    async execute(_id: string, params: any, signal: AbortSignal | undefined) {
+      const requested = params.timeout_ms ?? DEFAULT_WAIT_TIMEOUT_MS;
+      if (!Number.isInteger(requested))
+        throw new Error('timeout_ms must be an integer or null');
+      if (requested > MAX_WAIT_TIMEOUT_MS)
+        throw new Error(`timeout_ms must be at most ${MAX_WAIT_TIMEOUT_MS}`);
+      const effective = Math.max(MIN_WAIT_TIMEOUT_MS, requested);
+      const outcome = await waitForInput(effective, signal);
+      let message =
+        outcome === 'MailboxActivity'
+          ? 'Wait completed.'
+          : outcome === 'Steered'
+            ? 'Wait interrupted by new input.'
+            : 'Wait timed out.';
+      if (requested < effective)
+        message += `\n\nRequested timeout of ${requested}ms was clamped to the minimum of ${effective}ms.`;
+      const data = { message, timed_out: outcome === 'TimedOut' };
+      return {
+        ...textResult(JSON.stringify(data), data),
+        structuredContent: data,
+      };
     },
     renderCall(args: any, theme: Theme) {
-      const targets =
-        Array.isArray(args.targets) && args.targets.length ? args.targets.join(',') : 'any';
       return new Text(
-        theme.fg('toolTitle', theme.bold('wait_agent ')) + theme.fg('accent', targets),
+        theme.fg('toolTitle', theme.bold('wait_agent ')) +
+          theme.fg('accent', `${args.timeout_ms ?? DEFAULT_WAIT_TIMEOUT_MS}ms`),
         0,
         0,
       );

@@ -80,7 +80,7 @@ export class ObserverJsonlDecoder {
 }
 
 // Test controls drive an explicitly loaded SDK extension/provider.
-export interface CoreFixtureInstance {
+interface CoreFixtureInstance {
   inputs: InputEvent[];
   requests: Array<{ text: string; context: any; message: AssistantMessage }>;
   events: string[];
@@ -89,7 +89,7 @@ export interface CoreFixtureInstance {
   activeStreams: number;
   activeTools: number;
 }
-export interface CoreFixtureOptions {
+interface CoreFixtureOptions {
   routes?: Array<[string, string, number?]>;
   startupGate?: Promise<void>;
   shutdownGate?: Promise<void>;
@@ -114,9 +114,6 @@ const key = Symbol.for('pi-subagents.core-test-fixture');
 const shared = globalThis as typeof globalThis & { [key]: CoreFixtureState };
 export function configureCoreFixture(options: CoreFixtureOptions = {}): CoreFixtureState {
   return (shared[key] = { ...options, instances: [] });
-}
-export function deferred() {
-  return Promise.withResolvers<void>();
 }
 const routes: Array<[string, string]> = [
   ['test', 'fake'],

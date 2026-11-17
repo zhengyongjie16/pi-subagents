@@ -75,9 +75,6 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
   function json(file: string, value: unknown): void {
     write(file, JSON.stringify(value));
   }
-  function deferred<T = void>() {
-    return Promise.withResolvers<T>();
-  }
   interface Fixture {
     root: string;
     agentDir: string;
@@ -909,7 +906,7 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
   test('preflight started acknowledges acceptance before completion, preserving source rpc', async () =>
     withFixture({ responseGate: true }, async (f) => {
       const session = await f.create();
-      const accepted = deferred<Disposition>();
+      const accepted = Promise.withResolvers<Disposition>();
       let finished = false;
       const raw = promptChildSession(session, 'work', accepted.resolve);
       const completion = raw
@@ -999,7 +996,7 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
             });
           },
         });
-        const accepted = deferred<Disposition>();
+        const accepted = Promise.withResolvers<Disposition>();
         const raw = promptChildSession(
           session,
           kind === 'handled' ? 'fixture:handled-settled' : 'ordinary',
@@ -1043,13 +1040,13 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
             if (event.type === 'compaction_start') nativeIdle = session.waitForIdle();
           });
           const compacting = session.compact('summary focus').then(
-            (result) => {
+            () => {
               compactFinished = true;
-              return { result, error: undefined };
+              return { error: undefined };
             },
             (error: Error) => {
               compactFinished = true;
-              return { result: undefined, error };
+              return { error };
             },
           );
           const event = await f.waitFor('compaction_failed');

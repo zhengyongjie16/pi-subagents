@@ -109,7 +109,9 @@ const hostFixture = `
     return {
       tools, commands, shortcuts, renderers, messages, notifications, widgets, ctx, pi,
       async emit(name, event = {}, context = ctx) {
-        for (const handler of handlers.get(name) ?? []) await handler({ type: name, ...event }, context);
+        const results = [];
+        for (const handler of handlers.get(name) ?? []) results.push(await handler({ type: name, ...event }, context));
+        return results;
       },
       call(name, params, context = ctx, signal) { return tools.get(name).execute("test-call", params, signal, undefined, context); },
     };
@@ -259,15 +261,24 @@ test('keeps model-facing guidance compact without losing async contracts', () =>
     await extension(f.pi);
     const spawn = f.tools.get("spawn_agent");
     const description = spawn.description;
-    assert.ok(description.includes("not its conversation"));
-    assert.ok(description.includes("other assigned work if available"));
+    assert.ok(description.includes("well-scoped task"));
+    assert.ok(description.includes("working directory but not its conversation"));
+    assert.ok(description.includes("Returns on task acceptance"));
+    assert.ok(description.includes("results and errors arrive automatically"));
+    assert.ok(description.includes("Continue other assigned work"));
     assert.ok(description.includes("wait_agent only when blocked"));
-    assert.ok(spawn.parameters.properties.message.description.includes("Concise, self-contained"));
+    assert.ok(spawn.parameters.properties.task_name.description.includes("Unique in this parent session"));
+    assert.ok(spawn.parameters.properties.task_name.description.includes("ASCII letters, digits, _, -, and /"));
+    assert.ok(spawn.parameters.properties.message.description.includes("Self-contained task: context, paths, constraints, and expected output"));
+    assert.ok(spawn.parameters.properties.agent_type.description.includes("omit for a generic subagent"));
     const wait = f.tools.get("wait_agent");
-    assert.ok(wait.parameters.properties.targets.description.includes("any one, not all"));
-    assert.ok(wait.description.includes("already-finished"));
-    assert.ok(wait.description.includes("automatic notifications"));
+    assert.deepEqual(Object.keys(wait.parameters.properties), ["timeout_ms"]);
+    assert.ok(wait.description.includes("input"));
+    assert.ok(wait.description.includes("notification"));
+    assert.ok(wait.description.includes("message and timed_out, not content"));
+    assert.ok(wait.description.includes("Use only when blocked"));
     assert.ok(wait.description.includes("does not stop agents"));
+    assert.ok(wait.description.endsWith("prefer longer waits (minutes) to avoid busy polling."));
     const read = f.tools.get("read_agent_response");
     assert.ok(read.description.includes("Non-blocking"));
     assert.ok(read.description.includes("programmatic access"));
@@ -310,11 +321,14 @@ test('preserves the six schemas, dynamic routing, tool arguments, and return wra
     assert.equal(options, undefined, "factory must not initialize a session-scoped manager");
     const plain = schema => JSON.parse(JSON.stringify(schema, (key, value) => key === "description" ? undefined : value));
     const object = (properties, required = []) => ({ type: "object", properties, ...(required.length ? { required } : {}) });
-    const string = { type: "string" }, targets = { type: "array", items: string };
+    const string = { type: "string" };
     assert.deepEqual(plain(f.tools.get("spawn_agent").parameters), object({
       task_name: string, message: string, agent_type: string,
     }, ["task_name", "message"]));
-    assert.deepEqual(plain(f.tools.get("wait_agent").parameters), object({ targets }));
+    const waitSchema = plain(f.tools.get("wait_agent").parameters);
+    assert.deepEqual(Object.keys(waitSchema.properties), ["timeout_ms"]);
+    assert.equal(waitSchema.required, undefined);
+    assert.equal(waitSchema.additionalProperties, false);
     assert.deepEqual(plain(f.tools.get("list_agents").parameters), object({
       path_prefix: string, include_all: { type: "boolean" },
       limit: { type: "integer", minimum: 1, maximum: 100 }, offset: { type: "integer", minimum: 0 },
@@ -354,12 +368,14 @@ test('preserves the six schemas, dynamic routing, tool arguments, and return wra
     assert.ok(!Object.hasOwn(spawned, "skills"));
     assert.ok(!Object.hasOwn(spawned, "loadedSkillPaths"));
     const signal = new AbortController().signal;
-    let waited;
-    AgentManager.prototype.waitAgent = async (...args) => { waited = args; return { message: "done", event: { agentName: "/task", status: "completed", finalResponse: "must not repeat", error: "must not repeat either", parentSessionId: "parent" } }; };
-    const wait = await f.call("wait_agent", { targets: [" /task "] }, f.ctx, signal);
-    assert.deepEqual(waited, ["parent", ["task"], signal]);
-    assert.deepEqual(JSON.parse(wait.content[0].text), { agent_name: "/task", status: "completed" });
-    assert.deepEqual(wait.details, { message: "done" });
+    const waiting = f.call("wait_agent", {}, f.ctx, signal);
+    await new Promise(resolve => setImmediate(resolve));
+    options.onCompletion({ agentName: "/task", status: "completed", finalResponse: "must not repeat", parentSessionId: "parent" });
+    const wait = await waiting;
+    const expectedWait = { message: "Wait completed.", timed_out: false };
+    assert.deepEqual(JSON.parse(wait.content[0].text), expectedWait);
+    assert.deepEqual(wait.details, expectedWait);
+    assert.deepEqual(wait.structuredContent, expectedWait);
     let listed;
     AgentManager.prototype.listAgents = (...args) => { listed = args; return Array.from({ length: 12 }, (_, n) => ({ agent_name: "/" + n, agent_status: "completed", ...(args[2] ? { parent_session_id: "other" } : {}) })); };
     const list = await f.call("list_agents", {});
@@ -407,16 +423,16 @@ test('exposes validated structured data without changing text, pagination or res
     for (const name of ["spawn_agent", "send_message", "interrupt_agent"])
       assert.equal(f.tools.get(name).outputSchema, undefined, name + " must stay text-only");
     const statuses = ["starting", "running", "completed", "failed", "interrupted"];
-    for (const status of ["completed", "failed", "interrupted"]) {
-      AgentManager.prototype.waitAgent = async () => ({ message: "done", event: {
-        agentName: "/worker", status, finalResponse: "private body", error: "private error", parentSessionId: "private parent",
-      } });
+    await f.emit("session_start");
+    for (const status of ["completed", "failed"]) {
+      options.onCompletion({ agentName: "/worker", status, finalResponse: "private body", error: "private error", parentSessionId: "parent" });
       const result = await f.call("wait_agent", {});
-      assert.deepEqual(check("wait_agent", result), { agent_name: "/worker", status });
-      assert.deepEqual(result.details, { message: "done" });
+      const expected = { message: "Wait completed.", timed_out: false };
+      assert.deepEqual(check("wait_agent", result), expected);
+      assert.deepEqual(result.details, expected);
     }
-    assert.equal(Value.Check(f.tools.get("wait_agent").outputSchema, { agent_name: "/worker", status: "running" }), false);
-    assert.equal(Value.Check(f.tools.get("wait_agent").outputSchema, { agent_name: "/worker", status: "completed", finalResponse: "leak" }), false);
+    assert.equal(Value.Check(f.tools.get("wait_agent").outputSchema, { message: "Wait completed.", timed_out: false, agent_name: "/worker" }), false);
+    assert.equal(Value.Check(f.tools.get("wait_agent").outputSchema, { agent_name: "/worker", status: "completed" }), false);
     for (const status of statuses) {
       AgentManager.prototype.listAgents = (_prefix, _parent, all) => [{
         agent_name: "/worker", agent_status: status, last_task_message: "excluded task",
@@ -473,12 +489,10 @@ test('preserves tool error prefixes, quota explanations, wait previews and cance
     const theme = { fg: (_color, text) => text, bold: text => text };
     const tool = f.tools.get("wait_agent");
     const preview = args => tool.renderCall(args, theme).render(160).join("\n").trim();
-    assert.equal(preview({}), "wait_agent any");
-    assert.equal(preview({ targets: [] }), "wait_agent any");
-    assert.equal(preview({ targets: ["/one", "/two"] }), "wait_agent /one,/two");
+    assert.ok(preview({}).startsWith("wait_agent"));
+    assert.ok(preview({ timeout_ms: 15000 }).includes("15"));
     for (const [name, method, params] of [
       ["spawn_agent", "spawnAgent", { task_name: "task", message: "work" }],
-      ["wait_agent", "waitAgent", {}],
       ["read_agent_response", "readAgentResponse", { target: "task" }],
       ["send_message", "sendMessage", { target: "task", message: "next" }],
       ["interrupt_agent", "interruptAgent", { target: "task" }],
@@ -497,7 +511,6 @@ test('preserves tool error prefixes, quota explanations, wait previews and cance
     const controller = new AbortController();
     const cancellation = new Error("wait cancelled");
     controller.abort(cancellation);
-    AgentManager.prototype.waitAgent = async () => { throw cancellation; };
     await assert.rejects(f.call("wait_agent", {}, f.ctx, controller.signal), error => error === cancellation);
   `,
   );
@@ -617,7 +630,7 @@ test("warns when storage overlaps the current parent's custom native session dir
   );
 });
 
-test('wait tools expose only status and waiting notifications preserve natural or idle continuation', () => {
+test('activity waits keep notifications compact and preserve natural or idle continuation', () => {
   probe(
     hostFixture +
       String.raw`
@@ -625,30 +638,303 @@ test('wait tools expose only status and waiting notifications preserve natural o
     await extension(f.pi);
     await f.emit("session_start");
     const event = { parentSessionId: "parent", agentName: "/task", status: "completed", finalResponse: "notification body" };
-    f.ctx.isIdle = () => false;
-    options.onCompletion(event, true);
-    assert.equal(f.messages.at(-1).delivery.triggerTurn, false);
-    assert.ok(f.messages.at(-1).message.content.includes("notification body"));
-    f.ctx.isIdle = () => true;
-    options.onCompletion(event, true);
-    assert.equal(f.messages.at(-1).delivery.triggerTurn, true, "idle parents must still wake");
-    f.ctx.isIdle = () => false;
-    options.onCompletion(event, false);
-    assert.equal(f.messages.at(-1).delivery.triggerTurn, true, "independent work keeps normal automatic delivery");
-    options.onCompletion({ ...event, parentSessionId: "other" }, true);
-    assert.equal(f.messages.length, 3);
-    for (const status of ["completed", "failed", "interrupted"]) {
-      AgentManager.prototype.waitAgent = async () => ({
-        message: "wait finished",
-        event: { ...event, status, finalResponse: "large answer".repeat(20_000), error: "large error".repeat(20_000) },
-      });
-      const waited = await f.call("wait_agent", { targets: ["task"] });
-      assert.deepEqual(JSON.parse(waited.content[0].text), { agent_name: "/task", status });
-      assert.deepEqual(waited.details, { message: "wait finished" });
-      assert.ok(waited.content[0].text.length < 100);
+    for (const idle of [false, true]) {
+      f.ctx.isIdle = () => idle;
+      const waiting = f.call("wait_agent", {});
+      await new Promise(resolve => setImmediate(resolve));
+      options.onCompletion(event);
+      assert.equal(f.messages.at(-1).delivery.triggerTurn, idle, "a waiter uses natural continuation unless idle");
+      assert.ok(f.messages.at(-1).message.content.includes("notification body"));
+      const result = await waiting;
+      const expected = { message: "Wait completed.", timed_out: false };
+      assert.deepEqual(JSON.parse(result.content[0].text), expected);
+      assert.deepEqual(result.details, expected);
+      assert.deepEqual(result.structuredContent, expected);
+      // Activity remains pending until consumed or included in model context.
+      await f.emit("context", { messages: [] });
     }
-    assert.ok(f.tools.get("wait_agent").description.includes("Returns only agent_name and status"));
+    f.ctx.isIdle = () => false;
+    options.onCompletion(event);
+    assert.equal(f.messages.at(-1).delivery.triggerTurn, true, "independent work keeps normal automatic delivery");
+    options.onCompletion({ ...event, parentSessionId: "other" });
+    assert.equal(f.messages.length, 3);
+    options.onCompletion({ ...event, finalResponse: "large answer".repeat(20_000), error: "large error".repeat(20_000) });
+    const result = await f.call("wait_agent", {});
+    assert.deepEqual(result.details, { message: "Wait completed.", timed_out: false });
+    assert.ok(result.content[0].text.length < 100, "notification bodies must not leak into wait results");
     await f.emit("session_shutdown", { reason: "quit" });
+  `,
+  );
+});
+
+
+test('observes every parent input source and delivery without changing the input', () => {
+  probe(
+    hostFixture +
+      String.raw`
+    const f = host();
+    await extension(f.pi);
+    await f.emit("session_start");
+    f.ctx.isIdle = () => false;
+    for (const source of ["interactive", "rpc", "extension"]) {
+      for (const streamingBehavior of [undefined, "steer", "followUp"]) {
+        await f.emit("context", { messages: [] });
+        let settled = false;
+        const waiting = f.call("wait_agent", {}).then(result => { settled = true; return result; });
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(settled, false, "no child is required to wait for parent activity");
+        const input = Object.freeze({ text: "original " + source + "/" + streamingBehavior,
+          source, streamingBehavior, images: Object.freeze([{ type: "image", data: "eA==", mimeType: "image/png" }]) });
+        const before = structuredClone(input);
+        const outcomes = await f.emit("input", input);
+        assert.ok(outcomes.every(result => result === undefined || result.action === "continue"), "wait must not handle or transform input");
+        assert.deepEqual(input, before);
+        const result = await waiting;
+        const expected = { message: "Wait interrupted by new input.", timed_out: false };
+        assert.deepEqual(JSON.parse(result.content[0].text), expected);
+        assert.deepEqual(result.details, expected);
+        assert.deepEqual(result.structuredContent, expected);
+        assert.equal(f.messages.length, 0, "observing input must not enqueue another model message");
+      }
+    }
+    await f.emit("session_shutdown", { reason: "quit" });
+  `,
+  );
+});
+
+test('consumes only the latest pending activity and clears it at the next context preparation', () => {
+  probe(
+    hostFixture +
+      String.raw`
+    const f = host();
+    await extension(f.pi);
+    await f.emit("session_start");
+    f.ctx.isIdle = () => false;
+    const mail = { parentSessionId: "parent", agentName: "/worker", status: "completed", finalResponse: "mail is retained" };
+    const input = { text: "new instruction", source: "extension", streamingBehavior: "followUp" };
+    const expectPending = async message => {
+      const result = await f.call("wait_agent", {});
+      assert.deepEqual(result.details, { message, timed_out: false });
+      const controller = new AbortController();
+      let settled = false;
+      const next = f.call("wait_agent", {}, f.ctx, controller.signal);
+      next.then(() => { settled = true; }, () => {});
+      const canceled = assert.rejects(next, error => error === controller.signal.reason);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(settled, false, "pending activity is consumed once, not replayed as a queue");
+      controller.abort(new Error("cancel next wait"));
+      await canceled;
+    };
+    options.onCompletion(mail);
+    await f.emit("input", input);
+    await expectPending("Wait interrupted by new input.");
+    await f.emit("input", input);
+    options.onCompletion(mail);
+    await expectPending("Wait completed.");
+    for (const activity of [() => f.emit("input", input), () => options.onCompletion(mail)]) {
+      await activity();
+      const messages = Object.freeze([{ role: "user", content: "older activity", timestamp: 0 }]);
+      const before = structuredClone(messages);
+      const outcomes = await f.emit("context", { messages });
+      assert.ok(outcomes.every(result => result === undefined), "activity cleanup must not replace the model context");
+      assert.deepEqual(messages, before);
+      let settled = false;
+      const waiting = f.call("wait_agent", {}).then(result => { settled = true; return result; });
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(settled, false, "the older activity already entered model context");
+      await f.emit("input", input);
+      assert.equal((await waiting).details.message, "Wait interrupted by new input.");
+    }
+    assert.equal(f.messages.length, 3, "waits must not consume or replay notification messages");
+    await f.emit("session_shutdown", { reason: "quit" });
+  `,
+  );
+});
+
+test('broadcasts activity to concurrent waits without stealing messages or canceling children', () => {
+  probe(
+    hostFixture +
+      String.raw`
+    const { getEventListeners } = await import("node:events");
+    const f = host();
+    await extension(f.pi);
+    await f.emit("session_start");
+    f.ctx.isIdle = () => false;
+    let interrupted = 0, finished = 0;
+    AgentManager.prototype.interruptAgent = async () => { interrupted++; };
+    AgentManager.prototype.listAgents = () => [{ agent_name: "/worker", agent_status: "running" }];
+    const controller = new AbortController();
+    const canceled = f.call("wait_agent", {}, f.ctx, controller.signal);
+    const rejection = assert.rejects(canceled, error => error === controller.signal.reason);
+    const waits = [f.call("wait_agent", {}), f.call("wait_agent", {})];
+    waits.forEach(wait => wait.then(() => { finished++; }));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(getEventListeners(controller.signal, "abort").length, 1);
+    controller.abort(new Error("cancel this wait only"));
+    await rejection;
+    assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+    assert.equal(interrupted, 0);
+    assert.equal((await f.call("list_agents", {})).details.agents[0].agent_status, "running");
+    options.onCompletion({ parentSessionId: "other", agentName: "/ignored", status: "completed" });
+    options.onActivityChange({ parentSessionId: "parent", agentName: "/worker", active: false, status: "interrupted" });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(finished, 0, "other sessions and status-only updates are not notification activity");
+    const event = { parentSessionId: "parent", agentName: "/worker", status: "completed", finalResponse: "original child output" };
+    options.onCompletion(event);
+    const results = await Promise.all(waits);
+    results.forEach(result => assert.deepEqual(result.details, { message: "Wait completed.", timed_out: false }));
+    assert.equal(f.messages.length, 1, "one original notification serves every waiter");
+    assert.ok(f.messages[0].message.content.includes("original child output"));
+    assert.equal(f.messages[0].delivery.triggerTurn, false);
+    assert.equal(interrupted, 0);
+    await f.emit("session_shutdown", { reason: "quit" });
+  `,
+  );
+});
+
+test('cancels and detaches old waits on session start and shutdown, clearing pending activity', () => {
+  probe(
+    hostFixture +
+      String.raw`
+    const { getEventListeners } = await import("node:events");
+    const f = host();
+    await extension(f.pi);
+    await f.emit("session_start");
+    const mail = { parentSessionId: "parent", agentName: "/old", status: "completed", finalResponse: "old session output" };
+    for (const lifecycle of ["session_start", "session_shutdown"]) {
+      await f.emit("context", { messages: [] });
+      const controller = new AbortController();
+      const waiting = f.call("wait_agent", {}, f.ctx, controller.signal);
+      const rejection = assert.rejects(waiting);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(getEventListeners(controller.signal, "abort").length, 1);
+      await f.emit(lifecycle, { reason: "reload" });
+      await rejection;
+      assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+      if (lifecycle === "session_shutdown") await f.emit("session_start");
+      options.onCompletion(mail);
+      await f.emit(lifecycle, { reason: "reload" });
+      if (lifecycle === "session_shutdown") await f.emit("session_start");
+      let settled = false;
+      const fresh = f.call("wait_agent", {}).then(result => { settled = true; return result; });
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(settled, false, "a new session must not consume old pending activity");
+      await f.emit("input", { text: "new session input", source: "rpc", streamingBehavior: "steer" });
+      assert.equal((await fresh).details.message, "Wait interrupted by new input.");
+    }
+    const next = { ...f.ctx, sessionManager: { getSessionId: () => "next-parent" } };
+    await f.emit("session_start", {}, next);
+    let settled = false;
+    const waiting = f.call("wait_agent", {}, next).then(result => { settled = true; return result; });
+    await new Promise(resolve => setImmediate(resolve));
+    const before = f.messages.length;
+    options.onCompletion(mail);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(settled, false);
+    assert.equal(f.messages.length, before, "old-parent notifications must not leak after replacement");
+    await f.emit("input", { text: "fresh input", source: "extension", streamingBehavior: "followUp" }, next);
+    await waiting;
+    await f.emit("session_shutdown", { reason: "quit" }, next);
+  `,
+  );
+});
+
+
+test('validates timeout-only arguments and clamps the minimum with a test-local clock', () => {
+  probe(
+    hostFixture +
+      `const { Value } = await import(${JSON.stringify(import.meta.resolve('typebox/value'))});
+       const { validateToolArguments } = await import(${JSON.stringify(import.meta.resolve('@earendil-works/pi-ai'))});` +
+      String.raw`
+    const f = host();
+    await extension(f.pi);
+    await f.emit("session_start");
+    const tool = f.tools.get("wait_agent");
+    const guidance = tool.description + " " + JSON.stringify(tool.parameters);
+    for (const value of ["30000", "10000", "3600000"]) assert.ok(guidance.replaceAll(",", "").includes(value), "document timeout boundary " + value);
+    assert.match(guidance, /rais|clamp|minimum/i, "explain that low, zero and negative timeouts are raised");
+    assert.equal(Value.Check(tool.parameters, {}), true);
+    assert.equal(Value.Check(tool.parameters, { timeout_ms: null }), true);
+    for (const timeout_ms of [-100, 0, 1, 9999, 10000])
+      assert.equal(Value.Check(tool.parameters, { timeout_ms }), true, "native validation must allow minimum clamping");
+    assert.equal(Value.Check(tool.parameters, { timeout_ms: 1.5 }), false);
+    for (const params of [{ targets: [] }, { targets: ["worker"], timeout_ms: 10000 }, { unknown: true }]) {
+      assert.equal(Value.Check(tool.parameters, params), false);
+      assert.throws(() => validateToolArguments(tool, { type: "toolCall", id: "invalid-wait", name: "wait_agent", arguments: params }));
+    }
+    // Direct execute bypasses SDK coercion: validate primitive types and the upper bound here.
+    for (const timeout_ms of [3600001, Number.MAX_SAFE_INTEGER, 1.5, NaN, Infinity, -Infinity, "10000", false, [], {}])
+      await assert.rejects(f.call("wait_agent", { timeout_ms }));
+    const original = { setTimeout, clearTimeout };
+    const timers = new Map();
+    let now = 0;
+    globalThis.setTimeout = (callback, ms, ...args) => {
+      const timer = { at: now + ms, callback: () => callback(...args), unref() { return this; } };
+      timers.set(timer, timer);
+      return timer;
+    };
+    globalThis.clearTimeout = timer => { timers.delete(timer); };
+    const advance = ms => {
+      now += ms;
+      for (const [timer, entry] of [...timers]) if (entry.at <= now) { timers.delete(timer); entry.callback(); }
+    };
+    try {
+      for (const [params, timeout] of [
+        [{}, 30000], [{ timeout_ms: null }, 30000],
+        ...[-100, 0, 1, 9999, 10000].map(timeout_ms => [{ timeout_ms }, 10000]),
+        [{ timeout_ms: 10001 }, 10001], [{ timeout_ms: 3600000 }, 3600000],
+      ]) {
+        let settled = false;
+        const waiting = f.call("wait_agent", params).then(result => { settled = true; return result; });
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(timers.size, 1);
+        advance(timeout - 1);
+        await Promise.resolve();
+        assert.equal(settled, false, JSON.stringify(params) + " returned early");
+        advance(1);
+        const result = await waiting;
+        const clamped = typeof params.timeout_ms === "number" && params.timeout_ms < 10000;
+        const message = clamped
+          ? "Wait timed out.\n\nRequested timeout of " + params.timeout_ms + "ms was clamped to the minimum of 10000ms."
+          : "Wait timed out.";
+        const expected = { message, timed_out: true };
+        assert.deepEqual(JSON.parse(result.content[0].text), expected);
+        assert.deepEqual(result.details, expected);
+        assert.deepEqual(result.structuredContent, expected);
+        assert.ok(Value.Check(tool.outputSchema, result.structuredContent));
+        assert.equal(timers.size, 0);
+      }
+      const controller = new AbortController();
+      const waiting = f.call("wait_agent", {}, f.ctx, controller.signal);
+      const rejection = assert.rejects(waiting, error => error === controller.signal.reason);
+      await new Promise(resolve => setImmediate(resolve));
+      controller.abort(new Error("clock cleanup"));
+      await rejection;
+      assert.equal(timers.size, 0, "canceling a wait clears its timeout");
+      for (const activity of [
+        () => f.emit("input", { text: "cleanup", source: "interactive" }),
+        () => options.onCompletion({ parentSessionId: "parent", agentName: "/worker", status: "completed" }),
+      ]) {
+        const wait = f.call("wait_agent", {});
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(timers.size, 1);
+        await activity();
+        await wait;
+        assert.equal(timers.size, 0, "activity clears its timeout");
+      }
+      for (const lifecycle of ["session_start", "session_shutdown"]) {
+        const wait = f.call("wait_agent", {});
+        const rejection = assert.rejects(wait);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(timers.size, 1);
+        await f.emit(lifecycle, { reason: "reload" });
+        await rejection;
+        assert.equal(timers.size, 0, "session reset clears wait timeouts");
+      }
+    } finally {
+      Object.assign(globalThis, original);
+      await f.emit("session_shutdown", { reason: "quit" });
+    }
   `,
   );
 });
@@ -717,7 +1003,7 @@ test('only native parent cancellation suppresses notification wakeups until a re
         f.ctx.signal = undefined;
         await f.emit("session_start");
       }],
-      ["child failure does not interrupt the parent", false, f => {
+      ["child failure does not interrupt the parent", false, () => {
         options.onActivityChange({ parentSessionId: "parent", agentName: "/failed-child", active: false, status: "failed" });
         options.onCompletion({ parentSessionId: "parent", agentName: "/failed-child", status: "failed", error: "child budget exceeded" });
       }],
@@ -736,8 +1022,12 @@ test('only native parent cancellation suppresses notification wakeups until a re
           for (const idle of [false, true]) {
             f.ctx.isIdle = () => idle;
             for (const waiting of [false, true]) {
+              await f.emit("context", { messages: [] });
+              const wait = waiting ? f.call("wait_agent", {}) : undefined;
+              await new Promise(resolve => setImmediate(resolve));
               const agentName = "/child-" + sent++;
-              options.onCompletion({ parentSessionId: "parent", agentName, status, finalResponse: "retained result" }, waiting);
+              options.onCompletion({ parentSessionId: "parent", agentName, status, finalResponse: "retained result" });
+              await wait;
               assert.equal(f.messages.length, initial + sent, label + ": every notification is retained");
               const { message, delivery } = f.messages.at(-1);
               assert.equal(message.customType, "pi-subagent-completion", label);
@@ -1280,7 +1570,7 @@ test.each(runtimes)(
     import * as path from "node:path";
     process.env.PI_OFFLINE = "1";
     const { createAgentSessionServices, createAgentSessionFromServices, SessionManager, SettingsManager } = await import(${JSON.stringify(sdkUrl)});
-    const { configureCoreFixture } = await import(${JSON.stringify(pathToFileURL(path.join(packageDir, 'tests', 'fixtures', 'core-sdk-fixture.ts')).href)});
+    const { configureCoreFixture, waitUntil } = await import(${JSON.stringify(pathToFileURL(path.join(packageDir, 'tests', 'fixtures', 'core-sdk-fixture.ts')).href)});
     const { getCurrentTools } = await import(${JSON.stringify(import.meta.resolve('@earendil-works/pi-ai'))});
     const fixturePath = ${JSON.stringify(CORE_SDK_EXTENSION)};
     const fixture = configureCoreFixture();
@@ -1314,7 +1604,7 @@ test.each(runtimes)(
       const spawnTool = () => session.getToolDefinition("spawn_agent");
       const schema = JSON.stringify(spawnTool().parameters);
       const checkDescription = (description, firstLine) => {
-        assert.ok(description.includes("other assigned work if available"));
+        assert.ok(description.includes("Continue other assigned work"));
         assert.ok(description.includes("wait_agent only when blocked"));
         assert.ok(description.includes("  Description:\n    " + firstLine + "\n    <rules>\n      <rule>Reuse & trust.</rule>\n    </rules>\n    Give exact paths.\n    - Narrow scope."), description);
         assert.ok(description.includes("model: test/fake — thinking: off"), description);
@@ -1330,8 +1620,7 @@ test.each(runtimes)(
       checkDescription(getCurrentTools(fixture.instances[0].requests.at(-1).context.messages).find(tool => tool.name === "spawn_agent").description, "First exploration line.");
       const ctx = session.extensionRunner.createContext();
       const result = await spawnTool().execute("spawn", { task_name: "multiline-child", agent_type: "multiline", message: "work" }, undefined, undefined, ctx);
-      const waited = await session.getToolDefinition("wait_agent").execute("wait", { targets: ["multiline-child"] }, undefined, undefined, ctx);
-      assert.deepEqual(JSON.parse(waited.content[0].text), { agent_name: "/multiline-child", status: "completed" });
+      await waitUntil(() => fixture.instances.at(-1).events.includes("settled:success"));
       await session.waitForIdle(); // The completion notification also resumes an idle parent.
       assert.equal(result.details.provider, "test");
       assert.equal(result.details.modelId, "fake");
@@ -1365,7 +1654,7 @@ test.each(runtimes)(
     const { createAgentSessionServices, createAgentSessionFromServices, SessionManager, SettingsManager } = await import(${JSON.stringify(sdkUrl)});
     const { validateToolArguments } = await import(${JSON.stringify(import.meta.resolve('@earendil-works/pi-ai'))});
     const fixturePath = ${JSON.stringify(path.join(packageDir, 'tests', 'fixtures', 'core-sdk-fixture.ts'))};
-    const { configureCoreFixture } = await import(${JSON.stringify(pathToFileURL(path.join(packageDir, 'tests', 'fixtures', 'core-sdk-fixture.ts')).href)});
+    const { configureCoreFixture, waitUntil } = await import(${JSON.stringify(pathToFileURL(path.join(packageDir, 'tests', 'fixtures', 'core-sdk-fixture.ts')).href)});
     const nativeThinking = [];
     const fixture = configureCoreFixture({
       routes: [["test", "fake"], ["test", "fake:high"], ["test", "template-model"], ["template-provider", "template-model"],
@@ -1408,8 +1697,7 @@ test.each(runtimes)(
         assert.equal(child.ctx.model.provider, result.details.provider);
         assert.equal(child.ctx.model.id, result.details.modelId);
         assert.equal(nativeThinking.at(-1), result.details.thinking);
-        const waited = await session.getToolDefinition("wait_agent").execute("wait", { targets: [task_name] }, undefined, undefined, ctx);
-        assert.deepEqual(JSON.parse(waited.content[0].text), { agent_name: "/" + task_name, status: "completed" });
+        await waitUntil(() => child.events.includes("settled:success"));
         return result.details;
       };
       assert.equal(spawnTool().parameters.properties.thinking, undefined);
@@ -1510,20 +1798,23 @@ test.each(runtimes)(
     const child = fixture("child-provider", { prefix: "child" });
     const script = [
       'await tools.spawn_agent({ task_name: "worker", message: "first" });',
-      'const waited = await tools.wait_agent({ targets: ["worker"] });',
-      'if (typeof waited !== "object" || waited.agent_name !== "/worker" || waited.status !== "completed" || Object.keys(waited).length !== 2) throw new Error("wait contract");',
+      'const waited = await tools.wait_agent({});',
+      'if (typeof waited !== "object" || typeof waited.message !== "string" || waited.timed_out !== false || Object.keys(waited).length !== 2) throw new Error("wait contract");',
+      'await tools.fixture_child_done({ expected: "child: first" });',
       'const listed = await tools.list_agents({});',
       'if (typeof listed !== "object" || listed.total !== 1 || listed.agents[0].agent_name !== "/worker" || listed.next_offset !== null) throw new Error("list contract");',
       'const response = await tools.read_agent_response({ target: "worker" });',
       'if (typeof response !== "object" || response.finalResponse !== "child: first") throw new Error("read contract");',
-      'const missing = await Promise.allSettled([tools.read_agent_response({ target: "missing" }), tools.wait_agent({ targets: ["missing"] })]);',
+      'const missing = await Promise.allSettled([tools.read_agent_response({ target: "missing" }), tools.wait_agent({ timeout_ms: 3600001 })]);',
       'if (missing.some(result => result.status !== "rejected")) throw new Error("tool errors must reject");',
       'const redacted = await tools.read_agent_response({ target: "/worker" });',
       'if (redacted !== "redacted by test hook") throw new Error("native redaction must not leak structured data");',
       'await tools.send_message({ target: "worker", message: "x".repeat(100000) });',
-      'const second = await tools.wait_agent({ targets: ["worker"] });',
+      'const second = await tools.wait_agent({});',
+      'if (typeof second.message !== "string" || second.timed_out !== false) throw new Error("second wait contract");',
+      'await tools.fixture_child_done({ expected: "child: " + "x".repeat(100000) });',
       'const large = await tools.read_agent_response({ target: "worker" });',
-      'if (second.status !== "completed" || large.finalResponse !== "child: " + "x".repeat(100000)) throw new Error("large structured response");',
+      'if (large.finalResponse !== "child: " + "x".repeat(100000)) throw new Error("large structured response");',
       'text({ marker: "structured-codemode-ok", responseLength: large.finalResponse.length });',
     ].join("\n");
     const parent = fixture("parent-provider", { codemodeScript: script });
@@ -1541,6 +1832,20 @@ test.each(runtimes)(
         noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
         additionalExtensionPaths: [process.argv[2], parent.extension],
         extensionFactories: [createCodemodeExtension(), pi => {
+          pi.registerTool({ name: "fixture_child_done", label: "Child gate", description: "Test-only terminal synchronizer",
+            parameters: { type: "object", properties: { expected: { type: "string" } }, required: ["expected"] },
+            async execute(_id, { expected }, _signal, _update, ctx) {
+              const { setTimeout: delay } = await import("node:timers/promises");
+              for (let attempt = 0; attempt < 250; attempt++) {
+                const { structuredContent: child } = await session.getToolDefinition("read_agent_response").execute(
+                  "child-gate", { target: "worker" }, undefined, undefined, ctx);
+                if (child.status === "completed" && child.finalResponse === expected)
+                  return { content: [{ type: "text", text: "child settled" }], details: {} };
+                await delay(20);
+              }
+              throw new Error("Timed out waiting for child response.");
+            },
+          });
           pi.on("tool_result", event => {
             if (event.toolName === "read_agent_response" && event.input.target === "/worker")
               return { content: [{ type: "text", text: "redacted by test hook" }] };
@@ -1593,8 +1898,166 @@ test.each(runtimes)(
   },
 );
 
+
 test.each(runtimes)(
-  'runs six registered tools and repeated child cleanup alongside an active SDK parent (%s)',
+  'native activity waits deliver original input and child notifications once without extra SDK turns (%s)',
+  (_name, executable) => {
+    probe(
+      String.raw`
+    import assert from "node:assert/strict";
+    import * as fs from "node:fs";
+    import * as path from "node:path";
+    import { setTimeout as delay } from "node:timers/promises";
+    process.env.PI_OFFLINE = "1";
+    const { createAgentSessionServices, createAgentSessionFromServices, createCodemodeExtension, SessionManager, SettingsManager } = await import(${JSON.stringify(sdkUrl)});
+    const fixtureSource = ${JSON.stringify(path.join(packageDir, 'tests', 'fixtures', 'sdk-offline-extension.ts'))};
+    const agentDir = process.env.PI_CODING_AGENT_DIR;
+    const textOf = message => typeof message.content === "string" ? message.content :
+      (message.content ?? []).filter(part => part.type === "text").map(part => part.text).join("\n");
+    for (const activity of ["input", "notification", "early-input", "early-notification"]) {
+      const fixture = (name, config) => {
+        const directory = path.join(agentDir, activity + "-" + name);
+        fs.mkdirSync(directory);
+        const extension = path.join(directory, "extension.ts");
+        fs.copyFileSync(fixtureSource, extension);
+        fs.writeFileSync(path.join(directory, "sdk-fixture.json"), JSON.stringify(config));
+        return { directory, extension };
+      };
+      const child = fixture("child", { prefix: "child", responseGate: true });
+      const script = [
+        ...(activity === "notification" ? ['await tools.spawn_agent({ task_name: "worker", message: "original child task" });'] : []),
+        'const result = await tools.wait_agent({});',
+        'text({ marker: "activity-wait-returned", result });',
+      ].join("\n");
+      const parent = fixture("parent", { prefix: "parent", codemodeScript: script });
+      const configDir = path.join(agentDir, "pi-subagents");
+      fs.mkdirSync(configDir, { recursive: true });
+      fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ retentionDays: 0, defaults: { extensions: [child.extension] } }));
+      const settingsManager = SettingsManager.inMemory({
+        compaction: { enabled: false }, retry: { enabled: false }, cacheWarming: "off",
+        defaultTools: ["+codemode"], codemode: { mode: "only", inlineBudget: 0 },
+      });
+      settingsManager.setProjectTrusted(false);
+      const waitStarted = Promise.withResolvers(), earlyNotice = Promise.withResolvers();
+      const waitResults = [], starts = [], turns = [], contexts = [], payloads = [], errors = [];
+      const initialInput = "Start an activity wait", earlyInput = "early steering already in the first context";
+      let session;
+      const services = await createAgentSessionServices({ cwd: agentDir, agentDir, settingsManager,
+        resourceLoaderOptions: {
+          noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+          additionalExtensionPaths: [process.argv[2], parent.extension],
+          extensionFactories: [createCodemodeExtension(), pi => {
+            pi.on("agent_start", () => { starts.push("start"); });
+            pi.on("turn_start", () => { turns.push("turn"); });
+            pi.on("context", event => { contexts.push(structuredClone(event.messages)); });
+            pi.on("before_provider_request", event => { payloads.push(event.payload); });
+            pi.on("message_end", async (event, ctx) => {
+              if (!activity.startsWith("early-") || event.message.role !== "user" || textOf(event.message) !== initialInput) return;
+              assert.equal(turns.length, 1, "early activity arrives after turn_start");
+              assert.equal(contexts.length, 0, "early activity arrives before the first context preparation");
+              if (activity === "early-input") {
+                await session.prompt(earlyInput, { source: "rpc", streamingBehavior: "steer" });
+              } else {
+                const spawned = await session.getToolDefinition("spawn_agent").execute("early-child",
+                  { task_name: "worker", message: "original child task" }, undefined, undefined, ctx);
+                assert.equal(spawned.details.task_name, "/worker");
+                fs.writeFileSync(path.join(child.directory, "release-response"), "");
+                await earlyNotice.promise;
+              }
+            });
+            pi.on("tool_execution_start", event => { if (event.toolName === "wait_agent") waitStarted.resolve(); });
+            pi.on("tool_execution_end", event => { if (event.toolName === "wait_agent") waitResults.push(event); });
+          }],
+        },
+      });
+      assert.deepEqual(services.resourceLoader.getExtensions().errors, []);
+      const model = (await services.modelRuntime.getAvailable("sdk-offline")).find(model => model.id === "exact/model");
+      assert.ok(model);
+      ({ session } = await createAgentSessionFromServices({ services, model, sessionManager: SessionManager.inMemory(agentDir) }));
+      if (activity === "early-notification") {
+        const sendCustomMessage = session.sendCustomMessage;
+        session.sendCustomMessage = function(message, delivery) {
+          const result = sendCustomMessage.call(this, message, delivery);
+          if (message.customType === "pi-subagent-completion") earlyNotice.resolve();
+          return result;
+        };
+      }
+      let run;
+      try {
+        await session.bindExtensions({ mode: "print", onError: error => errors.push(error) });
+        run = session.prompt(initialInput, { source: "rpc" });
+        void run.catch(() => {});
+        await waitStarted.promise;
+        await delay(10);
+        assert.equal(session.isStreaming, true);
+        assert.equal(waitResults.length, 0, "the wait must still be blocked when activity arrives");
+        const input = "original rpc steering message";
+        if (activity === "notification") fs.writeFileSync(path.join(child.directory, "release-response"), "");
+        else await session.prompt(input, { source: "rpc", streamingBehavior: "steer" });
+        await run;
+        await session.waitForIdle();
+        await delay(30);
+        assert.equal(waitResults.length, 1);
+        assert.equal(waitResults[0].isError, false);
+        const expected = { message: activity === "notification" ? "Wait completed." : "Wait interrupted by new input.", timed_out: false };
+        assert.deepEqual(waitResults[0].result.details, expected);
+        assert.deepEqual(waitResults[0].result.structuredContent, expected);
+        assert.deepEqual(JSON.parse(waitResults[0].result.content[0].text), expected);
+        const events = fs.readFileSync(path.join(parent.directory, "sdk-events.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+        const requests = events.filter(event => event.type === "request");
+        assert.equal(requests.length, 2, activity + ": only the original request and natural post-tool continuation");
+        assert.equal(payloads.length, 0, "the custom provider never invokes onPayload");
+        assert.equal(contexts.length, 2, "every request prepares context without provider callbacks");
+        assert.equal(turns.length, 2);
+        assert.equal(starts.length, 1, "activity must not schedule an extra parent run");
+        assert.equal(requests[0].userTexts.filter(text => text === initialInput).length, 1);
+        if (activity !== "notification") {
+          assert.equal(requests[1].userTexts.filter(text => text === input).length, 1);
+          assert.equal(session.messages.filter(message => message.role === "user" && textOf(message) === input).length, 1);
+          const inputs = events.filter(event => event.type === "input" && event.text === input);
+          assert.equal(inputs.length, 1);
+          assert.equal(inputs[0].source, "rpc");
+          assert.equal(inputs[0].streamingBehavior, "steer");
+        }
+        if (activity === "early-input") {
+          assert.equal(requests[0].userTexts.filter(text => text === earlyInput).length, 1, "early steering is already in the first context");
+          assert.equal(session.messages.filter(message => message.role === "user" && textOf(message) === earlyInput).length, 1);
+          assert.equal(events.filter(event => event.type === "input" && event.text === earlyInput).length, 1);
+        }
+        if (activity.includes("notification")) {
+          const request = requests[activity === "early-notification" ? 0 : 1];
+          const notices = request.userTexts.filter(text => text.startsWith("<subagent_notification>"));
+          assert.equal(notices.length, 1);
+          const original = JSON.parse(notices[0].replace("<subagent_notification>", "").replace("</subagent_notification>", ""));
+          assert.deepEqual(original, { agent_name: "/worker", status: "completed", final_response: "child: original child task" });
+          assert.equal(session.messages.filter(message => message.role === "custom" && message.customType === "pi-subagent-completion").length, 1);
+        }
+        const controller = new AbortController();
+        let lateSettled = false;
+        const late = session.getToolDefinition("wait_agent").execute("after-request", {}, controller.signal, undefined, session.extensionRunner.createContext());
+        late.then(() => { lateSettled = true; }, () => {});
+        const rejection = assert.rejects(late, error => error === controller.signal.reason);
+        await delay(5);
+        assert.equal(lateSettled, false, "context preparation cleared already-delivered pending activity");
+        controller.abort(new Error("cancel late wait"));
+        await rejection;
+        assert.deepEqual(errors, []);
+      } finally {
+        fs.writeFileSync(path.join(child.directory, "release-response"), "");
+        await session.abort();
+        await run?.catch(() => {});
+        try { await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); }
+        finally { session.dispose(); }
+      }
+    }
+  `,
+      executable,
+    );
+  },
+);
+
+test.each(runtimes)(
+  'runs six registered tools with raw timeout validation and repeated child cleanup alongside an active SDK parent (%s)',
   (_name, executable) => {
     probe(
       String.raw`
@@ -1637,7 +2100,7 @@ test.each(runtimes)(
             api: "host-offline", apiKey: "offline-only", baseUrl: "http://offline.invalid",
             models: [{ id: "exact/model", name: "Offline host", reasoning: false, input: ["text"],
               contextWindow: 500_000, maxTokens: 1_000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
-            streamSimple(model, context) {
+            streamSimple(model, context, options) {
               parentRequests.push(structuredClone(context.messages));
               const stream = createAssistantMessageEventStream();
               const first = request++ === 0;
@@ -1649,9 +2112,12 @@ test.each(runtimes)(
                 stopReason: first ? "toolUse" : "stop", timestamp: Date.now(),
                 usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
               };
-              stream.push({ type: "start", partial: message });
-              stream.push({ type: "done", reason: message.stopReason, message });
-              stream.end();
+              void (async () => {
+                await options?.onPayload?.({ messages: context.messages }, model);
+                stream.push({ type: "start", partial: message });
+                stream.push({ type: "done", reason: message.stopReason, message });
+                stream.end();
+              })();
               return stream;
             },
           });
@@ -1735,29 +2201,41 @@ test.each(runtimes)(
           return result.result;
         };
         assert.equal(session.isStreaming, true);
+        // ctx.executeTool exercises native prepareArguments before Pi can coerce raw values.
+        for (const timeout_ms of [1.5, false, "10000", 3600000.9]) {
+          const controller = new AbortController();
+          const guard = setTimeout(() => controller.abort(new Error("invalid timeout entered a wait")), 1000);
+          try {
+            const result = await ctx.executeTool("wait_agent", { timeout_ms }, { signal: controller.signal });
+            assert.equal(result.isError, true, "raw timeout: " + JSON.stringify(timeout_ms));
+            assert.equal(controller.signal.aborted, false, "raw timeout must fail before waiting: " + JSON.stringify(timeout_ms));
+            assert.match(JSON.stringify(result.result.content), /timeout_ms.*integer/i);
+          } finally { clearTimeout(guard); }
+        }
         const spawned = await call("spawn_agent", { task_name: "worker", message: "child work" });
         assert.equal(spawned.details.task_name, "/worker");
         assert.equal((await call("list_agents", {})).details.agents[0].agent_status, "running");
         assert.equal((await call("send_message", { target: "/worker", message: "steered work" })).details.delivery, "steer");
         const controller = new AbortController();
-        const canceledWait = ctx.executeTool("wait_agent", { targets: ["worker"] }, { signal: controller.signal });
+        const canceledWait = ctx.executeTool("wait_agent", {}, { signal: controller.signal });
         await delay(5);
         controller.abort(new Error("cancel only the wait"));
         assert.equal((await canceledWait).isError, true);
         assert.equal((await call("list_agents", {})).details.agents[0].agent_status, "running");
-        const waiting = call("wait_agent", { targets: ["worker"] });
+        const waiting = call("wait_agent", { timeout_ms: 10000 });
         await delay(5);
         fs.writeFileSync(path.join(childFixture.directory, "release-response"), "");
         const completion = JSON.parse((await waiting).content[0].text);
-        assert.deepEqual(completion, { agent_name: "/worker", status: "completed" });
+        assert.deepEqual(completion, { message: "Wait completed.", timed_out: false });
         await reclaimed("initial completion");
         const read = JSON.parse((await call("read_agent_response", { target: "worker" })).content[0].text);
         assert.equal(read.finalResponse, "child: steered work");
         const finishWaiting = async () => {
-          const waiting = call("wait_agent", { targets: ["worker"] });
+          const waiting = call("wait_agent", { timeout_ms: null });
           await delay(5);
           fs.writeFileSync(path.join(childFixture.directory, "release-response"), "");
-          assert.deepEqual(JSON.parse((await waiting).content[0].text), { agent_name: "/worker", status: "completed" });
+          assert.deepEqual(JSON.parse((await waiting).content[0].text), { message: "Wait completed.", timed_out: false });
+          // A repeated wait can consume earlier pending activity; reclaimed() below is the terminal cleanup gate.
         };
         settingsManager.setProjectTrusted(true);
         fs.rmSync(path.join(childFixture.directory, "release-response"));
@@ -1809,8 +2287,12 @@ test.each(runtimes)(
       assert.equal(parentRequests.length, 3, "an idle parent must still wake automatically");
       assert.equal(notifications(parentRequests[2]).length, 11);
       for (let attempt = 0; attempt < 2; attempt++) {
-        const waited = await direct("wait_agent", { targets: ["idle"] });
-        assert.deepEqual(JSON.parse(waited.content[0].text), { agent_name: "/idle", status: "completed" });
+        const controller = new AbortController();
+        const waiting = session.getToolDefinition("wait_agent").execute("late-wait", {}, controller.signal, undefined, ctx);
+        const rejection = assert.rejects(waiting, error => error === controller.signal.reason);
+        await delay(5);
+        controller.abort(new Error("late waits do not replay old completions"));
+        await rejection;
       }
       await delay(10);
       assert.equal(parentRequests.length, 3, "late/repeated waits must not trigger another notification or turn");
@@ -3784,10 +4266,10 @@ test('six public tools carry native usage through metadata and the detail footer
     expect(read.content[0].text).toContain('response:sample ten');
     expect(await execute('read_agent_response', { target: 'worker' })).toEqual(read);
     expect(sent).toHaveLength(beforeRead);
-    const wait = await execute('wait_agent', { targets: ['worker'] });
+    const wait = await execute('wait_agent', {});
     expect(JSON.parse(wait.content[0].text)).toEqual({
-      agent_name: '/worker',
-      status: 'completed',
+      message: 'Wait completed.',
+      timed_out: false,
     });
     expect(sent).toHaveLength(beforeRead);
     expect((await execute('list_agents', {})).content[0].text).not.toContain('contextUsage');
@@ -3849,9 +4331,9 @@ test('six public tools carry native usage through metadata and the detail footer
     await commands.get('subagents').handler('', ctx);
     expect(detailOpened).toBe(1);
     const resumed = JSON.parse(
-      (await execute('wait_agent', { targets: ['worker'] })).content[0].text,
+      (await execute('wait_agent', {})).content[0].text,
     );
-    expect(resumed).toEqual({ agent_name: '/worker', status: 'completed' });
+    expect(resumed).toEqual({ message: 'Wait completed.', timed_out: false });
     expect((await execute('read_agent_response', { target: 'worker' })).content[0].text).toContain(
       'response:sample fourteen',
     );

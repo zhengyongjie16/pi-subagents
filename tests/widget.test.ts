@@ -367,7 +367,7 @@ describe('summary content', () => {
     ] as const) {
       agent = snapshot(extra as Partial<AgentWidgetSnapshot>);
       widget.refresh();
-      expect(f.render()[2]).toContain(expected);
+      expect(f.render()[2]).toBe('     └─ ' + expected);
       expect(f.text()).not.toContain('DO NOT SHOW SECOND');
     }
     expect(f.setWidget).toHaveBeenCalledTimes(1);
@@ -826,13 +826,14 @@ describe('layout budgets', () => {
       expect(lines).toHaveLength(count <= 5 ? 1 + count * 2 : 12);
       expect(lines[0]).toBe(`● Agents · ${count} running · /subagents to view details`);
       expectFit(lines, 120);
+      if (count > 1) expect(lines[2]).toBe('│    └─ thinking…');
       if (count > 5) {
         expect(lines[11]).toBe(`└─ +${count - 5} more · /subagents`);
         expect(lines[9]).toContain('/worker4');
         expect(lines.join('\n')).not.toContain('/worker5');
       } else {
         expect(lines.at(-2)!).toStartWith('└─');
-        expect(lines.at(-1)!).toStartWith('     └─');
+        expect(lines.at(-1)!).toBe('     └─ thinking…');
       }
     }
   });
