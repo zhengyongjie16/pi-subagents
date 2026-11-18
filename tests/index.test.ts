@@ -667,7 +667,6 @@ test('activity waits keep notifications compact and preserve natural or idle con
   );
 });
 
-
 test('observes every parent input source and delivery without changing the input', () => {
   probe(
     hostFixture +
@@ -838,7 +837,6 @@ test('cancels and detaches old waits on session start and shutdown, clearing pen
   `,
   );
 });
-
 
 test('validates timeout-only arguments and clamps the minimum with a test-local clock', () => {
   probe(
@@ -1898,7 +1896,6 @@ test.each(runtimes)(
   },
 );
 
-
 test.each(runtimes)(
   'native activity waits deliver original input and child notifications once without extra SDK turns (%s)',
   (_name, executable) => {
@@ -2570,7 +2567,9 @@ describe('extension completion delivery and TUI', () => {
           async custom(create: any) {
             let component: any;
             let close!: () => void;
-            const closed = new Promise<void>((resolve) => { close = resolve; });
+            const closed = new Promise<void>((resolve) => {
+              close = resolve;
+            });
             component = create(
               { terminal: { rows: 80 }, requestRender() {} },
               { fg: (_color: string, text: string) => text, bold: (text: string) => text },
@@ -2603,10 +2602,14 @@ describe('extension completion delivery and TUI', () => {
         expect(detail).toBeInstanceOf(SubagentPeekOverlay);
         expect(detail!['nativeCodemodeRenderers']).toEqual(collected);
         expect(Object.keys(detail!['nativeCodemodeRenderers'])).toEqual([
-          'renderShell', 'renderCall', 'renderResult',
+          'renderShell',
+          'renderCall',
+          'renderResult',
         ]);
         expect(detail!['toolExecutionOptions']).toEqual({
-          showImages: false, imageWidthCells: 42, outputPad: 0,
+          showImages: false,
+          imageWidthCells: 42,
+          outputPad: 0,
         });
         expect(keptOpen).toBe(true);
         expect(loaded.runtime.getSettings).toHaveBeenCalledTimes(1);
@@ -2851,7 +2854,8 @@ describe('extension completion delivery and TUI', () => {
       );
 
     const browserNames = (browser: any) =>
-      browser.render(120)
+      browser
+        .render(120)
         .map(stripVTControlCharacters)
         .filter((line: string) => /^[› ] \//.test(line))
         .map((line: string) => line.trim().replace(/^› /, '').split(/\s+/)[0]);
@@ -2866,7 +2870,11 @@ describe('extension completion delivery and TUI', () => {
           f.put('failed', { status: 'failed', createdAt: 20, completedAt: 500 });
           f.put('interrupted', { status: 'interrupted', createdAt: 10, completedAt: 400 });
           expect(browserNames(browser)).toEqual([
-            '/starting', '/running', '/failed', '/interrupted', '/completed',
+            '/starting',
+            '/running',
+            '/failed',
+            '/interrupted',
+            '/completed',
           ]);
           const lines = browser.render(120);
           expect(lines).toContain(' Active (2)');
@@ -2877,9 +2885,15 @@ describe('extension completion delivery and TUI', () => {
           expect(selectedRow(browser)).toContain('/running');
           browser.handleInput('j');
           expect(selectedRow(browser)).toContain('/failed'); // The group heading is not selectable.
-          const tool = await f.tools.get('list_agents').execute('list', {}, undefined, undefined, f.ctx);
+          const tool = await f.tools
+            .get('list_agents')
+            .execute('list', {}, undefined, undefined, f.ctx);
           expect(tool.details.agents.map((entry: any) => entry.agent_name)).toEqual([
-            '/starting', '/running', '/completed', '/failed', '/interrupted',
+            '/starting',
+            '/running',
+            '/completed',
+            '/failed',
+            '/interrupted',
           ]);
           browser.handleInput('q');
         });
@@ -2887,19 +2901,28 @@ describe('extension completion delivery and TUI', () => {
     });
 
     test.each([undefined, NaN, 'invalid'])(
-      'malformed Done creation time cannot disturb Active or detail order (%s)', async (createdAt) => {
+      'malformed Done creation time cannot disturb Active or detail order (%s)',
+      async (createdAt) => {
         await withBrowser(async (f) => {
           await f.open(
             (browser: any) => {
               const scope = path.join(getRunsDir(), parentScopeKey(f.parentId));
               f.put('older', {
-                id: 'a', status: 'running', createdAt: 100, infoFile: path.join(scope, 'a.info.json'),
+                id: 'a',
+                status: 'running',
+                createdAt: 100,
+                infoFile: path.join(scope, 'a.info.json'),
               });
               f.put('missing', {
-                id: 'b', createdAt: createdAt as any, infoFile: path.join(scope, 'b.info.json'),
+                id: 'b',
+                createdAt: createdAt as any,
+                infoFile: path.join(scope, 'b.info.json'),
               });
               f.put('newer', {
-                id: 'c', status: 'starting', createdAt: 200, infoFile: path.join(scope, 'c.info.json'),
+                id: 'c',
+                status: 'starting',
+                createdAt: 200,
+                infoFile: path.join(scope, 'c.info.json'),
               });
               expect(browserNames(browser)).toEqual(['/newer', '/older', '/missing']);
               browser.handleInput('\r');
@@ -2908,7 +2931,10 @@ describe('extension completion delivery and TUI', () => {
               overlay.handleInput(['\x1b[C', '\x1b[C', '\x1b[C', 'q'][index]),
           );
           expect(f.opened.map((info: AgentInfo) => info.canonicalName)).toEqual([
-            '/newer', '/older', '/missing', '/newer',
+            '/newer',
+            '/older',
+            '/missing',
+            '/newer',
           ]);
         });
       },
@@ -2926,12 +2952,23 @@ describe('extension completion delivery and TUI', () => {
             f.put('tie-b', { id: 'tie-b', createdAt: 20, completedAt: 500 }),
             f.put('tie-a', { id: 'tie-a', createdAt: 20, completedAt: 500 }),
             f.put('zero', { createdAt: 10, completedAt: 0, updatedAt: 99999 }),
-            f.put('missing', { createdAt: undefined, completedAt: undefined, updatedAt: undefined }),
+            f.put('missing', {
+              createdAt: undefined,
+              completedAt: undefined,
+              updatedAt: undefined,
+            }),
           ];
           const before = records.map((info) => fs.readFileSync(info.infoFile, 'utf8'));
           const expected = [
-            '/latest', '/legacy', '/invalid', '/created-only', '/tie-new',
-            '/tie-a', '/tie-b', '/zero', '/missing',
+            '/latest',
+            '/legacy',
+            '/invalid',
+            '/created-only',
+            '/tie-new',
+            '/tie-a',
+            '/tie-b',
+            '/zero',
+            '/missing',
           ];
           expect(browserNames(browser)).toEqual(expected);
           browser.handleInput('r');
@@ -2943,13 +2980,17 @@ describe('extension completion delivery and TUI', () => {
     });
 
     test.each(['empty', 'active', 'done'])(
-      'hides empty Active but keeps the Done group (%s)', async (kind) => {
+      'hides empty Active but keeps the Done group (%s)',
+      async (kind) => {
         await withBrowser(async (f) => {
           await f.open((browser: any) => {
-            if (kind !== 'empty') f.put('only', { status: kind === 'active' ? 'running' : 'failed' });
+            if (kind !== 'empty')
+              f.put('only', { status: kind === 'active' ? 'running' : 'failed' });
             const lines = browser.render(120);
             const titleIndex = lines.findIndex((line: string) => line.includes('Subagents'));
-            expect(lines[titleIndex + 1]).toBe(kind === 'active' ? ' Active (1)' : ' Done (' + Number(kind === 'done') + ')');
+            expect(lines[titleIndex + 1]).toBe(
+              kind === 'active' ? ' Active (1)' : ' Done (' + Number(kind === 'done') + ')',
+            );
             if (kind === 'active') expect(lines).toContain(' Active (1)');
             else expect(lines.some((line: string) => /^\s*Active \(/.test(line))).toBe(false);
             expect(lines).toContain(' Done (' + Number(kind === 'done') + ')');
@@ -2967,7 +3008,8 @@ describe('extension completion delivery and TUI', () => {
     );
 
     test.each(['dark', 'light'] as const)(
-      'renders dim headings without bold, aligned and compact under the %s theme', async (appearance) => {
+      'renders dim headings without bold, aligned and compact under the %s theme',
+      async (appearance) => {
         await withBrowser(async (f) => {
           f.theme = f.ctx.ui.theme = nativeTheme(appearance);
           await f.open((browser: any) => {
@@ -3016,7 +3058,9 @@ describe('extension completion delivery and TUI', () => {
             check();
           }
           expect(selectedRow(browser)).toContain('/done/0');
-          expect(browserNames(browser).some((name: string) => name.startsWith('/active/'))).toBe(true);
+          expect(browserNames(browser).some((name: string) => name.startsWith('/active/'))).toBe(
+            true,
+          );
           for (let index = 0; index < 11; index++) {
             browser.handleInput('j');
             check();
@@ -3075,7 +3119,11 @@ describe('extension completion delivery and TUI', () => {
           },
         );
         expect(f.opened.map((info: AgentInfo) => info.canonicalName)).toEqual([
-          '/starting', '/late', '/starting', '/running', '/starting',
+          '/starting',
+          '/late',
+          '/starting',
+          '/running',
+          '/starting',
         ]);
         expect(f.opened.every((info: AgentInfo) => info.parentSessionId === f.parentId)).toBe(true);
       });
@@ -3315,9 +3363,7 @@ describe('extension completion delivery and TUI', () => {
           const renderSnapshot = (width: number, expected: AgentInfo[] = []) => {
             reads.length = 0;
             const lines = browser.render(width);
-            expect([...reads].sort()).toEqual(
-              expected.map((info) => info.infoFile).sort(),
-            );
+            expect([...reads].sort()).toEqual(expected.map((info) => info.infoFile).sort());
             return lines;
           };
           try {
@@ -3360,27 +3406,39 @@ describe('extension completion delivery and TUI', () => {
         await f.open((browser: any) => {
           const now = Date.now();
           f.put('worker', {
-            status: 'running', createdAt: 200, startedAt: now - 5000,
+            status: 'running',
+            createdAt: 200,
+            startedAt: now - 5000,
             lastTaskMessage: 'original preview',
           });
           f.put('done', { createdAt: 100, completedAt: 100 });
           const clock = spyOn(Date, 'now').mockReturnValue(now);
           try {
-            expect(browser.render(120).find((line: string) => line.includes('/worker'))).toMatch(/running\s+5s/);
+            expect(browser.render(120).find((line: string) => line.includes('/worker'))).toMatch(
+              /running\s+5s/,
+            );
             const lists = f.list.mock.calls.length;
-            f.put('worker', { status: 'completed', completedAt: now, lastTaskMessage: 'updated preview' });
+            f.put('worker', {
+              status: 'completed',
+              completedAt: now,
+              lastTaskMessage: 'updated preview',
+            });
             f.put('new', { status: 'running', createdAt: 300 });
             clock.mockReturnValue(now + 5000);
             browser.handleInput('j');
             expect(selectedRow(browser)).toContain('/done');
-            expect(browser.render(120).find((line: string) => line.includes('/worker'))).toMatch(/running\s+10s/);
+            expect(browser.render(120).find((line: string) => line.includes('/worker'))).toMatch(
+              /running\s+10s/,
+            );
             expect(browserNames(browser)).toEqual(['/worker', '/done']);
             expect(browser.render(120).join('\n')).toContain('original preview');
             expect(f.list).toHaveBeenCalledTimes(lists);
             browser.handleInput('r');
             expect(browserNames(browser)).toEqual(['/new', '/worker', '/done']);
             expect(browser.render(120).join('\n')).toContain('updated preview');
-            expect(browser.render(120).find((line: string) => line.includes('/worker'))).toMatch(/completed\s+5s/);
+            expect(browser.render(120).find((line: string) => line.includes('/worker'))).toMatch(
+              /completed\s+5s/,
+            );
             expect(f.list).toHaveBeenCalledTimes(lists + 1);
             browser.handleInput('q');
           } finally {
@@ -3651,9 +3709,13 @@ describe('extension completion delivery and TUI', () => {
           );
           expect(f.selections).toEqual([undefined]);
           expect(f.opened.map((info: AgentInfo) => info.canonicalName)).toEqual([
-            '/second', '/same', '/second',
+            '/second',
+            '/same',
+            '/second',
           ]);
-          expect(f.opened.every((info: AgentInfo) => info.parentSessionId === f.parentId)).toBe(true);
+          expect(f.opened.every((info: AgentInfo) => info.parentSessionId === f.parentId)).toBe(
+            true,
+          );
           for (const call of f.list.mock.calls) expect(call).toEqual([undefined, f.parentId]);
           for (const control of controls) expect(control).not.toHaveBeenCalled();
           expect(records.map((info) => fs.readFileSync(info.infoFile, 'utf8'))).toEqual(before);
@@ -3826,20 +3888,38 @@ describe('extension completion delivery and TUI', () => {
     );
 
     test.each(['regular', 'fullscreen'] as const)(
-      'real Pi custom UI retains the browser and restores focus after details (%s)', async (mode) => {
+      'real Pi custom UI retains the browser and restores focus after details (%s)',
+      async (mode) => {
         await withBrowser(async (f) => {
-          const { InteractiveMode } = await import(new URL('./modes/interactive/interactive-mode.js', sdkUrl).href);
+          const { InteractiveMode } = await import(
+            new URL('./modes/interactive/interactive-mode.js', sdkUrl).href
+          );
           codingAgent.initTheme('dark', false);
-          for (let index = 0; index < 12; index++) f.put('history/' + index, { createdAt: 100 - index });
+          for (let index = 0; index < 12; index++)
+            f.put('history/' + index, { createdAt: 100 - index });
           let input: (data: string) => void = () => {};
           const writes: string[] = [];
           const terminal: Terminal = {
-            columns: 120, rows: 40, kittyProtocolActive: false,
-            start(onInput) { input = onInput; },
-            stop() {}, async drainInput() {},
-            write(data) { writes.push(data); },
-            moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {},
-            clearFromCursor() {}, clearScreen() {}, setTitle() {}, setProgress() {}, setProgramStatus() {},
+            columns: 120,
+            rows: 40,
+            kittyProtocolActive: false,
+            start(onInput) {
+              input = onInput;
+            },
+            stop() {},
+            async drainInput() {},
+            write(data) {
+              writes.push(data);
+            },
+            moveBy() {},
+            hideCursor() {},
+            showCursor() {},
+            clearLine() {},
+            clearFromCursor() {},
+            clearScreen() {},
+            setTitle() {},
+            setProgress() {},
+            setProgramStatus() {},
           };
           const tui = mode === 'regular' ? new TuiMainScreen(terminal) : new TuiAltScreen(terminal);
           let browser: any;
@@ -3867,7 +3947,9 @@ describe('extension completion delivery and TUI', () => {
             InteractiveMode.prototype.showExtensionCustom.call(host, factory, options);
           tui.start();
           const command = f.command();
-          command.then(() => { settled = true; });
+          command.then(() => {
+            settled = true;
+          });
           const tick = () => new Promise((resolve) => setImmediate(resolve));
           try {
             await tick();
@@ -3920,96 +4002,112 @@ describe('extension completion delivery and TUI', () => {
         f.put('first', { createdAt: 200 });
         f.put('target', { createdAt: 100 });
         let release!: () => void;
-        const hold = new Promise<void>((resolve) => { release = resolve; });
-        await f.open(async (browser: any) => {
-          browser.render(120);
-          browser.handleInput('j');
-          const frame = browser.render(120);
-          browser.handleInput('\r');
-          browser.handleInput('\r');
-          browser.handleInput('q'); // The background list cannot close while details own input.
-          expect(f.selections).toEqual([]);
-          expect(f.opened).toHaveLength(1);
-          expect(browser.render(120)).toBe(frame);
-          release();
-          await f.flushDetails();
-          expect(selectedRow(browser)).toContain('/target');
-          expect(f.selections).toEqual([]);
-          browser.handleInput('\r');
-          await f.flushDetails();
-          expect(f.opened).toHaveLength(2);
-          browser.handleInput('q');
-        }, async (overlay: any, index: number) => {
-          if (index === 0) {
-            f.put('inserted', { createdAt: 300 });
-            await hold;
-          }
-          overlay.handleInput('q');
+        const hold = new Promise<void>((resolve) => {
+          release = resolve;
         });
+        await f.open(
+          async (browser: any) => {
+            browser.render(120);
+            browser.handleInput('j');
+            const frame = browser.render(120);
+            browser.handleInput('\r');
+            browser.handleInput('\r');
+            browser.handleInput('q'); // The background list cannot close while details own input.
+            expect(f.selections).toEqual([]);
+            expect(f.opened).toHaveLength(1);
+            expect(browser.render(120)).toBe(frame);
+            release();
+            await f.flushDetails();
+            expect(selectedRow(browser)).toContain('/target');
+            expect(f.selections).toEqual([]);
+            browser.handleInput('\r');
+            await f.flushDetails();
+            expect(f.opened).toHaveLength(2);
+            browser.handleInput('q');
+          },
+          async (overlay: any, index: number) => {
+            if (index === 0) {
+              f.put('inserted', { createdAt: 300 });
+              await hold;
+            }
+            overlay.handleInput('q');
+          },
+        );
         expect(f.selections).toEqual([undefined]);
       });
     });
 
     test.each(['render', 'navigate', 'refresh'])(
-      'detail return uses a coherent snapshot when agents arrive before its first frame (%s)', async (action) => {
+      'detail return uses a coherent snapshot when agents arrive before its first frame (%s)',
+      async (action) => {
         await withBrowser(async (f) => {
           f.put('target', { createdAt: 200 });
           f.put('other', { createdAt: 100 });
-          await f.open(async (browser: any) => {
-            expect(selectedRow(browser)).toContain('/target');
-            const reads = f.list.mock.calls.length;
-            f.requestRender.mockImplementationOnce(() => {
-              // The return selection has been restored, but its frame has not rendered yet.
-              f.put('inserted', { createdAt: 300 });
-            });
-            browser.handleInput('\r');
-            await f.flushDetails();
-            expect(f.list).toHaveBeenCalledTimes(reads + 1);
-            if (action === 'navigate') browser.handleInput('j');
-            if (action === 'refresh') browser.handleInput('r');
-            const expected = action === 'navigate' ? '/other' : action === 'refresh' ? '/inserted' : '/target';
-            expect(selectedRow(browser)).toContain(expected);
-            if (action === 'refresh') {
-              expect(f.list).toHaveBeenCalledTimes(reads + 2);
-              expect(browserNames(browser)).toContain('/inserted');
-            } else {
+          await f.open(
+            async (browser: any) => {
+              expect(selectedRow(browser)).toContain('/target');
+              const reads = f.list.mock.calls.length;
+              f.requestRender.mockImplementationOnce(() => {
+                // The return selection has been restored, but its frame has not rendered yet.
+                f.put('inserted', { createdAt: 300 });
+              });
+              browser.handleInput('\r');
+              await f.flushDetails();
               expect(f.list).toHaveBeenCalledTimes(reads + 1);
-              expect(browserNames(browser)).not.toContain('/inserted');
-              browser.handleInput('k');
-              browser.render(80);
-              browser.invalidate();
-              browser.render(80);
-              expect(f.list).toHaveBeenCalledTimes(reads + 1);
-              expect(browserNames(browser)).not.toContain('/inserted');
-            }
-            browser.handleInput('q');
-          }, (overlay: any) => overlay.handleInput('q'));
+              if (action === 'navigate') browser.handleInput('j');
+              if (action === 'refresh') browser.handleInput('r');
+              const expected =
+                action === 'navigate' ? '/other' : action === 'refresh' ? '/inserted' : '/target';
+              expect(selectedRow(browser)).toContain(expected);
+              if (action === 'refresh') {
+                expect(f.list).toHaveBeenCalledTimes(reads + 2);
+                expect(browserNames(browser)).toContain('/inserted');
+              } else {
+                expect(f.list).toHaveBeenCalledTimes(reads + 1);
+                expect(browserNames(browser)).not.toContain('/inserted');
+                browser.handleInput('k');
+                browser.render(80);
+                browser.invalidate();
+                browser.render(80);
+                expect(f.list).toHaveBeenCalledTimes(reads + 1);
+                expect(browserNames(browser)).not.toContain('/inserted');
+              }
+              browser.handleInput('q');
+            },
+            (overlay: any) => overlay.handleInput('q'),
+          );
         });
       },
     );
 
     test('last Active finishing in details returns to its position in a long Done group', async () => {
       await withBrowser(async (f) => {
-        await f.open(async (browser: any) => {
-          f.put('target', { status: 'running', createdAt: 1 });
-          for (let index = 0; index < 15; index++)
-            f.put('done/' + index, { completedAt: 100 - index });
-          expect(selectedRow(browser)).toContain('/target');
-          browser.handleInput('\r');
-          await f.flushDetails();
-          expect(selectedRow(browser)).toContain('/target');
-          const lines = browser.render(120);
-          expect(lines.join('\n')).not.toMatch(/^\s*Active \(/m);
-          expect(lines).toContain(' Done (16)');
-          expect(browserNames(browser)).toHaveLength(10);
-          const hidden = lines.reduce((count: number, line: string) =>
-            count + Number(line.match(/[↑↓] (\d+) more/)?.[1] ?? 0), 0);
-          expect(hidden + browserNames(browser).length).toBe(16);
-          browser.handleInput('q');
-        }, (overlay: any) => {
-          f.put('target', { status: 'completed', completedAt: 1 });
-          overlay.handleInput('q');
-        });
+        await f.open(
+          async (browser: any) => {
+            f.put('target', { status: 'running', createdAt: 1 });
+            for (let index = 0; index < 15; index++)
+              f.put('done/' + index, { completedAt: 100 - index });
+            expect(selectedRow(browser)).toContain('/target');
+            browser.handleInput('\r');
+            await f.flushDetails();
+            expect(selectedRow(browser)).toContain('/target');
+            const lines = browser.render(120);
+            expect(lines.join('\n')).not.toMatch(/^\s*Active \(/m);
+            expect(lines).toContain(' Done (16)');
+            expect(browserNames(browser)).toHaveLength(10);
+            const hidden = lines.reduce(
+              (count: number, line: string) =>
+                count + Number(line.match(/[↑↓] (\d+) more/)?.[1] ?? 0),
+              0,
+            );
+            expect(hidden + browserNames(browser).length).toBe(16);
+            browser.handleInput('q');
+          },
+          (overlay: any) => {
+            f.put('target', { status: 'completed', completedAt: 1 });
+            overlay.handleInput('q');
+          },
+        );
       });
     });
 
@@ -4019,12 +4117,17 @@ describe('extension completion delivery and TUI', () => {
         await f.open(async (browser: any) => {
           browser.render(120);
           const custom = f.ctx.ui.custom;
-          f.ctx.ui.custom = (create: any, options: any) => options?.overlay
-            ? Promise.reject(new Error('detail creation failed')) : custom(create, options);
+          f.ctx.ui.custom = (create: any, options: any) =>
+            options?.overlay
+              ? Promise.reject(new Error('detail creation failed'))
+              : custom(create, options);
           browser.handleInput('\r');
           await f.flushDetails();
           expect(f.selections).toEqual([]);
-          expect(f.notify).toHaveBeenCalledWith(expect.stringContaining('detail creation failed'), 'error');
+          expect(f.notify).toHaveBeenCalledWith(
+            expect.stringContaining('detail creation failed'),
+            'error',
+          );
           expect(selectedRow(browser)).toContain('/worker');
           f.ctx.ui.custom = custom;
           browser.handleInput('\r');
@@ -4058,24 +4161,28 @@ describe('extension completion delivery and TUI', () => {
     });
 
     test.each(['pending selection', 'inserted item'])(
-      'return navigation is independent of render timing (%s)', async (change) => {
+      'return navigation is independent of render timing (%s)',
+      async (change) => {
         await withBrowser(async (f) => {
           f.put('a', { createdAt: 300 });
           f.put('b', { createdAt: 200 });
           f.put('c', { createdAt: 100 });
-          await f.open(async (browser: any) => {
-            browser.render(120);
-            if (change === 'pending selection') browser.handleInput('j');
-            browser.handleInput('\r'); // Open the actual displayed /a, not an unrendered index.
-            await f.flushDetails();
-            expect(f.opened[0].canonicalName).toBe('/a');
-            browser.handleInput('j'); // No return-frame render before navigation.
-            expect(selectedRow(browser)).toContain('/b');
-            browser.handleInput('q');
-          }, (overlay: any) => {
-            if (change === 'inserted item') f.put('inserted', { createdAt: 400 });
-            overlay.handleInput('q');
-          });
+          await f.open(
+            async (browser: any) => {
+              browser.render(120);
+              if (change === 'pending selection') browser.handleInput('j');
+              browser.handleInput('\r'); // Open the actual displayed /a, not an unrendered index.
+              await f.flushDetails();
+              expect(f.opened[0].canonicalName).toBe('/a');
+              browser.handleInput('j'); // No return-frame render before navigation.
+              expect(selectedRow(browser)).toContain('/b');
+              browser.handleInput('q');
+            },
+            (overlay: any) => {
+              if (change === 'inserted item') f.put('inserted', { createdAt: 400 });
+              overlay.handleInput('q');
+            },
+          );
         });
       },
     );
@@ -4085,24 +4192,30 @@ describe('extension completion delivery and TUI', () => {
         f.put('first', { createdAt: 200 });
         f.put('second', { createdAt: 100 });
         let browser: any;
-        await f.open((component: any) => {
-          browser = component;
-          browser.render(120);
-          browser.handleInput('\r');
-        }, (overlay: any, index: number) => {
-          if (index === 0) {
-            overlay.handleInput('\x1b[C');
-            browser.dispose(); // Simulate UI reset before the resolved navigation resumes.
-          } else overlay.handleInput('q');
-        });
+        await f.open(
+          (component: any) => {
+            browser = component;
+            browser.render(120);
+            browser.handleInput('\r');
+          },
+          (overlay: any, index: number) => {
+            if (index === 0) {
+              overlay.handleInput('\x1b[C');
+              browser.dispose(); // Simulate UI reset before the resolved navigation resumes.
+            } else overlay.handleInput('q');
+          },
+        );
         expect(f.opened.map((info: AgentInfo) => info.canonicalName)).toEqual(['/first']);
       });
     });
 
     test.each(['browser disposed', 'mount failed'])(
-      'real Pi overlay setup releases polling resources (%s)', async (failure) => {
+      'real Pi overlay setup releases polling resources (%s)',
+      async (failure) => {
         await withBrowser(async (f) => {
-          const { InteractiveMode } = await import(new URL('./modes/interactive/interactive-mode.js', sdkUrl).href);
+          const { InteractiveMode } = await import(
+            new URL('./modes/interactive/interactive-mode.js', sdkUrl).href
+          );
           codingAgent.initTheme('dark', false);
           f.put('worker');
           let browser: any;
@@ -4111,22 +4224,34 @@ describe('extension completion delivery and TUI', () => {
           let hides = 0;
           const host: any = {
             editor: { getText: () => '', setText() {} },
-            ui: { ...f.tui, showOverlay() {
-              if (failure === 'mount failed') throw new Error('overlay mounting failed');
-              return { hide() { hides++; } };
-            } },
+            ui: {
+              ...f.tui,
+              showOverlay() {
+                if (failure === 'mount failed') throw new Error('overlay mounting failed');
+                return {
+                  hide() {
+                    hides++;
+                  },
+                };
+              },
+            },
             extensionOverlays: new Map(),
-            pushExtensionDialog(component: any) { browser = component; },
+            pushExtensionDialog(component: any) {
+              browser = component;
+            },
             removeExtensionDialog() {},
           };
           f.ctx.ui.custom = (factory: any, options: any) =>
-            InteractiveMode.prototype.showExtensionCustom.call(host,
+            InteractiveMode.prototype.showExtensionCustom.call(
+              host,
               (tui: any, theme: any, keys: any, done: any) => {
                 if (!options?.overlay) closeBrowser = done;
                 const component = factory(tui, theme, keys, done);
                 if (options?.overlay) detail = component;
                 return component;
-              }, options);
+              },
+              options,
+            );
           const command = f.command();
           try {
             await new Promise((resolve) => setImmediate(resolve));
@@ -4138,7 +4263,10 @@ describe('extension completion delivery and TUI', () => {
             expect(detail['disposed']).toBe(true);
             expect(detail['pollInterval']).toBeNull();
             if (failure === 'mount failed') {
-              expect(f.notify).toHaveBeenCalledWith(expect.stringContaining('overlay mounting failed'), 'error');
+              expect(f.notify).toHaveBeenCalledWith(
+                expect.stringContaining('overlay mounting failed'),
+                'error',
+              );
               expect(selectedRow(browser)).toContain('/worker');
             } else expect(hides).toBe(1);
           } finally {
@@ -4155,10 +4283,15 @@ describe('extension completion delivery and TUI', () => {
         f.put('worker');
         await f.open(async (browser: any) => {
           browser.render(120);
-          f.requestRender.mockImplementationOnce(() => { throw new Error('return-frame request failed'); });
+          f.requestRender.mockImplementationOnce(() => {
+            throw new Error('return-frame request failed');
+          });
           browser.handleInput('\r');
           await f.flushDetails();
-          expect(f.notify).toHaveBeenCalledWith(expect.stringContaining('return-frame request failed'), 'error');
+          expect(f.notify).toHaveBeenCalledWith(
+            expect.stringContaining('return-frame request failed'),
+            'error',
+          );
           expect(selectedRow(browser)).toContain('/worker');
           browser.handleInput('\r');
           await f.flushDetails();
@@ -4172,19 +4305,24 @@ describe('extension completion delivery and TUI', () => {
       await withBrowser(async (f) => {
         f.put('worker');
         let release!: () => void;
-        const hold = new Promise<void>((resolve) => { release = resolve; });
-        await f.open(async (browser: any) => {
-          browser.render(120);
-          browser.handleInput('\r');
-          browser.dispose();
-          const renders = f.requestRender.mock.calls.length;
-          release();
-          await f.flushDetails();
-          expect(f.requestRender).toHaveBeenCalledTimes(renders);
-        }, async (overlay: any) => {
-          await hold;
-          overlay.handleInput('q');
+        const hold = new Promise<void>((resolve) => {
+          release = resolve;
         });
+        await f.open(
+          async (browser: any) => {
+            browser.render(120);
+            browser.handleInput('\r');
+            browser.dispose();
+            const renders = f.requestRender.mock.calls.length;
+            release();
+            await f.flushDetails();
+            expect(f.requestRender).toHaveBeenCalledTimes(renders);
+          },
+          async (overlay: any) => {
+            await hold;
+            overlay.handleInput('q');
+          },
+        );
       });
     });
 
@@ -4282,7 +4420,9 @@ test('six public tools carry native usage through metadata and the detail footer
       let component: any;
       let result: any;
       let close!: () => void;
-      const closed = new Promise<void>((resolve) => { close = resolve; });
+      const closed = new Promise<void>((resolve) => {
+        close = resolve;
+      });
       const frames: string[] = [];
       const tui = {
         terminal: { rows: 35 },
@@ -4332,9 +4472,7 @@ test('six public tools carry native usage through metadata and the detail footer
     };
     await commands.get('subagents').handler('', ctx);
     expect(detailOpened).toBe(1);
-    const resumed = JSON.parse(
-      (await execute('wait_agent', {})).content[0].text,
-    );
+    const resumed = JSON.parse((await execute('wait_agent', {})).content[0].text);
     expect(resumed).toEqual({ message: 'Wait completed.', timed_out: false });
     expect((await execute('read_agent_response', { target: 'worker' })).content[0].text).toContain(
       'response:sample fourteen',
@@ -4347,7 +4485,9 @@ test('six public tools carry native usage through metadata and the detail footer
       let component: any;
       let result: any;
       let close!: () => void;
-      const closed = new Promise<void>((resolve) => { close = resolve; });
+      const closed = new Promise<void>((resolve) => {
+        close = resolve;
+      });
       component = create(
         { terminal: { rows: 35 }, requestRender() {} },
         theme,

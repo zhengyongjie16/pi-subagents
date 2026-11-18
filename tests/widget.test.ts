@@ -657,7 +657,9 @@ describe('session status summary', () => {
             if (counts[status])
               expect(line).toContain(current.fg(color, `${counts[status]} ${status}`));
           }
-          expect(line).toEndWith(current.fg(active ? 'accent' : 'dim', ' · /subagents to view details'));
+          expect(line).toEndWith(
+            current.fg(active ? 'accent' : 'dim', ' · /subagents to view details'),
+          );
         };
         checkColors(theme);
         for (const width of [0, 1, 9, 10, 22, 32, 60, 80, 120]) {
@@ -705,7 +707,9 @@ describe('session status summary', () => {
     agents = [];
     counts = { running: 0, completed: 6, failed: 3, interrupted: 3 };
     widget.refresh();
-    expect(f.render()).toEqual(['○ Agents · 6 completed · 3 failed · 3 interrupted · /subagents to view details']);
+    expect(f.render()).toEqual([
+      '○ Agents · 6 completed · 3 failed · 3 interrupted · /subagents to view details',
+    ]);
     expect(f.component).toBe(component);
     expect(f.setWidget).toHaveBeenCalledTimes(1);
     expect(clock!.timers.size).toBe(0);

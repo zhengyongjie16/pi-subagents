@@ -19,6 +19,7 @@ export const PACKAGE_BASENAME = 'pi-subagents';
 export const SUBAGENT_DIR = path.join(getAgentDir(), PACKAGE_BASENAME);
 const CONFIG_PATH = path.join(SUBAGENT_DIR, 'config.json');
 const SYSTEM_PROMPT_PATH = path.join(SUBAGENT_DIR, 'SYSTEM.md');
+const APPEND_SYSTEM_PROMPT_PATH = path.join(SUBAGENT_DIR, 'APPEND_SYSTEM.md');
 const AGENTS_DIR = path.join(SUBAGENT_DIR, 'agents');
 const TEMP_ROOT = path.join(
   process.env.PI_SUBAGENT_TEMP_DIR || os.tmpdir(),
@@ -60,12 +61,10 @@ async function boundedWait<T>(
     if (onAbort) signal?.removeEventListener('abort', onAbort);
   }
 }
-export const DEFAULT_RETENTION_DAYS = 7;
+export const DEFAULT_RETENTION_DAYS = 14;
 export const DEFAULT_MODEL_RESPONSE_TIMEOUT_MS = 10 * 60_000;
 const ACTIVITY_PERSIST_INTERVAL_MS = 5_000;
 export const DEFAULT_THINKING = 'high';
-const DEFAULT_SUBAGENT_SYSTEM_PROMPT =
-  'You are a subagent working for a main agent. Work only on the assigned task and follow its scope precisely.';
 
 export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 const FINAL_STATUSES = new Set<AgentRuntimeStatus>(['completed', 'failed', 'interrupted']);
@@ -376,27 +375,8 @@ function ensurePrivateDir(directory: string, enforceMode = false): void {
   if (process.platform !== 'win32' && (enforceMode || !existed)) fs.chmodSync(directory, 0o700);
 }
 
-function ensureSystemPromptFile(): void {
-  if (fs.existsSync(SYSTEM_PROMPT_PATH)) return;
-  try {
-    fs.writeFileSync(SYSTEM_PROMPT_PATH, DEFAULT_SUBAGENT_SYSTEM_PROMPT, {
-      flag: 'wx',
-      mode: 0o600,
-    });
-  } catch (error: any) {
-    if (error?.code !== 'EEXIST') throw error;
-  }
-}
-
-function validateSystemPrompt(): void {
-  ensureSystemPromptFile();
-  const prompt = fs.readFileSync(SYSTEM_PROMPT_PATH, 'utf8');
-  if (!prompt.trim()) throw new Error(`Subagent system prompt is empty: ${SYSTEM_PROMPT_PATH}`);
-}
-
 function ensureBaseDirs(): void {
   fs.mkdirSync(AGENTS_DIR, { recursive: true });
-  ensureSystemPromptFile();
   const config = loadSubagentConfig();
   ensurePrivateDir(getRunsDir(config), !config.storageDir);
   ensurePrivateDir(SOCKET_DIR, true);
@@ -1402,10 +1382,8 @@ export class AgentManager {
     const { provider, modelId } = params.model ??
       templateModel ?? { provider: params.inheritedProvider, modelId: params.inheritedModelId };
     const config = loadSubagentConfig();
-    validateSystemPrompt();
     const extensions = normalizeList(definition?.extensions ?? config.extensions);
-    const tools =
-      definition?.tools === undefined ? undefined : normalizeTools(definition.tools);
+    const tools = definition?.tools === undefined ? undefined : normalizeTools(definition.tools);
     const thinking =
       params.thinking ?? definition?.thinking ?? params.inheritedThinking ?? DEFAULT_THINKING;
     const cwd = path.resolve(params.cwd);
@@ -1570,7 +1548,6 @@ export class AgentManager {
       checkCanceled();
       const initializing = !live.session;
       if (initializing) {
-        ensureSystemPromptFile();
         live.broadcaster.start();
         live.info.status = 'starting';
         live.info.lastActivity = Date.now();
@@ -1579,6 +1556,7 @@ export class AgentManager {
         live.initialization = createChildSession({
           info: live.info,
           systemPromptPath: SYSTEM_PROMPT_PATH,
+          appendSystemPromptPath: APPEND_SYSTEM_PROMPT_PATH,
           projectTrusted: this.options.projectTrusted?.(live.info.cwd),
           checkCanceled,
           onCreated: (session) => {

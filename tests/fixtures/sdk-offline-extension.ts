@@ -5,7 +5,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import {
   createAssistantMessageEventStream,
+  getCurrentSystemMessage,
   getCurrentSystemPrompt,
+  getCurrentTools,
   type AssistantMessage,
   type Model,
   type Provider,
@@ -18,6 +20,9 @@ export interface OfflineFixtureConfig {
   modelId?: string;
   prefix?: string;
   codemodeScript?: string;
+  toolCalls?: Array<{ name: string; arguments: Record<string, unknown> }>;
+  toolDescription?: string;
+  toolParameterDescription?: string;
   filtered?: boolean;
   filterAtStart?: boolean;
   changeModelAtStart?: boolean;
@@ -86,6 +91,9 @@ export default async function (pi: ExtensionAPI) {
       request,
       userTexts,
       systemPrompt: getCurrentSystemPrompt(context.messages),
+      systemMessage: getCurrentSystemMessage(context.messages),
+      tools: getCurrentTools(context.messages),
+      messages: context.messages,
     });
     void (async () => {
       const message: AssistantMessage = {
@@ -112,12 +120,16 @@ export default async function (pi: ExtensionAPI) {
         if (config.stopReason && request === 1) throw new Error('fixture ' + config.stopReason);
         if (config.compactionOutcome === 'failure' && request === 2)
           throw new Error('fixture compaction failure');
-        if (config.codemodeScript && request === 1) {
+        const nextTool =
+          config.toolCalls?.[request - 1] ??
+          (config.codemodeScript && request === 1
+            ? { name: 'codemode', arguments: { code: config.codemodeScript } }
+            : undefined);
+        if (nextTool) {
           const toolCall = {
             type: 'toolCall' as const,
-            id: 'codemode-' + invocation,
-            name: 'codemode',
-            arguments: { code: config.codemodeScript },
+            id: nextTool.name + '-' + invocation + '-' + request,
+            ...nextTool,
           };
           message.content.push(toolCall);
           message.stopReason = 'toolUse';
@@ -173,10 +185,16 @@ export default async function (pi: ExtensionAPI) {
   pi.registerTool({
     name: 'fixture_tool',
     label: 'Offline fixture',
-    description: 'Never calls a network',
-    parameters: Type.Object({}),
-    async execute() {
-      return { content: [{ type: 'text', text: 'fixture tool' }], details: {} };
+    description: config.toolDescription ?? 'Never calls a network',
+    parameters: Type.Object({
+      payload: Type.Optional(
+        Type.String({ description: config.toolParameterDescription ?? 'Opaque payload' }),
+      ),
+    }),
+    async execute(_id, args) {
+      record('tool', { arguments: args });
+      const text = args.payload === undefined ? 'fixture tool' : 'fixture tool: ' + args.payload;
+      return { content: [{ type: 'text', text }], details: {} };
     },
   });
   pi.on('session_start', async (_event, ctx) => {

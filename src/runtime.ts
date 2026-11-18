@@ -26,6 +26,7 @@ export interface ChildSessionOptions {
     extensionPaths?: string[];
   };
   systemPromptPath: string;
+  appendSystemPromptPath: string;
   /** Parent's effective trust decision for a matching working directory. */
   projectTrusted?: boolean;
   /** Transfers cleanup ownership, including when binding subsequently fails. */
@@ -75,17 +76,27 @@ function checkDiagnostics(
   if (errors.length) throw new Error(errors.join('\n'));
 }
 
+async function readOptionalPromptFile(path: string): Promise<string | undefined> {
+  try {
+    const source = await readFile(path, 'utf8');
+    const text = source.startsWith('\uFEFF') ? source.slice(1) : source;
+    return text.trim() ? text : undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
 /** Assemble one independent SDK session. The caller owns all lifecycle tracking and cleanup. */
 export async function createChildSession(options: ChildSessionOptions): Promise<AgentSession> {
   const { info, checkCanceled } = options;
   checkCanceled();
   const cwd = resolve(info.cwd);
-  const systemPromptPath = resolve(options.systemPromptPath);
-  // Pass the validated file path to preserve the loader's file semantics.
-  const systemPrompt = await readFile(systemPromptPath, 'utf8');
+  const [systemPrompt, appendSystemPrompt] = await Promise.all([
+    readOptionalPromptFile(resolve(options.systemPromptPath)),
+    readOptionalPromptFile(resolve(options.appendSystemPromptPath)),
+  ]);
   checkCanceled();
-  if (!systemPrompt.replace(/^\uFEFF/, '').trim())
-    throw new Error(`System prompt is empty: ${systemPromptPath}`);
 
   const agentDir = getAgentDir();
   // Gate project settings until the effective trust decision is resolved.
@@ -108,15 +119,15 @@ export async function createChildSession(options: ChildSessionOptions): Promise<
       noExtensions: true,
       noPromptTemplates: true,
       noThemes: true,
-      systemPrompt: systemPromptPath,
+      // Empty sources block discovery; overrides keep the already-read text opaque.
+      systemPrompt: '',
       appendSystemPrompt: [],
+      systemPromptOverride: () => systemPrompt,
+      appendSystemPromptOverride: () =>
+        appendSystemPrompt === undefined ? [] : [appendSystemPrompt],
       // Provide native tools inactive; the SDK owns activation through defaultTools/tools.
       additionalExtensionPaths: [
-        ...new Set([
-          ...(info.extensionPaths ?? []),
-          'builtin:codemode',
-          'builtin:tool-search',
-        ]),
+        ...new Set([...(info.extensionPaths ?? []), 'builtin:codemode', 'builtin:tool-search']),
       ],
       extensionFactories: [
         {
@@ -131,14 +142,40 @@ export async function createChildSession(options: ChildSessionOptions): Promise<
           replaceable: true,
           factory: createToolSearchExtension(),
         },
+        {
+          name: 'subagent-system-prompt',
+          hidden: true,
+          factory(pi) {
+            pi.on('before_agent_start', (event) => {
+              // Native custom-base semantics let SYSTEM.md replace this default rule too.
+              event.systemPromptOptions.promptGuidelines.push(
+                'You are a subagent working for a main agent. Work only on the assigned task and follow its scope precisely.',
+              );
+            });
+            // Run after configured extensions and project every system section patch.
+            // Keep opaque content and tool declarations; native forced prompts still apply.
+            pi.on('context_with_system', (event) => ({
+              messages: event.messages.map((message) =>
+                message.role === 'system' && message.sections
+                  ? {
+                      ...message,
+                      sections: Object.fromEntries(
+                        Object.entries(message.sections).filter(([name]) =>
+                          ['preamble', 'tools', 'rules', 'addendum'].includes(name),
+                        ),
+                      ),
+                    }
+                  : message,
+              ),
+            }));
+          },
+        },
       ],
     },
   });
   checkCanceled();
   const loggedDiagnostics = new Set<string>();
   checkDiagnostics(services, options.log, loggedDiagnostics);
-  if (!services.resourceLoader.getSystemPrompt()?.trim())
-    throw new Error(`System prompt is empty: ${systemPromptPath}`);
   // Only explicit +codemode opts in; providing its implementation must not enable it.
   // Resource loading reloads settings, so apply the explicit opt-in afterwards.
   if (explicitCodemode) {

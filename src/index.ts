@@ -131,11 +131,10 @@ function listBrowserAgents(manager: AgentManager, scopeId: string) {
   const infos = manager.listAgentInfos(undefined, scopeId);
   const active = infos.filter((info) => info.status === 'starting' || info.status === 'running');
   active.sort(
-    (a, b) => browserTimestamp(b.createdAt) - browserTimestamp(a.createdAt) || a.id.localeCompare(b.id),
+    (a, b) =>
+      browserTimestamp(b.createdAt) - browserTimestamp(a.createdAt) || a.id.localeCompare(b.id),
   );
-  const done = infos.filter((info) =>
-    ['completed', 'failed', 'interrupted'].includes(info.status),
-  );
+  const done = infos.filter((info) => ['completed', 'failed', 'interrupted'].includes(info.status));
   done.sort(
     (a, b) =>
       browserTimestamp(b.completedAt, b.updatedAt, b.createdAt) -
@@ -441,8 +440,7 @@ ${getAgentDefinitionsDescription()}`;
     get parameters() {
       return Type.Object({
         task_name: Type.String({
-          description:
-            'Unique in this parent session; use ASCII letters, digits, _, -, and /.',
+          description: 'Unique in this parent session; use ASCII letters, digits, _, -, and /.',
         }),
         message: Type.String({
           description: 'Self-contained task: context, paths, constraints, and expected output.',
@@ -649,8 +647,7 @@ ${getAgentDefinitionsDescription()}`;
       {
         timeout_ms: Type.Optional(
           Type.Union([Type.Integer(), Type.Null()], {
-            description:
-              `Timeout in ms. Default ${DEFAULT_WAIT_TIMEOUT_MS} (omitted/null); min ${MIN_WAIT_TIMEOUT_MS} (clamped); max ${MAX_WAIT_TIMEOUT_MS}.`,
+            description: `Timeout in ms. Default ${DEFAULT_WAIT_TIMEOUT_MS} (omitted/null); min ${MIN_WAIT_TIMEOUT_MS} (clamped); max ${MAX_WAIT_TIMEOUT_MS}.`,
           }),
         ),
       },
@@ -671,8 +668,7 @@ ${getAgentDefinitionsDescription()}`;
     },
     async execute(_id: string, params: any, signal: AbortSignal | undefined) {
       const requested = params.timeout_ms ?? DEFAULT_WAIT_TIMEOUT_MS;
-      if (!Number.isInteger(requested))
-        throw new Error('timeout_ms must be an integer or null');
+      if (!Number.isInteger(requested)) throw new Error('timeout_ms must be an integer or null');
       if (requested > MAX_WAIT_TIMEOUT_MS)
         throw new Error(`timeout_ms must be at most ${MAX_WAIT_TIMEOUT_MS}`);
       const effective = Math.max(MIN_WAIT_TIMEOUT_MS, requested);
@@ -979,31 +975,33 @@ ${getAgentDefinitionsDescription()}`;
       const { terminal, outputPad } = pi.getSettings();
       let closeOverlay: (() => void) | undefined;
       let overlay: SubagentPeekOverlay | undefined;
-      const navigation = await ctx.ui.custom(
-        (tui: any, theme: any, _keybindings: any, done: any) => {
-          closeOverlay = () => done();
-          overlay = new SubagentPeekOverlay(tui, theme, info, done, nativeCodemodeRenderers, {
-            showImages: terminal?.showImages,
-            imageWidthCells: terminal?.imageWidthCells,
-            outputPad,
-          });
-          return overlay;
-        },
-        {
-          overlay: true,
-          // Pi installs overlays asynchronously; a UI reset may dispose the browser first.
-          onHandle: () => {
-            if (isDisposed()) closeOverlay?.();
+      const navigation = await ctx.ui
+        .custom(
+          (tui: any, theme: any, _keybindings: any, done: any) => {
+            closeOverlay = () => done();
+            overlay = new SubagentPeekOverlay(tui, theme, info, done, nativeCodemodeRenderers, {
+              showImages: terminal?.showImages,
+              imageWidthCells: terminal?.imageWidthCells,
+              outputPad,
+            });
+            return overlay;
           },
-          overlayOptions: {
-            anchor: 'right-center',
-            width: '45%',
-            minWidth: 50,
-            maxHeight: 60,
-            margin: { right: 2, top: 2, bottom: 2 },
+          {
+            overlay: true,
+            // Pi installs overlays asynchronously; a UI reset may dispose the browser first.
+            onHandle: () => {
+              if (isDisposed()) closeOverlay?.();
+            },
+            overlayOptions: {
+              anchor: 'right-center',
+              width: '45%',
+              minWidth: 50,
+              maxHeight: 60,
+              margin: { right: 2, top: 2, bottom: 2 },
+            },
           },
-        },
-      ).finally(() => overlay?.dispose()); // Also release timers if Pi rejects overlay mounting.
+        )
+        .finally(() => overlay?.dispose()); // Also release timers if Pi rejects overlay mounting.
       if (isDisposed() || (navigation !== 'previous' && navigation !== 'next')) return;
 
       const { active, done } = listBrowserAgents(manager, scopeId);
@@ -1069,7 +1067,10 @@ ${getAgentDefinitionsDescription()}`;
           const theme = ctx.ui.theme ?? factoryTheme;
           const fg = theme.fg.bind(theme);
           // Navigation, resize and theme changes only repaint the current data snapshot.
-          const { active, done: settled } = snapshot ??= listBrowserAgents(manager, currentSessionId);
+          const { active, done: settled } = (snapshot ??= listBrowserAgents(
+            manager,
+            currentSessionId,
+          ));
           const entries = [...active, ...settled];
           selected = Math.max(0, Math.min(selected, entries.length - 1));
           displayedCount = entries.length;
@@ -1093,7 +1094,10 @@ ${getAgentDefinitionsDescription()}`;
           const nameWidth = Math.min(28, Math.max(8, width - fixedWidth - 8));
           const modelWidth = Math.max(0, Math.min(28, width - fixedWidth - nameWidth));
           let groupStart = 0;
-          for (const [label, group] of [['Active', active], ['Done', settled]] as const) {
+          for (const [label, group] of [
+            ['Active', active],
+            ['Done', settled],
+          ] as const) {
             if (label === 'Active' && !group.length) continue;
             const groupEnd = groupStart + group.length;
             lines.push(fg('dim', ` ${label} (${group.length})`));

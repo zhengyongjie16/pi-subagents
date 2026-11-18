@@ -10,7 +10,11 @@ import {
   type CoreFixtureState,
 } from './fixtures/core-sdk-fixture.js';
 import type { AgentInfo, AgentResponseEntry } from '../src/core.js';
-import { parseStreamingJson, type AssistantMessage } from '@earendil-works/pi-ai';
+import {
+  getCurrentSystemMessage,
+  parseStreamingJson,
+  type AssistantMessage,
+} from '@earendil-works/pi-ai';
 import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as os from 'node:os';
@@ -458,7 +462,9 @@ describe('agent templates', () => {
     const chmod = spyOn(fs, 'chmodSync');
     try {
       expect(listAgentDefinitions().map(({ name }) => name)).toEqual([
-        'explorer', 'general', 'worker',
+        'explorer',
+        'general',
+        'worker',
       ]);
       expect(fs.readdirSync(path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents'))).toEqual([]);
       expect(mkdir.mock.calls.map(([directory]) => String(directory))).toEqual([
@@ -509,11 +515,13 @@ describe('agent templates', () => {
       fs.writeFileSync(file, text);
       try {
         expect(getAgentDefinition(name)).toEqual(parseAgentDefinitionText(text, 'custom-override'));
-        expect(listAgentDefinitions().filter((definition) => definition.name === name)).toHaveLength(1);
+        expect(
+          listAgentDefinitions().filter((definition) => definition.name === name),
+        ).toHaveLength(1);
         const description = getAgentDefinitionsDescription();
-        expect(description.split('\n').filter((line) => line.startsWith('- `' + name + '`'))).toEqual([
-          '- `' + name + '` — Custom role.',
-        ]);
+        expect(
+          description.split('\n').filter((line) => line.startsWith('- `' + name + '`')),
+        ).toEqual(['- `' + name + '` — Custom role.']);
         // Edits and deletion take effect for subsequent lookups without a cache.
         fs.writeFileSync(file, text + 'Custom child instructions.');
         expect(getAgentDefinition(name)?.prompt).toBe('Custom child instructions.');
@@ -528,14 +536,19 @@ describe('agent templates', () => {
     const directory = path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents');
     const files = ['first-duplicate.md', 'second-duplicate.md'];
     for (const file of files)
-      fs.writeFileSync(path.join(directory, file), '---\nname: worker\ndescription: ' + file + '\n---');
+      fs.writeFileSync(
+        path.join(directory, file),
+        '---\nname: worker\ndescription: ' + file + '\n---',
+      );
     try {
       const first = fs.readdirSync(directory).find((file) => files.includes(file))!;
       expect(getAgentDefinition('worker')?.description).toBe(first);
       expect(listAgentDefinitions().filter(({ name }) => name === 'worker')).toHaveLength(1);
-      expect(getAgentDefinitionsDescription().split('\n').filter((line) => line.startsWith('- `worker`'))).toEqual([
-        '- `worker` — ' + first,
-      ]);
+      expect(
+        getAgentDefinitionsDescription()
+          .split('\n')
+          .filter((line) => line.startsWith('- `worker`')),
+      ).toEqual(['- `worker` — ' + first]);
     } finally {
       for (const file of files) fs.rmSync(path.join(directory, file), { force: true });
     }
@@ -552,7 +565,9 @@ describe('agent templates', () => {
       fs.writeFileSync(valid, '---\nname: custom-valid\n---\nValid instructions.');
       const definitions = listAgentDefinitions();
       expect(definitions.find(({ name }) => name === 'worker')).toEqual(worker);
-      expect(definitions.find(({ name }) => name === 'custom-valid')?.prompt).toBe('Valid instructions.');
+      expect(definitions.find(({ name }) => name === 'custom-valid')?.prompt).toBe(
+        'Valid instructions.',
+      );
       expect(warn).toHaveBeenCalledTimes(1);
       expect(String(warn.mock.calls[0][0])).toContain(invalid);
     } finally {
@@ -1322,10 +1337,7 @@ function spawnParams(parentSessionId: string, task_name: string, message: string
 const configFile = path.join(TEST_AGENT_DIR, 'pi-subagents', 'config.json');
 function writeConfig(config: Record<string, any> = {}) {
   fs.mkdirSync(path.dirname(configFile), { recursive: true });
-  fs.writeFileSync(
-    configFile,
-    JSON.stringify({ extensions: [CORE_SDK_EXTENSION], ...config }),
-  );
+  fs.writeFileSync(configFile, JSON.stringify({ extensions: [CORE_SDK_EXTENSION], ...config }));
 }
 let fixture: CoreFixtureState;
 beforeEach(() => {
@@ -1989,7 +2001,10 @@ describe('spawn model and thinking resolution', () => {
         expect(manager.getAgentInfo('builtin-child', parent).status).toBe('completed');
         await manager.sendMessage(parent, 'builtin-child', 'second task');
         await settled(manager, info);
-        expect(fixture.instances[0].inputs.map(({ text }) => text)).toEqual([firstInput, 'second task']);
+        expect(fixture.instances[0].inputs.map(({ text }) => text)).toEqual([
+          firstInput,
+          'second task',
+        ]);
       } finally {
         await manager.shutdown();
       }
@@ -3566,33 +3581,54 @@ describe('native hot session lifecycle', () => {
     }
   });
 
-  test('resident resources do not reload per run; actual cold recreation reads the edited SYSTEM', async () => {
-    const file = path.join(TEST_AGENT_DIR, 'pi-subagents', 'SYSTEM.md');
+  test('SYSTEM replaces the native base while APPEND is added; warm reuse keeps both and cold recreation rereads both', async () => {
+    const system = path.join(TEST_AGENT_DIR, 'pi-subagents', 'SYSTEM.md');
+    const append = path.join(TEST_AGENT_DIR, 'pi-subagents', 'APPEND_SYSTEM.md');
     const manager = new AgentManager();
-    const original = fs.readFileSync(file, 'utf8');
+    const originalSystem = fs.existsSync(system) ? fs.readFileSync(system) : undefined;
+    const originalAppend = fs.existsSync(append) ? fs.readFileSync(append) : undefined;
     const parent = 'hot-resources-' + randomUUID();
     try {
-      fs.writeFileSync(file, 'FIRST_RESIDENT_SYSTEM');
+      fs.writeFileSync(
+        system,
+        'FIRST_RESIDENT_SYSTEM\n<docs>User-authored documentation stays.</docs>',
+      );
+      fs.writeFileSync(
+        append,
+        'FIRST_RESIDENT_APPEND\n<skills>User-authored skill guidance stays.</skills>',
+      );
       await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
       const info = manager.getAgentInfo('worker', parent);
       await settled(manager, info);
-      fs.writeFileSync(file, 'SECOND_COLD_SYSTEM');
+      const first = getCurrentSystemMessage(fixture.instances[0].requests[0].context.messages)!;
+      expect(first.sections).toEqual({
+        preamble: 'FIRST_RESIDENT_SYSTEM\n<docs>User-authored documentation stays.</docs>',
+        addendum:
+          '<addendum>\nFIRST_RESIDENT_APPEND\n<skills>User-authored skill guidance stays.</skills>\n</addendum>',
+      });
+      fs.writeFileSync(system, 'SECOND_COLD_SYSTEM');
+      fs.writeFileSync(append, 'SECOND_COLD_APPEND');
       await manager.sendMessage(parent, 'worker', 'second');
       await settled(manager, info);
       expect(fixture.instances).toHaveLength(1);
-      const second = JSON.stringify(fixture.instances[0].requests[1].context);
-      expect(second).toContain('FIRST_RESIDENT_SYSTEM');
-      expect(second).not.toContain('SECOND_COLD_SYSTEM');
+      const second = getCurrentSystemMessage(fixture.instances[0].requests[1].context.messages)!;
+      expect(second.sections).toEqual(first.sections);
       await manager['waitForTermination'](manager['live'].get(info.id)!);
       await manager.sendMessage(parent, 'worker', 'third');
       await settled(manager, info);
       expect(fixture.instances).toHaveLength(2);
-      expect(JSON.stringify(fixture.instances[1].requests[0].context)).toContain(
-        'SECOND_COLD_SYSTEM',
-      );
+      expect(
+        getCurrentSystemMessage(fixture.instances[1].requests[0].context.messages)!.sections,
+      ).toEqual({
+        preamble: 'SECOND_COLD_SYSTEM',
+        addendum: '<addendum>\nSECOND_COLD_APPEND\n</addendum>',
+      });
     } finally {
-      fs.writeFileSync(file, original);
       await manager.shutdown();
+      if (originalSystem === undefined) fs.rmSync(system, { force: true });
+      else fs.writeFileSync(system, originalSystem);
+      if (originalAppend === undefined) fs.rmSync(append, { force: true });
+      else fs.writeFileSync(append, originalAppend);
     }
   });
 
@@ -4533,25 +4569,42 @@ describe('startup storage failures', () => {
     }
   });
 
-  test("rejects an empty configured system prompt instead of falling back to Pi's default", async () => {
-    const parentSessionId = 'empty-system-prompt';
-    const systemPromptFile = path.join(TEST_AGENT_DIR, 'pi-subagents', 'SYSTEM.md');
-    fs.mkdirSync(path.dirname(systemPromptFile), { recursive: true });
-    fs.writeFileSync(systemPromptFile, '\n');
-    const manager = new AgentManager();
-    try {
-      await expect(
-        manager.spawnAgent(spawnParams(parentSessionId, 'worker', 'first')),
-      ).rejects.toThrow('Subagent system prompt is empty');
-    } finally {
-      await manager.shutdown();
-      fs.rmSync(path.join(getRunsDir(), parentScopeKey(parentSessionId)), {
-        recursive: true,
-        force: true,
-      });
-      fs.rmSync(systemPromptFile, { force: true });
-    }
-  });
+  test.each(['missing', 'blank'])(
+    'a %s SYSTEM uses the native default base and a blank APPEND adds nothing',
+    async (state) => {
+      const parent = 'empty-system-prompt-' + randomUUID();
+      const system = path.join(TEST_AGENT_DIR, 'pi-subagents', 'SYSTEM.md');
+      const append = path.join(TEST_AGENT_DIR, 'pi-subagents', 'APPEND_SYSTEM.md');
+      const manager = new AgentManager();
+      const originalSystem = fs.existsSync(system) ? fs.readFileSync(system) : undefined;
+      const originalAppend = fs.existsSync(append) ? fs.readFileSync(append) : undefined;
+      try {
+        if (state === 'missing') fs.rmSync(system, { force: true });
+        else fs.writeFileSync(system, '\uFEFF \n\t');
+        fs.writeFileSync(append, '\uFEFF \n\t');
+        await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
+        await settled(manager, manager.getAgentInfo('worker', parent));
+        const message = getCurrentSystemMessage(fixture.instances[0].requests[0].context.messages)!;
+        expect(Object.keys(message.sections!)).toEqual(['preamble', 'tools', 'rules']);
+        expect(message.sections!.preamble).toContain(
+          'You are a coding assistant running inside pi',
+        );
+        expect(message.sections!.tools).toContain('- read:');
+        expect(message.sections!.rules).toContain('- Be concise in your responses');
+        expect(message.sections!.rules).toContain(
+          'You are a subagent working for a main agent. Work only on the assigned task and follow its scope precisely.',
+        );
+        expect(manager.readAgentResponse('worker', parent).status).toBe('completed');
+        expect(fs.existsSync(system)).toBe(state !== 'missing');
+      } finally {
+        await manager.shutdown();
+        if (originalSystem === undefined) fs.rmSync(system, { force: true });
+        else fs.writeFileSync(system, originalSystem);
+        if (originalAppend === undefined) fs.rmSync(append, { force: true });
+        else fs.writeFileSync(append, originalAppend);
+      }
+    },
+  );
 
   test('a first-spawn JSONL creation failure publishes a failed completion and inactive status', async () => {
     const parentSessionId = 'lifecycle-jsonl-creation-' + randomUUID();
@@ -5271,6 +5324,50 @@ describe('context usage formatting', () => {
 });
 
 describe('SDK business scope and resources', () => {
+  test('creates neither prompt file, includes the native identity rule once, and preserves user prompt files', async () => {
+    const system = path.join(TEST_AGENT_DIR, 'pi-subagents', 'SYSTEM.md');
+    const append = path.join(TEST_AGENT_DIR, 'pi-subagents', 'APPEND_SYSTEM.md');
+    const originalSystem = fs.existsSync(system) ? fs.readFileSync(system) : undefined;
+    const originalAppend = fs.existsSync(append) ? fs.readFileSync(append) : undefined;
+    const managers: InstanceType<typeof AgentManager>[] = [];
+    const parent = 'default-identity-' + randomUUID();
+    try {
+      fs.rmSync(system, { force: true });
+      fs.rmSync(append, { force: true });
+      const manager = new AgentManager();
+      managers.push(manager);
+      const identity =
+        'You are a subagent working for a main agent. Work only on the assigned task and follow its scope precisely.';
+      expect(fs.existsSync(system)).toBe(false);
+      expect(fs.existsSync(append)).toBe(false);
+      await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
+      const info = manager.getAgentInfo('worker', parent);
+      await settled(manager, info);
+      await manager.sendMessage(parent, 'worker', 'second');
+      await settled(manager, info);
+      expect(fixture.instances[0].requests).toHaveLength(2);
+      for (const request of fixture.instances[0].requests) {
+        const message = getCurrentSystemMessage(request.context.messages)!;
+        expect(Object.keys(message.sections!)).toEqual(['preamble', 'tools', 'rules']);
+        expect(message.sections!.rules!.split(identity)).toHaveLength(2);
+      }
+      expect(fs.existsSync(system)).toBe(false);
+      expect(fs.existsSync(append)).toBe(false);
+
+      fs.writeFileSync(system, 'USER_SYSTEM_MUST_SURVIVE');
+      fs.writeFileSync(append, 'USER_APPEND_MUST_SURVIVE');
+      managers.push(new AgentManager());
+      expect(fs.readFileSync(system, 'utf8')).toBe('USER_SYSTEM_MUST_SURVIVE');
+      expect(fs.readFileSync(append, 'utf8')).toBe('USER_APPEND_MUST_SURVIVE');
+    } finally {
+      await Promise.allSettled(managers.map((manager) => manager.shutdown()));
+      if (originalSystem === undefined) fs.rmSync(system, { force: true });
+      else fs.writeFileSync(system, originalSystem);
+      if (originalAppend === undefined) fs.rmSync(append, { force: true });
+      else fs.writeFileSync(append, originalAppend);
+    }
+  });
+
   test('identical task names stay parent-scoped; all-sessions is only a read view', async () => {
     const parentA = 'scope-a-' + randomUUID();
     const parentB = 'scope-b-' + randomUUID();
@@ -5370,7 +5467,7 @@ describe('SDK business scope and resources', () => {
     }
   });
 
-  test('discovers skills independently while retaining explicit SYSTEM/extensions and fresh context', async () => {
+  test('discovers skills internally without outbound summaries while retaining literal SYSTEM/extensions and fresh context', async () => {
     const parent = 'resource-policy-' + randomUUID();
     const root = fs.mkdtempSync(path.join(TEST_AGENT_DIR, 'resources-'));
     const cwd = path.join(root, 'project', 'nested');
@@ -5385,7 +5482,10 @@ describe('SDK business scope and resources', () => {
       fs.writeFileSync(file, content);
       files.push(file);
     };
-    for (const dir of [TEST_AGENT_DIR, root, path.dirname(cwd), cwd]) {
+    for (const dir of [TEST_AGENT_DIR, root, path.dirname(cwd), cwd].flatMap((dir) => [
+      dir,
+      path.join(dir, '.pi'),
+    ])) {
       for (const name of [
         'AGENTS.md',
         'AGENTS.override.md',
@@ -5413,6 +5513,14 @@ describe('SDK business scope and resources', () => {
       content: 'FORBIDDEN_PARENT_CONVERSATION',
       timestamp: Date.now(),
     });
+    const discoveredSkills: string[][] = [];
+    fixture.onLoad = (pi) => {
+      pi.on('before_agent_start', (event) => {
+        discoveredSkills.push(
+          (event.systemPromptOptions.skills ?? []).map((skill) => skill.description),
+        );
+      });
+    };
     writeConfig({ maxIdleSessions: 0 }); // This contract exercises actual cold disposal/reopening.
     const manager = new AgentManager({ projectTrusted: () => true });
     try {
@@ -5435,7 +5543,8 @@ describe('SDK business scope and resources', () => {
       expect(request.text).toBe('EXPLICIT_TEMPLATE_BODY\n\nassigned work');
       const input = JSON.stringify(request.context);
       expect(input).toContain(literalTarget.replaceAll('\\', '\\\\'));
-      expect(input).toContain('AUTO_CORE_SKILL_DESCRIPTION');
+      expect(discoveredSkills[0]).toContain('AUTO_CORE_SKILL_DESCRIPTION');
+      expect(input).not.toContain('AUTO_CORE_SKILL_DESCRIPTION');
       expect(input).not.toContain('FORBIDDEN_');
       expect(input).not.toContain('Automatically discovered skill body.');
       fs.writeFileSync(ownSystem, 'UPDATED_OWN_SYSTEM');
@@ -5448,7 +5557,8 @@ describe('SDK business scope and resources', () => {
       expect(JSON.stringify(fixture.instances[1].requests[0].context)).toContain(
         'UPDATED_OWN_SYSTEM',
       );
-      expect(JSON.stringify(fixture.instances[1].requests[0].context)).toContain(
+      expect(discoveredSkills[1]).toContain('RESUMED_AUTO_SKILL_DESCRIPTION');
+      expect(JSON.stringify(fixture.instances[1].requests[0].context)).not.toContain(
         'RESUMED_AUTO_SKILL_DESCRIPTION',
       );
       expect(fixture.instances[1].requests[0].text).toBe('continuation');
@@ -5472,7 +5582,9 @@ describe('SDK business scope and resources', () => {
       const fields =
         source === 'template'
           ? '\nextensions: ' + extensions.join(', ')
-          : source === 'empty template' ? '\nextensions:' : '';
+          : source === 'empty template'
+            ? '\nextensions:'
+            : '';
       if (source !== 'config')
         fs.writeFileSync(template, '---\nname: ' + name + fields + '\n---\n');
       const active: string[][] = [];
@@ -5482,9 +5594,8 @@ describe('SDK business scope and resources', () => {
       writeConfig({
         maxIdleSessions: 0,
         // A nonempty template replaces this list; its unused entry must never be loaded.
-        extensions: source === 'template'
-          ? [path.join(TEST_AGENT_DIR, 'must-not-load.ts')]
-          : extensions,
+        extensions:
+          source === 'template' ? [path.join(TEST_AGENT_DIR, 'must-not-load.ts')] : extensions,
       });
       const manager = new AgentManager();
       try {
@@ -5524,7 +5635,9 @@ describe('SDK business scope and resources', () => {
       expect(info.extensions).toBeUndefined();
       expect(info.extensionPaths).toBeUndefined();
       expect(info.tools).toBeUndefined();
-      expect(Object.hasOwn(JSON.parse(fs.readFileSync(info.infoFile, 'utf8')), 'tools')).toBe(false);
+      expect(Object.hasOwn(JSON.parse(fs.readFileSync(info.infoFile, 'utf8')), 'tools')).toBe(
+        false,
+      );
       expect(fixture.instances).toHaveLength(0);
     } finally {
       await manager.shutdown();

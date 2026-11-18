@@ -98,7 +98,9 @@ A non-empty template extension list replaces the top-level `extensions` in `conf
 
 ### Prompts and resources
 
-The base system prompt comes from `~/.pi/agent/pi-subagents/SYSTEM.md`, created with a minimal default on first use. Template `description` is shown to the parent as delegation guidance; only the Markdown body is prepended to the child's first task message, not used as a separate system prompt. Built-ins use the same distinction: worker ownership guidance stays in its description, while its collaboration reminder is in the task prefix.
+Under `~/.pi/agent/pi-subagents/`, optional `SYSTEM.md` replaces the default base, including the built-in rule above; missing or blank content uses native defaults. Optional `APPEND_SYSTEM.md` appends user instructions to either base without replacing it.
+
+Generated prompts sent to the model retain only the base, tools, rules, and appended instructions; generated docs, skill summaries, and cwd sections are omitted. User-authored text and tool declarations are unchanged. Global/project `SYSTEM.md` and `APPEND_SYSTEM.md` are not loaded automatically.
 
 Skills follow Pi's native discovery, settings, and project trust; parent-session skill selections are not copied. Automatic extension, prompt-template, theme, and context-file discovery is disabled, including `AGENTS.md` and `CLAUDE.md`. Apart from the native codemode and tool-search providers, only explicitly configured extensions are loaded.
 
@@ -110,7 +112,7 @@ Optional settings live in `~/.pi/agent/pi-subagents/config.json`:
 
 ```json
 {
-  "retentionDays": 7,
+  "retentionDays": 14,
   "maxIdleSessions": 4,
   "modelResponseTimeoutMs": 600000,
   "modelsFromEnabledModels": true,
@@ -121,7 +123,7 @@ Optional settings live in `~/.pi/agent/pi-subagents/config.json`:
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `storageDir` | `~/.pi/agent/pi-subagents/runs` | Run history; accepts absolute, home-relative, or config-directory-relative paths |
-| `retentionDays` | `7` | Remove expired inactive runs and saved outputs at manager startup; `0` disables cleanup |
+| `retentionDays` | `14` | Remove expired inactive runs and saved outputs at manager startup; `0` disables cleanup |
 | `maxIdleSessions` | `4` | LRU cap on idle SDK sessions, not active tasks; `0` closes sessions after each run |
 | `modelResponseTimeoutMs` | `600000` | Per-assistant-response timeout, excluding tools and total task runtime; `0` disables it |
 | `shortcut` | Unbound | Browser shortcut, for example `ctrl+shift+a` |
@@ -141,7 +143,7 @@ Unavailable allowlist entries produce warnings. A selected model is validated ag
 
 - **Automatic results:** completed and failed runs notify the parent, including during a wait; an uninterrupted idle parent starts a continuation turn. Notifications during an active wait share the parent's natural continuation rather than starting an extra turn. Canceling a wait does not stop agents.
 - **Activity waits:** use `wait_agent` only when blocked, with `{}` or an optional `timeout_ms` integer/null. Omitted/null defaults to 30,000 ms; values below 10,000 ms (including zero and negatives) are raised to 10,000 ms, and values above 3,600,000 ms are rejected. Clamped waits append an explanation to the message. There are no `targets`: a wait observes parent input from every source (including extension and follow-up input), agent notifications, or timeout—not a particular child's terminal status. It returns only `{ "message": "...", "timed_out": false }`: `Wait completed.` for a notification, `Wait interrupted by new input.` for input, or `Wait timed out.` with `timed_out: true`. Original input and notification content still reaches Pi normally; read a specific child with `read_agent_response`. The latest activity before a wait can satisfy it immediately and is consumed once; old pending activity is cleared before preparing the next model context. Session changes cancel waits and clear pending activity.
-- **Session reuse:** completion, ordinary model errors, and interruption leave sessions reusable once pending work drains. Reclaimed sessions reopen saved history; missing history is an error. Template edits do not change existing agents' saved configuration. Reused sessions keep loaded resources; rebuilt sessions reread the system prompt and rediscover skills.
+- **Session reuse:** completion, ordinary model errors, and interruption leave sessions reusable once pending work drains. Reclaimed sessions reopen saved history; missing history is an error. Template edits do not change existing agents' saved configuration. Reused sessions keep loaded resources; rebuilt sessions reread both prompt files and rediscover skills.
 - **Shared process:** cancellation is cooperative and does not undo completed tool actions. Child extensions run headlessly and share the host's event loop and module state; unresponsive tools or extensions can affect the parent.
 - **Output:** notifications and response text use a 50 KB / 2,000-line truncation budget. Full output is saved under `storageDir/_outputs`, with a readable path in the notice. Structured response data remains complete even when the text preview is truncated.
 

@@ -52,7 +52,7 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
     await import('../src/runtime.ts');
   const { CONFIG_DIR_NAME, getAgentDir, ProjectTrustStore, SessionManager } =
     await import('@earendil-works/pi-coding-agent');
-  const { getCurrentTools } = await import('@earendil-works/pi-ai');
+  const { getCurrentSystemMessage, getCurrentTools } = await import('@earendil-works/pi-ai');
   const fixtureSource = fileURLToPath(
     new URL('./fixtures/sdk-offline-extension.ts', import.meta.url),
   );
@@ -69,6 +69,19 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
     defaultModel: 'must-not-change',
     defaultThinkingLevel: 'low',
   };
+  const defaultIdentity =
+    'You are a subagent working for a main agent. Work only on the assigned task and follow its scope precisely.';
+  const allowedPromptSections = new Set(['preamble', 'tools', 'rules', 'addendum']);
+  const codemodeGuideline =
+    'Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls.';
+  function assertFilteredRequest(request: EventRecord): void {
+    assert.equal(request.messages[0]?.role, 'system', 'provider must receive a system head');
+    for (const message of request.messages) {
+      if (message.role !== 'system') continue;
+      for (const name of Object.keys(message.sections ?? {}))
+        assert.ok(allowedPromptSections.has(name), 'request leaked native section: ' + name);
+    }
+  }
   function write(file: string, contents: string): void {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, contents);
@@ -83,6 +96,7 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
     extensionDir: string;
     extensionPath: string;
     systemPromptPath: string;
+    appendSystemPromptPath: string;
     info: ChildSessionOptions['info'];
     errors: unknown[];
     logs: string[];
@@ -103,7 +117,8 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
     const cwd = path.join(root, 'work', 'project');
     const extensionDir = path.join(root, 'explicit-extension');
     const extensionPath = path.join(extensionDir, 'index.ts');
-    const systemPromptPath = path.join(root, 'child-SYSTEM.md');
+    const systemPromptPath = path.join(agentDir, 'pi-subagents', 'SYSTEM.md');
+    const appendSystemPromptPath = path.join(agentDir, 'pi-subagents', 'APPEND_SYSTEM.md');
     const configPath = path.join(extensionDir, 'sdk-fixture.json');
     const eventsPath = path.join(extensionDir, 'sdk-events.jsonl');
     const previousEnvironment = Object.fromEntries(
@@ -132,7 +147,6 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
     json(path.join(agentDir, 'settings.json'), baseSettings);
     json(path.join(agentDir, 'auth.json'), {});
     json(path.join(agentDir, 'models.json'), { providers: {} });
-    write(systemPromptPath, 'CHILD_EXPLICIT_SYSTEM');
     const f: Fixture = {
       root,
       agentDir,
@@ -140,6 +154,7 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
       extensionDir,
       extensionPath,
       systemPromptPath,
+      appendSystemPromptPath,
       info,
       errors,
       logs,
@@ -149,6 +164,7 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
         const promise = createChildSession({
           info,
           systemPromptPath,
+          appendSystemPromptPath,
           checkCanceled() {},
           onError: (error) => {
             errors.push(error);
@@ -245,8 +261,114 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
     return accepted;
   }
 
+  test('default missing prompt files use native rules identity without creating files or discovering global/project context', async () =>
+    withFixture({}, async (f) => {
+      assert.equal(fs.existsSync(f.systemPromptPath), false);
+      assert.equal(fs.existsSync(f.appendSystemPromptPath), false);
+      for (const dir of [
+        f.agentDir,
+        f.root,
+        path.dirname(f.cwd),
+        f.cwd,
+        path.join(f.cwd, CONFIG_DIR_NAME),
+      ])
+        for (const name of [
+          'SYSTEM.md',
+          'APPEND_SYSTEM.md',
+          'AGENTS.md',
+          'AGENTS.override.md',
+          'CLAUDE.md',
+        ])
+          write(path.join(dir, name), 'FORBIDDEN_AUTOMATIC_CONTEXT');
+      write(
+        path.join(f.agentDir, 'skills', 'visible-skill', 'SKILL.md'),
+        '---\nname: visible-skill\ndescription: AUTO_SKILL_METADATA\n---\nSkill body',
+      );
+      const session = await f.create({ projectTrusted: true });
+      assert.equal(session.resourceLoader.getSystemPrompt(), undefined);
+      assert.deepEqual(session.resourceLoader.getAppendSystemPrompt(), []);
+      assert.deepEqual(session.resourceLoader.getAgentsFiles().agentsFiles, []);
+      assert.equal(session.resourceLoader.getSkills().skills.length, 1);
+      // SDK metadata remains complete; only the provider boundary is restricted.
+      assert.match(session.systemPrompt, /AUTO_SKILL_METADATA|<skills>/);
+      assert.match(session.systemPrompt, /<docs>/);
+      assert.match(session.systemPrompt, /<cwd>/);
+      await prompt(session, 'Default child request');
+      const request = f.events().find((event) => event.type === 'request')!;
+      assertFilteredRequest(request);
+      const native = getCurrentSystemMessage(session.messages)!.sections!;
+      assert.deepEqual(request.systemMessage.sections, {
+        preamble: native.preamble,
+        tools: native.tools,
+        rules: native.rules,
+      });
+      assert.equal(request.systemMessage.content, '');
+      assert.equal(request.systemMessage.sections.addendum, undefined);
+      assert.equal(request.systemMessage.sections.rules.split(defaultIdentity).length - 1, 1);
+      assert.equal(request.systemPrompt.split(defaultIdentity).length - 1, 1);
+      assert.match(request.systemMessage.sections.preamble, /coding assistant running inside pi/);
+      assert.doesNotMatch(
+        request.systemPrompt,
+        /FORBIDDEN_AUTOMATIC_CONTEXT|AUTO_SKILL_METADATA|<docs>|<skills>|<cwd>/,
+      );
+      assert.ok(!request.systemPrompt.includes(codemodeGuideline));
+      assert.equal(fs.existsSync(f.systemPromptPath), false, 'runtime must not create a SYSTEM');
+      assert.equal(
+        fs.existsSync(f.appendSystemPromptPath),
+        false,
+        'runtime must not create an APPEND',
+      );
+      assert.deepEqual(f.errors, []);
+    }));
+
+  test('custom SYSTEM replaces native preamble/tools/rules, keeps APPEND and opaque user tags', async () =>
+    withFixture({}, async (f) => {
+      const custom =
+        'CUSTOM_BASE\n<docs>USER_DOCS</docs>\n<skills>USER_SKILLS</skills>\n<cwd>USER_CWD</cwd>';
+      const append =
+        'CUSTOM_APPEND\n<docs>APPEND_DOCS</docs>\n<skills>APPEND_SKILLS</skills>\n<cwd>APPEND_CWD</cwd>';
+      const user =
+        '<docs>USER_MESSAGE_DOCS</docs><skills>USER_MESSAGE_SKILLS</skills><cwd>USER_MESSAGE_CWD</cwd>';
+      write(f.systemPromptPath, custom);
+      write(f.appendSystemPromptPath, append);
+      json(path.join(f.agentDir, 'settings.json'), {
+        ...baseSettings,
+        defaultTools: ['read', 'codemode'],
+      });
+      const session = await f.create();
+      assert.ok(session.getActiveToolNames().includes('codemode'));
+      assert.equal(session.resourceLoader.getSystemPrompt(), custom);
+      assert.deepEqual(session.resourceLoader.getAppendSystemPrompt(), [append]);
+      await prompt(session, user);
+      const request = f.events().find((event) => event.type === 'request')!;
+      assertFilteredRequest(request);
+      assert.deepEqual(request.systemMessage.sections, {
+        preamble: custom,
+        addendum: '<addendum>\n' + append + '\n</addendum>',
+      });
+      assert.equal(request.systemPrompt, custom + '\n\n<addendum>\n' + append + '\n</addendum>');
+      assert.deepEqual(request.userTexts, [user]);
+      assert.ok(request.tools.some((tool: any) => tool.name === 'codemode'));
+      assert.ok(
+        !request.systemPrompt.includes(codemodeGuideline),
+        'custom base takes native precedence',
+      );
+      assert.ok(
+        !request.systemPrompt.includes(defaultIdentity),
+        'custom base replaces default identity rules',
+      );
+      assert.equal(
+        fs.readFileSync(f.systemPromptPath, 'utf8'),
+        custom,
+        'runtime never deletes or migrates user SYSTEM',
+      );
+      assert.equal(fs.readFileSync(f.appendSystemPromptPath, 'utf8'), append);
+      assert.deepEqual(f.errors, []);
+    }));
+
   test('native skill discovery with explicit SYSTEM/extensions; other automatic resources stay disabled', async () =>
     withFixture({}, async (f) => {
+      write(f.systemPromptPath, 'CHILD_EXPLICIT_SYSTEM');
       const marker = 'FORBIDDEN_DEFAULT_RESOURCE';
       for (const dir of [
         f.agentDir,
@@ -344,6 +466,8 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
         request.systemPrompt,
         /FORBIDDEN_|AUTO_SKILL_BODY_|AUTO_DESCRIPTION_hidden-skill/,
       );
+      assertFilteredRequest(request);
+      assert.doesNotMatch(request.systemPrompt, /AUTO_DESCRIPTION_|<skills>|<cwd>/);
       assert.deepEqual(f.errors, []);
     }));
 
@@ -407,26 +531,171 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
       assert.doesNotMatch(session.systemPrompt, /RETIRED_SKILL_MARKER/);
     }));
 
-  test('SYSTEM file whose text is another path is read once, not reinterpreted', async () =>
+  test('SYSTEM and APPEND text that names another file stays opaque, not reinterpreted', async () =>
     withFixture({}, async (f) => {
       const target = path.join(f.root, 'must-not-read.md');
+      const appendTarget = path.join(f.root, 'must-not-append.md');
       write(target, 'UNEXPECTED_SECOND_READ');
+      write(appendTarget, 'UNEXPECTED_SECOND_APPEND_READ');
       write(f.systemPromptPath, target);
+      write(f.appendSystemPromptPath, appendTarget);
       const session = await f.create();
       assert.equal(session.resourceLoader.getSystemPrompt(), target);
-      assert.equal(session.resourceLoader.getSystemPromptSource()?.path, f.systemPromptPath);
-      assert.ok(session.systemPrompt.includes(target));
-      assert.doesNotMatch(session.systemPrompt, /UNEXPECTED_SECOND_READ/);
+      assert.deepEqual(session.resourceLoader.getAppendSystemPrompt(), [appendTarget]);
+      await prompt(session, 'Opaque path content');
+      const request = f.events().find((event) => event.type === 'request')!;
+      assertFilteredRequest(request);
+      assert.deepEqual(request.systemMessage.sections, {
+        preamble: target,
+        addendum: '<addendum>\n' + appendTarget + '\n</addendum>',
+      });
+      assert.doesNotMatch(request.systemPrompt, /UNEXPECTED_SECOND/);
+      assert.deepEqual(f.errors, []);
     }));
 
-  test('missing or BOM/whitespace-only SYSTEM fails before extension loading', async () =>
+  test('optional missing/empty/whitespace/BOM files use native empty and BOM semantics', async () =>
     withFixture({}, async (f) => {
-      write(f.systemPromptPath, '\uFEFF \n ');
-      await assert.rejects(f.create(), /System prompt is empty/);
-      fs.unlinkSync(f.systemPromptPath);
-      await assert.rejects(f.create(), /ENOENT/);
+      for (const dir of [f.agentDir, path.join(f.cwd, CONFIG_DIR_NAME)])
+        for (const name of ['SYSTEM.md', 'APPEND_SYSTEM.md', 'AGENTS.md'])
+          write(path.join(dir, name), 'FORBIDDEN_OPTIONAL_DISCOVERY');
+      const cases: Array<
+        [string | undefined, string | undefined, string | undefined, string | undefined]
+      > = [
+        [undefined, undefined, undefined, undefined],
+        ['', '', undefined, undefined],
+        [' \r\n\t', ' \n\t', undefined, undefined],
+        ['\uFEFF \n ', '\uFEFF\t ', undefined, undefined],
+        ['\uFEFF \n ', defaultIdentity, undefined, defaultIdentity],
+        ['\uFEFFBOM_CUSTOM \n', '\uFEFFBOM_APPEND \n', 'BOM_CUSTOM \n', 'BOM_APPEND \n'],
+      ];
+      for (const [index, [system, append, expectedSystem, expectedAppend]] of cases.entries()) {
+        const files = [
+          [f.systemPromptPath, system],
+          [f.appendSystemPromptPath, append],
+        ] as const;
+        for (const [file, content] of files) {
+          if (content === undefined) fs.rmSync(file, { force: true });
+          else write(file, content);
+        }
+        const session = await f.create({
+          info: {
+            ...f.info,
+            sessionFile: path.join(f.root, 'subagents', 'optional-' + index + '.jsonl'),
+          },
+          projectTrusted: true,
+        });
+        assert.equal(session.resourceLoader.getSystemPrompt(), expectedSystem);
+        assert.deepEqual(
+          session.resourceLoader.getAppendSystemPrompt(),
+          expectedAppend === undefined ? [] : [expectedAppend],
+        );
+        await prompt(session, 'Optional prompt files case ' + index);
+        const request = f
+          .events()
+          .filter((event) => event.type === 'request')
+          .at(-1)!;
+        assertFilteredRequest(request);
+        if (expectedSystem === undefined) {
+          assert.match(
+            request.systemMessage.sections.preamble,
+            /coding assistant running inside pi/,
+          );
+          assert.ok(request.systemMessage.sections.tools);
+          assert.equal(request.systemMessage.sections.rules.split(defaultIdentity).length - 1, 1);
+        } else {
+          assert.equal(request.systemMessage.sections.preamble, expectedSystem);
+          assert.equal(request.systemMessage.sections.tools, undefined);
+          assert.equal(request.systemMessage.sections.rules, undefined);
+        }
+        assert.equal(
+          request.systemMessage.sections.addendum,
+          expectedAppend === undefined
+            ? undefined
+            : '<addendum>\n' + expectedAppend + '\n</addendum>',
+        );
+        assert.equal(
+          request.systemPrompt.split(defaultIdentity).length - 1,
+          (expectedSystem === undefined ? 1 : 0) + (expectedAppend === defaultIdentity ? 1 : 0),
+          'built-in identity belongs only in native rules; user APPEND identity stays untouched',
+        );
+        assert.doesNotMatch(request.systemPrompt, /FORBIDDEN_OPTIONAL_DISCOVERY/);
+        for (const [file, content] of files)
+          assert.equal(fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : undefined, content);
+        await f.close(session);
+      }
+      assert.deepEqual(f.errors, []);
+    }));
+
+  test('optional prompt file read errors other than absence fail before extension loading', async () =>
+    withFixture({}, async (f) => {
+      for (const file of [f.systemPromptPath, f.appendSystemPromptPath]) {
+        fs.rmSync(file, { force: true });
+        fs.mkdirSync(file, { recursive: true });
+        await assert.rejects(f.create(), /EISDIR|EACCES|EPERM|directory/i);
+        fs.rmSync(file, { recursive: true });
+      }
       assert.deepEqual(f.events(), []);
       assert.equal(f.sessions.size, 0);
+    }));
+
+  test('hot sessions snapshot both prompt files; cold reopen rereads them and patches native sections', async () =>
+    withFixture({}, async (f) => {
+      write(f.systemPromptPath, 'HOT_BASE');
+      write(f.appendSystemPromptPath, 'HOT_APPEND');
+      const first = await f.create();
+      await prompt(first, 'Initial snapshot');
+      write(f.systemPromptPath, 'COLD_BASE');
+      write(f.appendSystemPromptPath, 'COLD_APPEND');
+      await prompt(first, 'Reuse hot snapshot');
+      for (const request of f.events().filter((event) => event.type === 'request')) {
+        assertFilteredRequest(request);
+        assert.deepEqual(request.systemMessage.sections, {
+          preamble: 'HOT_BASE',
+          addendum: '<addendum>\nHOT_APPEND\n</addendum>',
+        });
+        assert.equal(request.systemPrompt.split(defaultIdentity).length - 1, 0);
+      }
+      await f.close(first);
+      const second = await f.create();
+      assert.equal(second.sessionId, first.sessionId);
+      await prompt(second, 'Cold reread');
+      const request = f
+        .events()
+        .filter((event) => event.type === 'request')
+        .at(-1)!;
+      assertFilteredRequest(request);
+      assert.deepEqual(request.systemMessage.sections, {
+        preamble: 'COLD_BASE',
+        addendum: '<addendum>\nCOLD_APPEND\n</addendum>',
+      });
+      assert.equal(request.systemPrompt.split(defaultIdentity).length - 1, 0);
+      assert.ok(
+        request.messages.some(
+          (message: any) => message.role === 'system' && message.sections?.preamble === 'COLD_BASE',
+        ),
+      );
+      await f.close(second);
+      fs.unlinkSync(f.systemPromptPath);
+      write(f.appendSystemPromptPath, '\uFEFF \n ');
+      const third = await f.create();
+      assert.equal(third.sessionId, first.sessionId);
+      await prompt(third, 'Return to native defaults on the same JSONL');
+      const native = f
+        .events()
+        .filter((event) => event.type === 'request')
+        .at(-1)!;
+      assertFilteredRequest(native);
+      assert.deepEqual(Object.keys(native.systemMessage.sections), ['preamble', 'tools', 'rules']);
+      assert.match(native.systemMessage.sections.preamble, /coding assistant running inside pi/);
+      assert.equal(native.systemMessage.sections.rules.split(defaultIdentity).length - 1, 1);
+      assert.equal(native.systemPrompt.split(defaultIdentity).length - 1, 1);
+      assert.ok(
+        native.messages.some(
+          (message: any) => message.role === 'system' && message.sections?.addendum === null,
+        ),
+      );
+      assert.deepEqual(native.tools, getCurrentTools(third.messages));
+      assert.deepEqual(f.errors, []);
     }));
 
   test('unconfigured tools/extensions use Pi defaults and provide native codemode without discovery', async () =>
@@ -456,17 +725,22 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
       const session = await f.create({ info, projectTrusted: true });
       assert.deepEqual(new Set(session.getActiveToolNames()), new Set(defaults));
       assert.deepEqual(
-        session.resourceLoader.getExtensions().extensions.map((extension) => extension.path).sort(),
-        ['builtin:codemode', 'builtin:tool-search'],
+        session.resourceLoader
+          .getExtensions()
+          .extensions.map((extension) => extension.path)
+          .sort(),
+        ['<inline:subagent-system-prompt>', 'builtin:codemode', 'builtin:tool-search'],
       );
       assert.deepEqual(f.events(), [], 'the provider fixture must not have loaded');
       assert.equal(
-        info.extensionPaths, undefined,
+        info.extensionPaths,
+        undefined,
         'automatic providers are not persisted as configuration',
       );
       await session.settingsManager.flush();
       assert.deepEqual(
-        JSON.parse(fs.readFileSync(path.join(f.agentDir, 'settings.json'), 'utf8')), settings,
+        JSON.parse(fs.readFileSync(path.join(f.agentDir, 'settings.json'), 'utf8')),
+        settings,
       );
       assert.deepEqual(f.errors, []);
     }));
@@ -481,7 +755,10 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
           ['-bash', '+powershell', '+codemode'],
           ['read', 'powershell', 'edit', 'write', 'codemode'],
         ],
-        [['read', 'tool_search'], ['read', 'tool_search']],
+        [
+          ['read', 'tool_search'],
+          ['read', 'tool_search'],
+        ],
       ];
       for (const [index, [defaults, expected]] of cases.entries()) {
         json(path.join(f.agentDir, 'settings.json'), { ...baseSettings, defaultTools: defaults });
@@ -492,7 +769,8 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
           },
         });
         assert.deepEqual(
-          new Set(session.getActiveToolNames()), new Set([...expected, 'fixture_tool']),
+          new Set(session.getActiveToolNames()),
+          new Set([...expected, 'fixture_tool']),
         );
         await f.close(session);
       }
@@ -510,7 +788,10 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
         ['', ['fixture_tool']],
         ['read,codemode', ['read', 'codemode']],
         ['-codemode', ['read', 'bash', 'edit', 'write', 'fixture_tool']],
-        ['+tool_search', ['read', 'bash', 'edit', 'write', 'codemode', 'fixture_tool', 'tool_search']],
+        [
+          '+tool_search',
+          ['read', 'bash', 'edit', 'write', 'codemode', 'fixture_tool', 'tool_search'],
+        ],
       ];
       for (const [tools, expected] of cases) {
         const session = await f.create({
@@ -525,72 +806,435 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
       }
     }));
 
-  for (const explicit of [false, true]) {
-    test('native codemode ' + (explicit ? 'opt-in' : 'from defaults') + ' executes nested tools, preserves settings and isolates/restores its store', async () =>
-      withFixture({}, async (f) => {
-        const defaults = explicit ? ['read'] : ['read', 'codemode'];
-        json(path.join(f.agentDir, 'settings.json'), {
-          ...baseSettings,
-          defaultTools: defaults,
-          codemode: { mode: 'only', inlineBudget: 0 },
-        });
-        if (explicit) f.info.extensionPaths!.push('builtin:codemode');
-        write(path.join(f.cwd, 'codemode.txt'), 'OFFLINE_CODEMODE_FILE');
-        f.configure({
-          codemodeScript:
-            '// @options: {"timeout_ms": 15000}\n' +
-            'const results = await Promise.allSettled([tools.read({ path: "codemode.txt" }), tools.fixture_tool({})]);\n' +
-            'for (const result of results) { if (result.status !== "fulfilled") throw result.reason; text(result.value); }\n' +
-            'store("offline-check", "CODEMODE_PERSISTED");',
-        });
-        let session = await f.create();
-        assert.deepEqual(
-          new Set(session.getActiveToolNames()),
-          new Set(['read', 'codemode', 'fixture_tool']),
+  test('every request after two tool rounds and cold restoration filters native patches without touching history or tool deltas', async () =>
+    withFixture(
+      {
+        toolCalls: [
+          { name: 'fixture_tool', arguments: { payload: '<docs>TOOL_ARGUMENT_ONE</docs>' } },
+          { name: 'fixture_tool', arguments: { payload: '<skills>TOOL_ARGUMENT_TWO</skills>' } },
+        ],
+      },
+      async (f) => {
+        write(
+          path.join(f.agentDir, 'skills', 'round-skill', 'SKILL.md'),
+          '---\nname: round-skill\ndescription: AUTO_ROUND_SKILL\n---\nBody',
         );
-        const metadata = session.getAllTools().find((tool) => tool.name === 'codemode')!;
-        assert.equal(metadata.sourceInfo.path, 'builtin:codemode');
-        assert.equal(metadata.sourceInfo.source, 'builtin');
-        assert.deepEqual(session.settingsManager.getSettings().codemode, {
-          mode: 'only',
-          inlineBudget: 0,
-        });
-        assert.ok(!session.getActiveToolNames().includes('tool_search'));
-        await prompt(session, 'Run the offline codemode check');
-        const result = session.messages.findLast((message) => message.role === 'toolResult');
-        assert.ok(result?.role === 'toolResult');
-        const output = JSON.stringify(result.content);
-        assert.match(output, /Script completed/);
-        assert.match(output, /OFFLINE_CODEMODE_FILE/);
-        assert.match(output, /fixture tool/);
-        await f.close(session);
-        f.configure({
-          codemodeScript:
-            '// @options: {"timeout_ms": 15000}\n' +
-            'text(load("offline-check") ?? "EMPTY_CODEMODE_STORE");',
-        });
-        const isolated = await f.create({
-          info: { ...f.info, sessionFile: path.join(f.root, 'subagents', 'isolated-store.jsonl') },
-        });
-        await prompt(isolated, 'A different child must not share the codemode store');
-        const isolatedResult = isolated.messages.findLast((message) => message.role === 'toolResult');
-        assert.ok(isolatedResult?.role === 'toolResult');
-        assert.match(JSON.stringify(isolatedResult.content), /Script completed/);
-        assert.match(JSON.stringify(isolatedResult.content), /EMPTY_CODEMODE_STORE/);
-        assert.doesNotMatch(JSON.stringify(isolatedResult.content), /CODEMODE_PERSISTED/);
-        await f.close(isolated);
-        session = await f.create();
-        await prompt(session, 'Read the persisted codemode value');
-        const stored = session.messages.findLast((message) => message.role === 'toolResult');
-        assert.ok(stored?.role === 'toolResult');
-        assert.match(JSON.stringify(stored.content), /Script completed/);
-        assert.match(JSON.stringify(stored.content), /CODEMODE_PERSISTED/);
+        const first = await f.create();
+        await prompt(first, 'Two real tool rounds');
+        let requests = f.events().filter((event) => event.type === 'request');
+        assert.equal(requests.length, 3);
+        for (const request of requests) {
+          assertFilteredRequest(request);
+          assert.doesNotMatch(request.systemPrompt, /AUTO_ROUND_SKILL|<docs>|<skills>|<cwd>/);
+          assert.equal(request.systemMessage.sections.rules.split(defaultIdentity).length - 1, 1);
+          assert.equal(request.systemPrompt.split(defaultIdentity).length - 1, 1);
+        }
+        const toolHistory = requests
+          .at(-1)!
+          .messages.filter((message: any) => message.role === 'toolResult');
+        assert.equal(toolHistory.length, 2);
         assert.deepEqual(
-          JSON.parse(fs.readFileSync(path.join(f.agentDir, 'settings.json'), 'utf8')).defaultTools,
-          defaults,
+          toolHistory,
+          JSON.parse(
+            JSON.stringify(first.messages.filter((message) => message.role === 'toolResult')),
+          ),
+        );
+        assert.deepEqual(
+          requests
+            .at(-1)!
+            .messages.filter((message: any) => message.role === 'assistant')
+            .flatMap((message: any) =>
+              message.content
+                .filter((part: any) => part.type === 'toolCall')
+                .map((part: any) => part.arguments),
+            ),
+          [
+            { payload: '<docs>TOOL_ARGUMENT_ONE</docs>' },
+            { payload: '<skills>TOOL_ARGUMENT_TWO</skills>' },
+          ],
+        );
+        assert.equal(f.events().filter((event) => event.type === 'tool').length, 2);
+        first.setActiveToolsByName(['read']);
+        await prompt(first, 'Native live tool removal patch');
+        requests = f.events().filter((event) => event.type === 'request');
+        const live = requests.at(-1)!;
+        assert.equal(requests.length, 4);
+        assertFilteredRequest(live);
+        assert.equal(live.systemPrompt.split(defaultIdentity).length - 1, 1);
+        assert.deepEqual(
+          live.tools.map((tool: any) => tool.name),
+          ['read'],
+        );
+        assert.ok(
+          live.messages.some(
+            (message: any) =>
+              message.role === 'system' &&
+              message.toolsRemoved?.some((tool: any) => tool.name === 'fixture_tool'),
+          ),
+        );
+        const internalSystems = first.messages.filter((message) => message.role === 'system');
+        assert.ok(
+          internalSystems.some(
+            (message) =>
+              message.sections?.docs && message.sections?.skills && message.sections?.cwd,
+          ),
+        );
+        assert.deepEqual(
+          live.messages.filter((message: any) => message.role === 'system'),
+          JSON.parse(
+            JSON.stringify(
+              internalSystems.map((message) => ({
+                ...message,
+                ...(message.sections
+                  ? {
+                      sections: Object.fromEntries(
+                        Object.entries(message.sections).filter(([name]) =>
+                          allowedPromptSections.has(name),
+                        ),
+                      ),
+                    }
+                  : {}),
+              })),
+            ),
+          ),
+          'section projection must preserve every other field, including toolsAdded/toolsRemoved',
+        );
+        await f.close(first);
+        const persisted = fs
+          .readFileSync(f.info.sessionFile, 'utf8')
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line));
+        assert.ok(
+          persisted.some(
+            (entry) =>
+              entry.type === 'message' &&
+              entry.message.role === 'system' &&
+              entry.message.sections?.docs,
+          ),
+        );
+        f.configure({});
+        write(f.appendSystemPromptPath, 'COLD_ROUND_APPEND');
+        const second = await f.create();
+        assert.equal(second.sessionId, first.sessionId);
+        assert.deepEqual(second.getActiveToolNames(), ['read']);
+        await prompt(second, 'Cold continuation after two tools');
+        const cold = f
+          .events()
+          .filter((event) => event.type === 'request')
+          .at(-1)!;
+        assertFilteredRequest(cold);
+        assert.equal(cold.systemMessage.sections.rules.split(defaultIdentity).length - 1, 1);
+        assert.equal(cold.systemPrompt.split(defaultIdentity).length - 1, 1);
+        assert.equal(
+          cold.systemMessage.sections.addendum,
+          '<addendum>\nCOLD_ROUND_APPEND\n</addendum>',
+        );
+        assert.ok(
+          cold.messages.some(
+            (message: any) =>
+              message.role === 'system' &&
+              message.sections?.addendum === '<addendum>\nCOLD_ROUND_APPEND\n</addendum>',
+          ),
+        );
+        assert.doesNotMatch(cold.systemPrompt, /AUTO_ROUND_SKILL|<docs>|<skills>|<cwd>/);
+        assert.deepEqual(
+          cold.messages.filter((message: any) => message.role === 'toolResult'),
+          toolHistory,
         );
         assert.deepEqual(f.errors, []);
-      }));
+      },
+    ));
+
+  test('legacy JSONL full/delta sections are filtered on reopen while opaque content, null patches and tool declarations survive', async () =>
+    withFixture({}, async (f) => {
+      const readDeclaration = {
+        name: 'read',
+        description: 'HISTORIC_READ <docs>DESCRIPTION_LITERAL</docs>',
+        parameters: {
+          type: 'object',
+          properties: { path: { type: 'string', description: '<cwd>PARAMETER_LITERAL</cwd>' } },
+          required: ['path'],
+        },
+      };
+      const full = {
+        role: 'system' as const,
+        content: [
+          {
+            type: 'text' as const,
+            text: '<docs>OPAQUE_FULL_CONTENT</docs><skills>OPAQUE_SKILLS</skills>',
+          },
+        ],
+        sections: {
+          preamble: 'HISTORY_PREAMBLE',
+          tools: '<tools>HISTORY_TOOLS</tools>',
+          rules: '<rules>HISTORY_RULES</rules>',
+          addendum: '<addendum>HISTORY_ADDENDUM</addendum>',
+          docs: 'AUTO_HISTORY_DOCS_FULL',
+          skills: 'AUTO_HISTORY_SKILLS_FULL',
+          cwd: 'AUTO_HISTORY_CWD_FULL',
+          project_context: 'AUTO_HISTORY_PROJECT_FULL',
+        },
+        toolsAdded: [
+          readDeclaration,
+          { name: 'write', description: 'HISTORIC_WRITE', parameters: { type: 'object' } },
+        ],
+        timestamp: 10,
+      };
+      const delta = {
+        role: 'system' as const,
+        content: '<cwd>OPAQUE_DELTA_CONTENT</cwd>',
+        sections: {
+          preamble: 'HISTORY_PATCH',
+          tools: null,
+          rules: null,
+          addendum: null,
+          docs: 'AUTO_HISTORY_DOCS_DELTA',
+          skills: null,
+          cwd: 'AUTO_HISTORY_CWD_DELTA',
+          extension_section: 'AUTO_HISTORY_EXTENSION_DELTA',
+        },
+        toolsAdded: [
+          { ...readDeclaration, description: 'DELTA_READ <skills>DESCRIPTION_LITERAL</skills>' },
+        ],
+        toolsRemoved: [{ name: 'write' }],
+        timestamp: 30,
+      };
+      const old = SessionManager.open(f.info.sessionFile, path.dirname(f.info.sessionFile), f.cwd);
+      old.appendMessage(full);
+      old.appendMessage({ role: 'user', content: 'Legacy user history', timestamp: 20 });
+      old.appendMessage(delta);
+      assert.match(fs.readFileSync(f.info.sessionFile, 'utf8'), /AUTO_HISTORY_DOCS_FULL/);
+      for (const turn of [1, 2]) {
+        const session = await f.create();
+        await prompt(session, 'Resume legacy JSONL ' + turn);
+        const request = f
+          .events()
+          .filter((event) => event.type === 'request')
+          .at(-1)!;
+        assertFilteredRequest(request);
+        for (const original of [full, delta]) {
+          const outgoing = request.messages.find(
+            (message: any) => message.role === 'system' && message.timestamp === original.timestamp,
+          );
+          const { preamble, tools, rules, addendum } = original.sections;
+          assert.deepEqual(outgoing, {
+            ...original,
+            sections: { preamble, tools, rules, addendum },
+          });
+        }
+        assert.doesNotMatch(request.systemPrompt, /AUTO_HISTORY_/);
+        assert.match(request.systemPrompt, /<docs>OPAQUE_FULL_CONTENT<\/docs>/);
+        assert.match(request.systemPrompt, /<cwd>OPAQUE_DELTA_CONTENT<\/cwd>/);
+        assert.ok(
+          session.messages.some(
+            (message) =>
+              message.role === 'system' && message.sections?.docs === 'AUTO_HISTORY_DOCS_FULL',
+          ),
+        );
+        await f.close(session);
+      }
+      assert.match(fs.readFileSync(f.info.sessionFile, 'utf8'), /AUTO_HISTORY_DOCS_DELTA/);
+      assert.deepEqual(f.errors, []);
+    }));
+
+  for (const explicit of [false, true]) {
+    test(
+      'native codemode guidelines track declared tools dynamically: ' +
+        (explicit ? 'explicit opt-in' : 'defaults'),
+      async () =>
+        withFixture({}, async (f) => {
+          json(path.join(f.agentDir, 'settings.json'), {
+            ...baseSettings,
+            defaultTools: explicit ? ['read'] : ['read', 'codemode'],
+          });
+          if (explicit) f.info.extensionPaths!.push('builtin:codemode');
+          assert.equal(fs.existsSync(f.systemPromptPath), false);
+          const session = await f.create();
+          const active = session.getActiveToolNames();
+          for (const [index, enabled] of [true, false, true].entries()) {
+            if (index)
+              session.setActiveToolsByName(
+                enabled ? active : active.filter((name) => name !== 'codemode'),
+              );
+            await prompt(session, 'Codemode state ' + enabled);
+            const request = f
+              .events()
+              .filter((event) => event.type === 'request')
+              .at(-1)!;
+            assertFilteredRequest(request);
+            assert.equal(request.systemMessage.sections.rules.includes(codemodeGuideline), enabled);
+            assert.equal(request.systemMessage.sections.rules.split(defaultIdentity).length - 1, 1);
+            assert.equal(request.systemPrompt.split(defaultIdentity).length - 1, 1);
+            assert.equal(
+              request.tools.some((tool: any) => tool.name === 'codemode'),
+              enabled,
+            );
+            assert.equal(request.systemPrompt.includes(codemodeGuideline), enabled);
+          }
+          assert.deepEqual(f.errors, []);
+        }),
+    );
+  }
+
+  for (const mode of ['on', 'only'] as const) {
+    test(
+      'native codemode ' + mode + ' keeps model-facing tool descriptions and parameters intact',
+      async () =>
+        withFixture(
+          {
+            toolDescription:
+              'Never calls a network.\n' +
+              '<docs>TOOL_DESCRIPTION</docs><skills>TOOL_SKILLS</skills><cwd>TOOL_CWD</cwd>',
+            toolParameterDescription: '<docs>PARAMETER_DESCRIPTION</docs><cwd>PARAMETER_CWD</cwd>',
+          },
+          async (f) => {
+            json(path.join(f.agentDir, 'settings.json'), {
+              ...baseSettings,
+              defaultTools: ['read', 'codemode'],
+              codemode: { mode, inlineBudget: 100_000 },
+            });
+            const session = await f.create();
+            await prompt(session, 'Inspect native ' + mode + ' metadata');
+            const request = f.events().find((event) => event.type === 'request')!;
+            assertFilteredRequest(request);
+            assert.ok(request.systemMessage.sections.rules.includes(codemodeGuideline));
+            const codemode = request.tools.find((tool: any) => tool.name === 'codemode')!;
+            const executableCodemode = session.agent.state.tools.find(
+              (tool) => tool.name === 'codemode',
+            )!;
+            assert.deepEqual(
+              codemode.parameters,
+              JSON.parse(JSON.stringify(executableCodemode.parameters)),
+            );
+            assert.match(codemode.description, /codemode\.md/);
+            assert.equal(codemode.parameters.properties.code.description, 'Raw JavaScript source.');
+            if (mode === 'on') {
+              assert.deepEqual(
+                new Set(request.tools.map((tool: any) => tool.name)),
+                new Set(['read', 'codemode', 'fixture_tool']),
+              );
+              for (const name of ['read', 'fixture_tool']) {
+                const declared = request.tools.find((tool: any) => tool.name === name)!;
+                const executable = session.agent.state.tools.find((tool) => tool.name === name)!;
+                assert.deepEqual(
+                  declared.parameters,
+                  JSON.parse(JSON.stringify(executable.parameters)),
+                );
+                assert.ok(declared.description.startsWith(executable.description));
+                assert.ok(declared.description.includes('Codemode: `tools.' + name + '(args)`'));
+              }
+              const fixtureTool = request.tools.find((tool: any) => tool.name === 'fixture_tool')!;
+              assert.ok(
+                fixtureTool.description.includes(
+                  '<docs>TOOL_DESCRIPTION</docs><skills>TOOL_SKILLS</skills><cwd>TOOL_CWD</cwd>',
+                ),
+              );
+              assert.equal(
+                fixtureTool.parameters.properties.payload.description,
+                '<docs>PARAMETER_DESCRIPTION</docs><cwd>PARAMETER_CWD</cwd>',
+              );
+            } else {
+              assert.deepEqual(
+                request.tools.map((tool: any) => tool.name),
+                ['codemode'],
+              );
+              assert.ok(
+                codemode.description.includes(
+                  '<docs>TOOL_DESCRIPTION</docs><skills>TOOL_SKILLS</skills><cwd>TOOL_CWD</cwd>',
+                ),
+              );
+              assert.ok(
+                codemode.description.includes(
+                  '<docs>PARAMETER_DESCRIPTION</docs><cwd>PARAMETER_CWD</cwd>',
+                ),
+              );
+              assert.match(codemode.description, /payload\??: string/);
+              assert.match(codemode.description, /path: string/);
+            }
+            assert.deepEqual(f.errors, []);
+          },
+        ),
+    );
+  }
+
+  for (const explicit of [false, true]) {
+    test(
+      'native codemode ' +
+        (explicit ? 'opt-in' : 'from defaults') +
+        ' executes nested tools, preserves settings and isolates/restores its store',
+      async () =>
+        withFixture({}, async (f) => {
+          const defaults = explicit ? ['read'] : ['read', 'codemode'];
+          json(path.join(f.agentDir, 'settings.json'), {
+            ...baseSettings,
+            defaultTools: defaults,
+            codemode: { mode: 'only', inlineBudget: 0 },
+          });
+          if (explicit) f.info.extensionPaths!.push('builtin:codemode');
+          write(path.join(f.cwd, 'codemode.txt'), 'OFFLINE_CODEMODE_FILE');
+          f.configure({
+            codemodeScript:
+              '// @options: {"timeout_ms": 15000}\n' +
+              'const results = await Promise.allSettled([tools.read({ path: "codemode.txt" }), tools.fixture_tool({})]);\n' +
+              'for (const result of results) { if (result.status !== "fulfilled") throw result.reason; text(result.value); }\n' +
+              'store("offline-check", "CODEMODE_PERSISTED");',
+          });
+          let session = await f.create();
+          assert.deepEqual(
+            new Set(session.getActiveToolNames()),
+            new Set(['read', 'codemode', 'fixture_tool']),
+          );
+          const metadata = session.getAllTools().find((tool) => tool.name === 'codemode')!;
+          assert.equal(metadata.sourceInfo.path, 'builtin:codemode');
+          assert.equal(metadata.sourceInfo.source, 'builtin');
+          assert.deepEqual(session.settingsManager.getSettings().codemode, {
+            mode: 'only',
+            inlineBudget: 0,
+          });
+          assert.ok(!session.getActiveToolNames().includes('tool_search'));
+          await prompt(session, 'Run the offline codemode check');
+          const result = session.messages.findLast((message) => message.role === 'toolResult');
+          assert.ok(result?.role === 'toolResult');
+          const output = JSON.stringify(result.content);
+          assert.match(output, /Script completed/);
+          assert.match(output, /OFFLINE_CODEMODE_FILE/);
+          assert.match(output, /fixture tool/);
+          await f.close(session);
+          f.configure({
+            codemodeScript:
+              '// @options: {"timeout_ms": 15000}\n' +
+              'text(load("offline-check") ?? "EMPTY_CODEMODE_STORE");',
+          });
+          const isolated = await f.create({
+            info: {
+              ...f.info,
+              sessionFile: path.join(f.root, 'subagents', 'isolated-store.jsonl'),
+            },
+          });
+          await prompt(isolated, 'A different child must not share the codemode store');
+          const isolatedResult = isolated.messages.findLast(
+            (message) => message.role === 'toolResult',
+          );
+          assert.ok(isolatedResult?.role === 'toolResult');
+          assert.match(JSON.stringify(isolatedResult.content), /Script completed/);
+          assert.match(JSON.stringify(isolatedResult.content), /EMPTY_CODEMODE_STORE/);
+          assert.doesNotMatch(JSON.stringify(isolatedResult.content), /CODEMODE_PERSISTED/);
+          await f.close(isolated);
+          session = await f.create();
+          await prompt(session, 'Read the persisted codemode value');
+          const stored = session.messages.findLast((message) => message.role === 'toolResult');
+          assert.ok(stored?.role === 'toolResult');
+          assert.match(JSON.stringify(stored.content), /Script completed/);
+          assert.match(JSON.stringify(stored.content), /CODEMODE_PERSISTED/);
+          assert.deepEqual(
+            JSON.parse(fs.readFileSync(path.join(f.agentDir, 'settings.json'), 'utf8'))
+              .defaultTools,
+            defaults,
+          );
+          assert.deepEqual(f.errors, []);
+        }),
+    );
   }
 
   test('native codemode opt-in respects explicit allowlists, empty tools and tool modifiers', async () =>
@@ -1275,7 +1919,8 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
         assert.deepEqual(new Set(second.getActiveToolNames()), new Set(expected));
         await prompt(second, 'continue with saved tools');
         assert.deepEqual(
-          new Set(getCurrentTools(second.messages).map((tool) => tool.name)), new Set(expected),
+          new Set(getCurrentTools(second.messages).map((tool) => tool.name)),
+          new Set(expected),
         );
         assert.equal(assistants(second).length, 2);
         await f.close(second);
