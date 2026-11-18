@@ -64,7 +64,6 @@ export const DEFAULT_RETENTION_DAYS = 7;
 export const DEFAULT_MODEL_RESPONSE_TIMEOUT_MS = 10 * 60_000;
 const ACTIVITY_PERSIST_INTERVAL_MS = 5_000;
 export const DEFAULT_THINKING = 'high';
-export const DEFAULT_TOOLS = 'read,bash,grep,find,ls';
 const DEFAULT_SUBAGENT_SYSTEM_PROMPT =
   'You are a subagent working for a main agent. Work only on the assigned task and follow its scope precisely.';
 
@@ -82,9 +81,7 @@ export interface SubagentConfig {
   modelsFromEnabledModels?: boolean;
   modelResponseTimeoutMs?: number;
   maxIdleSessions?: number;
-  defaults?: {
-    extensions?: string[];
-  };
+  extensions?: string[];
 }
 
 export interface AgentDefinition {
@@ -144,6 +141,7 @@ export interface AgentInfo {
   modelId: string;
   model: string;
   thinking?: ThinkingLevel;
+  /** Explicit template selection; older records may contain inherited tool names. */
   tools?: string;
   extensions?: string[];
   extensionPaths?: string[];
@@ -205,7 +203,6 @@ export interface SpawnAgentParams {
   inheritedProvider: string;
   inheritedModelId: string;
   inheritedThinking?: ThinkingLevel;
-  inheritedTools?: string;
   model?: { provider: string; modelId: string };
   thinking?: ThinkingLevel;
 }
@@ -324,11 +321,7 @@ function isThinkingLevel(value: unknown): value is ThinkingLevel {
 function normalizeConfig(value: unknown): SubagentConfig {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   const raw = value as Record<string, unknown>;
-  const defaultsRaw =
-    raw.defaults && typeof raw.defaults === 'object' && !Array.isArray(raw.defaults)
-      ? (raw.defaults as Record<string, unknown>)
-      : undefined;
-  const extensions = stringList(defaultsRaw?.extensions);
+  const extensions = stringList(raw.extensions);
   const models = stringList(raw.models);
   const retentionDays =
     typeof raw.retentionDays === 'number' &&
@@ -356,7 +349,7 @@ function normalizeConfig(value: unknown): SubagentConfig {
     ...(Number.isSafeInteger(raw.maxIdleSessions) && (raw.maxIdleSessions as number) >= 0
       ? { maxIdleSessions: raw.maxIdleSessions as number }
       : {}),
-    ...(extensions ? { defaults: { extensions } } : {}),
+    ...(extensions ? { extensions } : {}),
   };
 }
 
@@ -760,8 +753,7 @@ export function getAgentDefinitionsDescription(): string {
     .join('\n');
 }
 
-function normalizeTools(tools: string | undefined): string {
-  if (tools === undefined) return DEFAULT_TOOLS;
+function normalizeTools(tools: string): string {
   return tools
     .split(',')
     .map((tool) => tool.trim())
@@ -1411,13 +1403,9 @@ export class AgentManager {
       templateModel ?? { provider: params.inheritedProvider, modelId: params.inheritedModelId };
     const config = loadSubagentConfig();
     validateSystemPrompt();
-    const extensions = normalizeList(definition?.extensions ?? config.defaults?.extensions);
+    const extensions = normalizeList(definition?.extensions ?? config.extensions);
     const tools =
-      definition?.tools !== undefined
-        ? normalizeTools(definition.tools)
-        : extensions?.length
-          ? undefined
-          : normalizeTools(params.inheritedTools);
+      definition?.tools === undefined ? undefined : normalizeTools(definition.tools);
     const thinking =
       params.thinking ?? definition?.thinking ?? params.inheritedThinking ?? DEFAULT_THINKING;
     const cwd = path.resolve(params.cwd);

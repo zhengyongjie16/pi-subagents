@@ -823,14 +823,18 @@ Review the requested files.`,
     }
   });
 
-  test('ignores retired skill defaults without changing extension defaults', () => {
-    writeConfig({
-      defaults: { skills: ['missing-retired-skill'], extensions: [CORE_SDK_EXTENSION] },
-    });
-    expect(loadSubagentConfig().defaults).toEqual({ extensions: [CORE_SDK_EXTENSION] });
-    writeConfig({ defaults: { skills: ['missing-retired-skill'] } });
-    expect(loadSubagentConfig().defaults).toBeUndefined();
-  });
+  test.each(['defaults', 'default'])(
+    'ignores retired %s sections without extension fallback',
+    (key) => {
+      const legacy = { skills: ['missing-retired-skill'], extensions: [CORE_SDK_EXTENSION] };
+      for (const extensions of [undefined, [], {}]) {
+        writeConfig({ extensions, [key]: legacy, retentionDays: 7 });
+        expect(loadSubagentConfig()).toEqual({ retentionDays: 7 });
+      }
+      writeConfig({ extensions: ['+codemode'], [key]: legacy });
+      expect(loadSubagentConfig()).toEqual({ extensions: ['+codemode'] });
+    },
+  );
 
   test('trims routing values and treats blank values as omitted', () => {
     expect(
@@ -899,12 +903,15 @@ describe('run storage', () => {
     ['omitted', undefined, undefined],
     ['comma-separated', ' first, , second ', ['first', 'second']],
     ['mixed array', [' first ', null, 7, false, '', ' second '], ['first', 'second']],
+    ['empty string', '', undefined],
+    ['blank string', ' , , ', undefined],
     ['empty array', [], undefined],
     ['invalid object', {}, undefined],
-  ])('normalizes configuration lists without empty defaults (%s)', (_label, value, expected) => {
-    writeConfig({ models: value, defaults: { extensions: value } });
+    ['invalid scalar', false, undefined],
+  ])('normalizes top-level configuration lists (%s)', (_label, value, expected) => {
+    writeConfig({ models: value, extensions: value });
     expect(loadSubagentConfig()).toEqual(
-      expected ? { models: expected, defaults: { extensions: expected } } : {},
+      expected ? { models: expected, extensions: expected } : {},
     );
   });
 
@@ -1317,7 +1324,7 @@ function writeConfig(config: Record<string, any> = {}) {
   fs.mkdirSync(path.dirname(configFile), { recursive: true });
   fs.writeFileSync(
     configFile,
-    JSON.stringify({ defaults: { extensions: [CORE_SDK_EXTENSION] }, ...config }),
+    JSON.stringify({ extensions: [CORE_SDK_EXTENSION], ...config }),
   );
 }
 let fixture: CoreFixtureState;
@@ -2176,7 +2183,7 @@ describe('SDK model validation', () => {
       extension,
       'export default () => { throw new Error("explicit fixture load failure"); };',
     );
-    writeConfig({ defaults: { extensions: [CORE_SDK_EXTENSION, extension] } });
+    writeConfig({ extensions: [CORE_SDK_EXTENSION, extension] });
     const manager = new AgentManager();
     try {
       await expect(
@@ -5455,33 +5462,35 @@ describe('SDK business scope and resources', () => {
     }
   });
 
-  test.each(['defaults', 'template'])(
-    'loads +codemode from %s extensions and on resume',
+  test.each(['config', 'template', 'empty template', 'omitted template'])(
+    'loads +codemode with %s extensions and on resume',
     async (source) => {
       const parent = 'codemode-' + source + '-' + randomUUID();
       const name = 'codemode-' + randomUUID();
       const template = path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents', name + '.md');
       const extensions = [CORE_SDK_EXTENSION, '+codemode'];
-      if (source === 'defaults') writeConfig({ defaults: { extensions } });
-      else
-        fs.writeFileSync(
-          template,
-          '---\nname: ' + name + '\nextensions: ' + extensions.join(', ') + '\n---\n',
-        );
+      const fields =
+        source === 'template'
+          ? '\nextensions: ' + extensions.join(', ')
+          : source === 'empty template' ? '\nextensions:' : '';
+      if (source !== 'config')
+        fs.writeFileSync(template, '---\nname: ' + name + fields + '\n---\n');
       const active: string[][] = [];
       fixture.onStart = (pi) => {
         active.push(pi.getActiveTools());
       };
       writeConfig({
         maxIdleSessions: 0,
-        ...(source === 'defaults' ? { defaults: { extensions } } : {}),
+        // A nonempty template replaces this list; its unused entry must never be loaded.
+        extensions: source === 'template'
+          ? [path.join(TEST_AGENT_DIR, 'must-not-load.ts')]
+          : extensions,
       });
       const manager = new AgentManager();
       try {
         await manager.spawnAgent({
           ...spawnParams(parent, 'worker', 'inspect codemode'),
-          ...(source === 'template' ? { agent_type: name } : {}),
-          inheritedTools: 'read',
+          ...(source !== 'config' ? { agent_type: name } : {}),
         });
         const info = manager.getAgentInfo('worker', parent);
         await settled(manager, info);
@@ -5489,6 +5498,7 @@ describe('SDK business scope and resources', () => {
         expect(info.extensionPaths).toEqual([CORE_SDK_EXTENSION, 'builtin:codemode']);
         expect(info.tools).toBeUndefined();
         expect(active[0]).toContain('codemode');
+        writeConfig({ extensions: [path.join(TEST_AGENT_DIR, 'missing-on-resume.ts')] });
         await manager.sendMessage(parent, 'worker', 'continue with codemode');
         await settled(manager, info);
         expect(active).toHaveLength(2);
@@ -5500,9 +5510,31 @@ describe('SDK business scope and resources', () => {
     },
   );
 
+  test('omits the tool snapshot even without configured extensions', async () => {
+    writeConfig({ extensions: [] });
+    const parent = 'no-extension-tools-' + randomUUID();
+    const manager = new AgentManager();
+    try {
+      // Without the provider fixture, model validation stops startup after saving the snapshot.
+      await expect(
+        manager.spawnAgent(spawnParams(parent, 'worker', 'must not run')),
+      ).rejects.toThrow('test/fake');
+      const info = manager.getAgentInfo('worker', parent);
+      await settled(manager, info);
+      expect(info.extensions).toBeUndefined();
+      expect(info.extensionPaths).toBeUndefined();
+      expect(info.tools).toBeUndefined();
+      expect(Object.hasOwn(JSON.parse(fs.readFileSync(info.infoFile, 'utf8')), 'tools')).toBe(false);
+      expect(fixture.instances).toHaveLength(0);
+    } finally {
+      await manager.shutdown();
+    }
+  });
+
   test.each([undefined, '', 'read'])(
-    'retains the tool-selection three-state contract (%s)',
+    'retains the saved tool-selection three-state contract across cold resume (%s)',
     async (tools) => {
+      writeConfig({ maxIdleSessions: 0 });
       const parent = 'tools-contract-' + randomUUID();
       const name = 'tool-contract-' + randomUUID();
       const template = path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents', name + '.md');
@@ -5510,6 +5542,10 @@ describe('SDK business scope and resources', () => {
         template,
         '---\nname: ' + name + (tools === undefined ? '' : '\ntools: ' + tools) + '\n---\n',
       );
+      const active: string[][] = [];
+      fixture.onStart = (pi) => {
+        active.push(pi.getActiveTools());
+      };
       const manager = new AgentManager();
       try {
         await manager.spawnAgent({
@@ -5525,6 +5561,21 @@ describe('SDK business scope and resources', () => {
         else if (tools === '') expect(names).toEqual(['fixture_hold']);
         else expect(names).toEqual(expect.arrayContaining(['read', 'bash', 'fixture_hold']));
         expect(info.tools).toBe(tools);
+        const saved = fs.readFileSync(info.infoFile, 'utf8');
+        expect(readInfoFile(info.infoFile)?.tools).toBe(tools);
+        expect(fs.readFileSync(info.infoFile, 'utf8')).toBe(saved); // Reading is not a migration.
+        expect(fixture.instances[0].shutdowns).toBe(1);
+        fs.writeFileSync(
+          template,
+          '---\nname: ' + name + '\ntools: ' + (tools === 'read' ? '' : 'read') + '\n---\n',
+        );
+        await manager.sendMessage(parent, 'worker', 'continue with saved tools');
+        await settled(manager, info);
+        expect(fixture.instances).toHaveLength(2);
+        expect(active).toHaveLength(2);
+        expect(active[1]).toEqual(active[0]);
+        expect(manager.getAgentInfo('worker', parent).tools).toBe(tools);
+        expect(JSON.parse(fs.readFileSync(info.infoFile, 'utf8')).tools).toBe(tools);
       } finally {
         await manager.shutdown();
         fs.rmSync(template, { force: true });

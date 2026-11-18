@@ -517,7 +517,6 @@ ${getAgentDefinitionsDescription()}`;
           inheritedProvider: currentModel.provider,
           inheritedModelId: currentModel.id,
           inheritedThinking: pi.getThinkingLevel() as ThinkingLevel,
-          inheritedTools: pi.getActiveTools().join(','),
           model,
           thinking: params.thinking,
         });

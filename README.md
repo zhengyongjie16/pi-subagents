@@ -90,17 +90,17 @@ Review the assigned files without modifying them. Return concise findings with f
 
 ### Tools and extensions
 
-`tools` accepts a comma-separated allowlist or Pi tool modifiers such as `-codemode`. When omitted, children use Pi's normal tool activation if extensions are configured; otherwise they inherit the parent's active tool names, not their extension implementations. `tools: ""` disables built-in tools, not extension tools.
+`tools` accepts a comma-separated allowlist or Pi tool modifiers such as `-codemode`. When omitted, new children use Pi's effective `defaultTools` and normal extension-tool activation, whether or not extensions are configured. They do not inherit the parent's current active tools. `tools: ""` disables default built-in tools, not extension tools; native codemode and tool search also start inactive.
 
 `extensions` accepts comma-separated local paths or npm packages already installed by Pi. Relative paths beginning with `./` or `../` resolve from the child's working directory; packages resolve from project-local Pi packages before global ones. Missing entries fail startup rather than being installed automatically.
 
-A non-empty template extension list replaces `defaults.extensions`; an empty or omitted value inherits it. `+codemode` enables Pi's native codemode, preserving Pi's default tools and codemode settings. An explicit tool allowlist must include `codemode` to make it available. Other extensions and MCP servers are not loaded implicitly.
+A non-empty template extension list replaces the top-level `extensions` in `config.json`; an empty or omitted value inherits it. Native `codemode` and `tool_search` implementations are provided inactive, so Pi's `defaultTools` or an explicit `tools` selection can enable them without configuring extensions. `+codemode` remains an explicit opt-in when it is not already a default tool, preserving Pi's other default tools and codemode settings. An explicit tool allowlist must include `codemode` to make it available. Third-party extensions and MCP servers are not loaded implicitly.
 
 ### Prompts and resources
 
 The base system prompt comes from `~/.pi/agent/pi-subagents/SYSTEM.md`, created with a minimal default on first use. Template `description` is shown to the parent as delegation guidance; only the Markdown body is prepended to the child's first task message, not used as a separate system prompt. Built-ins use the same distinction: worker ownership guidance stays in its description, while its collaboration reminder is in the task prefix.
 
-Skills follow Pi's native discovery, settings, and project trust; parent-session skill selections are not copied. Automatic extension, prompt-template, theme, and context-file discovery is disabled, including `AGENTS.md` and `CLAUDE.md`. Only explicitly configured extensions are loaded.
+Skills follow Pi's native discovery, settings, and project trust; parent-session skill selections are not copied. Automatic extension, prompt-template, theme, and context-file discovery is disabled, including `AGENTS.md` and `CLAUDE.md`. Apart from the native codemode and tool-search providers, only explicitly configured extensions are loaded.
 
 Children use the parent's effective trust decision for the same working directory. Other directories follow Pi's trust store and headless policy.
 
@@ -114,9 +114,7 @@ Optional settings live in `~/.pi/agent/pi-subagents/config.json`:
   "maxIdleSessions": 4,
   "modelResponseTimeoutMs": 600000,
   "modelsFromEnabledModels": true,
-  "defaults": {
-    "extensions": ["+codemode"]
-  }
+  "extensions": ["+codemode"]
 }
 ```
 
@@ -129,9 +127,9 @@ Optional settings live in `~/.pi/agent/pi-subagents/config.json`:
 | `shortcut` | Unbound | Browser shortcut, for example `ctrl+shift+a` |
 | `models` | None | Exact `provider/model-id` pairs allowed for per-task model overrides |
 | `modelsFromEnabledModels` | `false` | Add Pi's scoped models from `enabledModels` and `--models` |
-| `defaults.extensions` | None | Extensions used unless a template supplies a non-empty replacement list |
+| `extensions` | None | Extensions used unless a template supplies a non-empty replacement list |
 
-Template/default-extension changes apply to new agents; model-routing changes apply when a parent session starts. The response timeout is read for each new assistant response. Reload Pi after shortcut or resource changes; restart after changing storage, retention, or idle-session policy. Keep storage separate from Pi's native session directory to avoid child entries in `/resume`; changing its location does not move existing history.
+Template/default-extension changes apply to new agents; model-routing changes apply when a parent session starts. New agents without `tools` use current Pi defaults; existing agents retain saved explicit or legacy tool selections, and cold resumes follow Pi's native tool-history restoration rather than forcing the latest defaults. Parent-only tool restrictions no longer carry over: configure a template allowlist when needed. The response timeout is read for each new assistant response. Reload Pi after shortcut or resource changes; restart after changing storage, retention, or idle-session policy. Keep storage separate from Pi's native session directory to avoid child entries in `/resume`; changing its location does not move existing history.
 
 ### Model routing
 

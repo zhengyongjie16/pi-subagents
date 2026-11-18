@@ -32,7 +32,7 @@ beforeEach(() => {
   configureCoreFixture();
   fs.writeFileSync(
     path.join(TEST_AGENT_DIR, 'pi-subagents', 'config.json'),
-    JSON.stringify({ defaults: { extensions: [CORE_SDK_EXTENSION] } }),
+    JSON.stringify({ extensions: [CORE_SDK_EXTENSION] }),
   );
 });
 
@@ -103,7 +103,7 @@ const hostFixture = `
       registerMessageRenderer(name, renderer) { renderers.set(name, renderer); },
       registerCommand(name, command) { commands.set(name, command); },
       registerShortcut(name, shortcut) { shortcuts.set(name, shortcut); },
-      getActiveTools: () => ["read"], getThinkingLevel: () => "high", getSettings: () => ({}),
+      getActiveTools() { throw new Error("Parent tools must not be read"); }, getThinkingLevel: () => "high", getSettings: () => ({}),
       sendMessage: (message, delivery) => messages.push({ message, delivery }),
     };
     return {
@@ -364,7 +364,7 @@ test('preserves the six schemas, dynamic routing, tool arguments, and return wra
     assert.equal(spawned.parentSessionId, "parent");
     assert.equal(spawned.cwd, f.ctx.cwd);
     assert.equal(spawned.parentSessionFile, "parent.jsonl");
-    assert.equal(spawned.inheritedTools, "read");
+    assert.ok(!Object.hasOwn(spawned, "inheritedTools"));
     assert.ok(!Object.hasOwn(spawned, "skills"));
     assert.ok(!Object.hasOwn(spawned, "loadedSkillPaths"));
     const signal = new AbortController().signal;
@@ -1462,7 +1462,7 @@ test.each(runtimes)(
     const agentDir = process.env.PI_CODING_AGENT_DIR;
     const config = path.join(agentDir, "pi-subagents", "config.json");
     fs.mkdirSync(path.dirname(config), { recursive: true });
-    fs.writeFileSync(config, JSON.stringify({ maxIdleSessions: 0, defaults: { extensions: [fixturePath] } }));
+    fs.writeFileSync(config, JSON.stringify({ maxIdleSessions: 0, extensions: [fixturePath] }));
     const settings = { compaction: { enabled: false }, retry: { enabled: false }, cacheWarming: "off" };
     fs.writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify(settings));
     const textOf = message => typeof message.content === "string" ? message.content :
@@ -1578,7 +1578,7 @@ test.each(runtimes)(
     const directory = path.join(agentDir, "pi-subagents");
     const templatePath = path.join(directory, "agents", "multiline.md");
     fs.mkdirSync(path.dirname(templatePath), { recursive: true });
-    fs.writeFileSync(path.join(directory, "config.json"), JSON.stringify({ defaults: { extensions: [fixturePath] } }));
+    fs.writeFileSync(path.join(directory, "config.json"), JSON.stringify({ extensions: [fixturePath] }));
     const template = [
       "---", "name: multiline", "description: |-", "  First exploration line.", "  <rules>",
       "    <rule>Reuse & trust.</rule>", "  </rules>", "  Give exact paths.", "  - Narrow scope.",
@@ -1670,7 +1670,7 @@ test.each(runtimes)(
     fs.mkdirSync(templates, { recursive: true });
     fs.writeFileSync(path.join(templates, "routed.md"), "---\nname: routed\nprovider: template-provider\nmodel: template-model\nthinking: medium\n---\n");
     fs.writeFileSync(path.join(templates, "model-only.md"), "---\nname: model-only\nmodel: template-model\n---\n");
-    const writeConfig = models => fs.writeFileSync(config, JSON.stringify({ defaults: { extensions: [fixturePath] }, ...(models ? { models } : {}) }));
+    const writeConfig = models => fs.writeFileSync(config, JSON.stringify({ extensions: [fixturePath], ...(models ? { models } : {}) }));
     writeConfig();
     const settingsManager = SettingsManager.inMemory(settings);
     settingsManager.setProjectTrusted(true);
@@ -1820,7 +1820,7 @@ test.each(runtimes)(
     const parent = fixture("parent-provider", { codemodeScript: script });
     const configDir = path.join(agentDir, "pi-subagents");
     fs.mkdirSync(configDir);
-    fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ retentionDays: 0, defaults: { extensions: [child.extension] } }));
+    fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ retentionDays: 0, extensions: [child.extension] }));
     const settingsManager = SettingsManager.inMemory({
       compaction: { enabled: false }, retry: { enabled: false }, cacheWarming: "off",
       defaultTools: ["+codemode"], codemode: { mode: "only", inlineBudget: 0 },
@@ -1932,7 +1932,7 @@ test.each(runtimes)(
       const parent = fixture("parent", { prefix: "parent", codemodeScript: script });
       const configDir = path.join(agentDir, "pi-subagents");
       fs.mkdirSync(configDir, { recursive: true });
-      fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ retentionDays: 0, defaults: { extensions: [child.extension] } }));
+      fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ retentionDays: 0, extensions: [child.extension] }));
       const settingsManager = SettingsManager.inMemory({
         compaction: { enabled: false }, retry: { enabled: false }, cacheWarming: "off",
         defaultTools: ["+codemode"], codemode: { mode: "only", inlineBudget: 0 },
@@ -2082,7 +2082,7 @@ test.each(runtimes)(
     const config = path.join(agentDir, "pi-subagents", "config.json");
     fs.mkdirSync(path.dirname(config));
     // This probe exercises actual repeated child cleanup, not hot idle retention.
-    fs.writeFileSync(config, JSON.stringify({ retentionDays: 0, maxIdleSessions: 0, defaults: { extensions: [childFixture.extension] } }));
+    fs.writeFileSync(config, JSON.stringify({ retentionDays: 0, maxIdleSessions: 0, extensions: [childFixture.extension] }));
     const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false }, steeringMode: "one-at-a-time" });
     settingsManager.setProjectTrusted(false);
     const parentRequests = [];
@@ -2336,7 +2336,7 @@ test.each(runtimes)(
     fs.writeFileSync(path.join(parent.directory, "release-response"), "");
     const config = path.join(agentDir, "pi-subagents", "config.json");
     fs.mkdirSync(path.dirname(config));
-    fs.writeFileSync(config, JSON.stringify({ retentionDays: 0, defaults: { extensions: [child.extension] } }));
+    fs.writeFileSync(config, JSON.stringify({ retentionDays: 0, extensions: [child.extension] }));
     const started = [], stopped = [], errors = [];
     const factory = async ({ cwd, sessionManager, sessionStartEvent }) => {
       const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
@@ -4251,7 +4251,9 @@ test('six public tools carry native usage through metadata and the detail footer
         sent.push(message);
       },
       getThinkingLevel: () => 'high',
-      getActiveTools: () => ['read'],
+      getActiveTools() {
+        throw new Error('Parent tools must not be read');
+      },
       getSettings: () => ({ terminal: { showImages: false }, outputPad: 0 }),
     } as any);
     await handlers.get('session_start')({}, ctx);

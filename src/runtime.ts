@@ -4,6 +4,7 @@ import {
   createAgentSessionFromServices,
   createAgentSessionServices,
   createCodemodeExtension,
+  createToolSearchExtension,
   getAgentDir,
   hasTrustRequiringProjectResources,
   ProjectTrustStore,
@@ -97,7 +98,7 @@ export async function createChildSession(options: ChildSessionOptions): Promise<
       settingsManager.getDefaultProjectTrust() === 'always');
   settingsManager.setProjectTrusted(projectTrusted);
 
-  const codemode = info.extensionPaths?.includes('builtin:codemode');
+  const explicitCodemode = info.extensionPaths?.includes('builtin:codemode');
   const services = await createAgentSessionServices({
     cwd,
     agentDir,
@@ -109,17 +110,28 @@ export async function createChildSession(options: ChildSessionOptions): Promise<
       noThemes: true,
       systemPrompt: systemPromptPath,
       appendSystemPrompt: [],
-      additionalExtensionPaths: info.extensionPaths,
-      extensionFactories: codemode
-        ? [
-            {
-              name: 'codemode',
-              builtin: true,
-              replaceable: true,
-              factory: createCodemodeExtension(),
-            },
-          ]
-        : [],
+      // Provide native tools inactive; the SDK owns activation through defaultTools/tools.
+      additionalExtensionPaths: [
+        ...new Set([
+          ...(info.extensionPaths ?? []),
+          'builtin:codemode',
+          'builtin:tool-search',
+        ]),
+      ],
+      extensionFactories: [
+        {
+          name: 'codemode',
+          builtin: true,
+          replaceable: true,
+          factory: createCodemodeExtension(),
+        },
+        {
+          name: 'tool-search',
+          builtin: true,
+          replaceable: true,
+          factory: createToolSearchExtension(),
+        },
+      ],
     },
   });
   checkCanceled();
@@ -127,8 +139,9 @@ export async function createChildSession(options: ChildSessionOptions): Promise<
   checkDiagnostics(services, options.log, loggedDiagnostics);
   if (!services.resourceLoader.getSystemPrompt()?.trim())
     throw new Error(`System prompt is empty: ${systemPromptPath}`);
-  // Resource loading reloads settings; extend the resolved selection afterwards.
-  if (codemode) {
+  // Only explicit +codemode opts in; providing its implementation must not enable it.
+  // Resource loading reloads settings, so apply the explicit opt-in afterwards.
+  if (explicitCodemode) {
     const defaults = settingsManager.getDefaultTools();
     settingsManager.applyOverrides({
       defaultTools: defaults ? [...defaults, 'codemode'] : ['+codemode'],

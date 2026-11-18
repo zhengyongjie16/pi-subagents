@@ -52,6 +52,7 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
     await import('../src/runtime.ts');
   const { CONFIG_DIR_NAME, getAgentDir, ProjectTrustStore, SessionManager } =
     await import('@earendil-works/pi-coding-agent');
+  const { getCurrentTools } = await import('@earendil-works/pi-ai');
   const fixtureSource = fileURLToPath(
     new URL('./fixtures/sdk-offline-extension.ts', import.meta.url),
   );
@@ -428,13 +429,90 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
       assert.equal(f.sessions.size, 0);
     }));
 
-  test('tools retain undefined / allowlist / no-builtin tri-state; SDK does not load CLI builtins', async () =>
+  test('unconfigured tools/extensions use Pi defaults and provide native codemode without discovery', async () =>
+    withFixture({}, async (f) => {
+      const defaults = ['read', 'powershell', 'edit', 'write', 'codemode'];
+      const settings = { ...baseSettings, defaultTools: defaults };
+      json(path.join(f.agentDir, 'settings.json'), settings);
+      // A configured endpoint makes the model available without a provider extension or a request.
+      json(path.join(f.agentDir, 'models.json'), {
+        providers: {
+          [f.info.provider]: {
+            api: 'openai-completions',
+            baseUrl: 'http://offline.invalid',
+            apiKey: 'offline-only',
+            models: [{ id: f.info.modelId }],
+          },
+        },
+      });
+      for (const dir of [f.agentDir, path.join(f.cwd, CONFIG_DIR_NAME)]) {
+        write(
+          path.join(dir, 'extensions', 'must-not-load.ts'),
+          'export default () => { throw new Error("automatic extension loaded"); };',
+        );
+        write(path.join(dir, 'mcp.json'), '{ invalid MCP config must not be read');
+      }
+      const info = { ...f.info, extensionPaths: undefined };
+      const session = await f.create({ info, projectTrusted: true });
+      assert.deepEqual(new Set(session.getActiveToolNames()), new Set(defaults));
+      assert.deepEqual(
+        session.resourceLoader.getExtensions().extensions.map((extension) => extension.path).sort(),
+        ['builtin:codemode', 'builtin:tool-search'],
+      );
+      assert.deepEqual(f.events(), [], 'the provider fixture must not have loaded');
+      assert.equal(
+        info.extensionPaths, undefined,
+        'automatic providers are not persisted as configuration',
+      );
+      await session.settingsManager.flush();
+      assert.deepEqual(
+        JSON.parse(fs.readFileSync(path.join(f.agentDir, 'settings.json'), 'utf8')), settings,
+      );
+      assert.deepEqual(f.errors, []);
+    }));
+
+  test('native defaults preserve missing/empty selections and can enable tool search independently', async () =>
+    withFixture({}, async (f) => {
+      const cases: Array<[string[] | undefined, string[]]> = [
+        [undefined, ['read', 'bash', 'edit', 'write']],
+        [[], []],
+        [['read'], ['read']],
+        [
+          ['-bash', '+powershell', '+codemode'],
+          ['read', 'powershell', 'edit', 'write', 'codemode'],
+        ],
+        [['read', 'tool_search'], ['read', 'tool_search']],
+      ];
+      for (const [index, [defaults, expected]] of cases.entries()) {
+        json(path.join(f.agentDir, 'settings.json'), { ...baseSettings, defaultTools: defaults });
+        const session = await f.create({
+          info: {
+            ...f.info,
+            sessionFile: path.join(f.root, 'subagents', 'defaults-' + index + '.jsonl'),
+          },
+        });
+        assert.deepEqual(
+          new Set(session.getActiveToolNames()), new Set([...expected, 'fixture_tool']),
+        );
+        await f.close(session);
+      }
+    }));
+
+  test('native tool selection respects defaults, allowlists, modifiers and empty tools', async () =>
     withFixture({}, async (f) => {
       json(path.join(f.agentDir, 'settings.json'), {
         ...baseSettings,
         defaultTools: ['+codemode'],
       });
-      for (const tools of [undefined, 'read', '']) {
+      const cases: Array<[string | undefined, string[]]> = [
+        [undefined, ['read', 'bash', 'edit', 'write', 'codemode', 'fixture_tool']],
+        ['read', ['read']],
+        ['', ['fixture_tool']],
+        ['read,codemode', ['read', 'codemode']],
+        ['-codemode', ['read', 'bash', 'edit', 'write', 'fixture_tool']],
+        ['+tool_search', ['read', 'bash', 'edit', 'write', 'codemode', 'fixture_tool', 'tool_search']],
+      ];
+      for (const [tools, expected] of cases) {
         const session = await f.create({
           info: {
             ...f.info,
@@ -442,71 +520,78 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
             sessionFile: path.join(f.root, 'subagents', 'tools-' + String(tools) + '.jsonl'),
           },
         });
-        const active = session.getActiveToolNames();
-        if (tools === undefined) {
-          assert.ok(active.includes('read'));
-          assert.ok(active.includes('fixture_tool'));
-        } else if (tools === 'read') assert.deepEqual(active, ['read']);
-        else assert.deepEqual(active, ['fixture_tool']);
-        assert.ok(
-          !session.getAllTools().some((tool) => ['codemode', 'tool_search'].includes(tool.name)),
-        );
+        assert.deepEqual(new Set(session.getActiveToolNames()), new Set(expected));
         await f.close(session);
       }
     }));
 
-  test('native codemode opt-in executes nested tools, preserves settings and restores its store', async () =>
-    withFixture({}, async (f) => {
-      json(path.join(f.agentDir, 'settings.json'), {
-        ...baseSettings,
-        defaultTools: ['read'],
-        codemode: { mode: 'only', inlineBudget: 0 },
-      });
-      f.info.extensionPaths!.push('builtin:codemode');
-      write(path.join(f.cwd, 'codemode.txt'), 'OFFLINE_CODEMODE_FILE');
-      f.configure({
-        codemodeScript:
-          '// @options: {"timeout_ms": 15000}\n' +
-          'const results = await Promise.allSettled([tools.read({ path: "codemode.txt" }), tools.fixture_tool({})]);\n' +
-          'for (const result of results) { if (result.status !== "fulfilled") throw result.reason; text(result.value); }\n' +
-          'store("offline-check", "CODEMODE_PERSISTED");',
-      });
-      let session = await f.create();
-      assert.deepEqual(
-        new Set(session.getActiveToolNames()),
-        new Set(['read', 'codemode', 'fixture_tool']),
-      );
-      const metadata = session.getAllTools().find((tool) => tool.name === 'codemode')!;
-      assert.equal(metadata.sourceInfo.path, 'builtin:codemode');
-      assert.equal(metadata.sourceInfo.source, 'builtin');
-      assert.deepEqual(session.settingsManager.getSettings().codemode, {
-        mode: 'only',
-        inlineBudget: 0,
-      });
-      assert.ok(!session.getAllTools().some((tool) => tool.name === 'tool_search'));
-      await prompt(session, 'Run the offline codemode check');
-      const result = session.messages.findLast((message) => message.role === 'toolResult');
-      assert.ok(result?.role === 'toolResult');
-      const output = JSON.stringify(result.content);
-      assert.match(output, /Script completed/);
-      assert.match(output, /OFFLINE_CODEMODE_FILE/);
-      assert.match(output, /fixture tool/);
-      await f.close(session);
-      f.configure({
-        codemodeScript: '// @options: {"timeout_ms": 15000}\ntext(load("offline-check"));',
-      });
-      session = await f.create();
-      await prompt(session, 'Read the persisted codemode value');
-      const stored = session.messages.findLast((message) => message.role === 'toolResult');
-      assert.ok(stored?.role === 'toolResult');
-      assert.match(JSON.stringify(stored.content), /Script completed/);
-      assert.match(JSON.stringify(stored.content), /CODEMODE_PERSISTED/);
-      assert.deepEqual(
-        JSON.parse(fs.readFileSync(path.join(f.agentDir, 'settings.json'), 'utf8')).defaultTools,
-        ['read'],
-      );
-      assert.deepEqual(f.errors, []);
-    }));
+  for (const explicit of [false, true]) {
+    test('native codemode ' + (explicit ? 'opt-in' : 'from defaults') + ' executes nested tools, preserves settings and isolates/restores its store', async () =>
+      withFixture({}, async (f) => {
+        const defaults = explicit ? ['read'] : ['read', 'codemode'];
+        json(path.join(f.agentDir, 'settings.json'), {
+          ...baseSettings,
+          defaultTools: defaults,
+          codemode: { mode: 'only', inlineBudget: 0 },
+        });
+        if (explicit) f.info.extensionPaths!.push('builtin:codemode');
+        write(path.join(f.cwd, 'codemode.txt'), 'OFFLINE_CODEMODE_FILE');
+        f.configure({
+          codemodeScript:
+            '// @options: {"timeout_ms": 15000}\n' +
+            'const results = await Promise.allSettled([tools.read({ path: "codemode.txt" }), tools.fixture_tool({})]);\n' +
+            'for (const result of results) { if (result.status !== "fulfilled") throw result.reason; text(result.value); }\n' +
+            'store("offline-check", "CODEMODE_PERSISTED");',
+        });
+        let session = await f.create();
+        assert.deepEqual(
+          new Set(session.getActiveToolNames()),
+          new Set(['read', 'codemode', 'fixture_tool']),
+        );
+        const metadata = session.getAllTools().find((tool) => tool.name === 'codemode')!;
+        assert.equal(metadata.sourceInfo.path, 'builtin:codemode');
+        assert.equal(metadata.sourceInfo.source, 'builtin');
+        assert.deepEqual(session.settingsManager.getSettings().codemode, {
+          mode: 'only',
+          inlineBudget: 0,
+        });
+        assert.ok(!session.getActiveToolNames().includes('tool_search'));
+        await prompt(session, 'Run the offline codemode check');
+        const result = session.messages.findLast((message) => message.role === 'toolResult');
+        assert.ok(result?.role === 'toolResult');
+        const output = JSON.stringify(result.content);
+        assert.match(output, /Script completed/);
+        assert.match(output, /OFFLINE_CODEMODE_FILE/);
+        assert.match(output, /fixture tool/);
+        await f.close(session);
+        f.configure({
+          codemodeScript:
+            '// @options: {"timeout_ms": 15000}\n' +
+            'text(load("offline-check") ?? "EMPTY_CODEMODE_STORE");',
+        });
+        const isolated = await f.create({
+          info: { ...f.info, sessionFile: path.join(f.root, 'subagents', 'isolated-store.jsonl') },
+        });
+        await prompt(isolated, 'A different child must not share the codemode store');
+        const isolatedResult = isolated.messages.findLast((message) => message.role === 'toolResult');
+        assert.ok(isolatedResult?.role === 'toolResult');
+        assert.match(JSON.stringify(isolatedResult.content), /Script completed/);
+        assert.match(JSON.stringify(isolatedResult.content), /EMPTY_CODEMODE_STORE/);
+        assert.doesNotMatch(JSON.stringify(isolatedResult.content), /CODEMODE_PERSISTED/);
+        await f.close(isolated);
+        session = await f.create();
+        await prompt(session, 'Read the persisted codemode value');
+        const stored = session.messages.findLast((message) => message.role === 'toolResult');
+        assert.ok(stored?.role === 'toolResult');
+        assert.match(JSON.stringify(stored.content), /Script completed/);
+        assert.match(JSON.stringify(stored.content), /CODEMODE_PERSISTED/);
+        assert.deepEqual(
+          JSON.parse(fs.readFileSync(path.join(f.agentDir, 'settings.json'), 'utf8')).defaultTools,
+          defaults,
+        );
+        assert.deepEqual(f.errors, []);
+      }));
+  }
 
   test('native codemode opt-in respects explicit allowlists, empty tools and tool modifiers', async () =>
     withFixture({}, async (f) => {
@@ -568,7 +653,7 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
     withFixture({}, async (f) => {
       const store = new ProjectTrustStore(f.agentDir);
       json(path.join(f.cwd, CONFIG_DIR_NAME, 'settings.json'), {
-        defaultTools: ['fixture_tool'],
+        defaultTools: ['fixture_tool', 'codemode'],
         defaultProvider: 'project-default',
       });
       for (const trusted of [false, true]) {
@@ -588,6 +673,7 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
           trusted ? 'project-default' : 'parent-default',
         );
         assert.equal(session.getActiveToolNames().includes('read'), !trusted);
+        assert.equal(session.getActiveToolNames().includes('codemode'), trusted);
         await f.close(session);
       }
     }));
@@ -1158,6 +1244,42 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
       assert.equal(session.isStreaming, false);
       assert.deepEqual(session.getSteeringMessages(), ['fixture:steer-gate']);
       session.clearQueue();
+    }));
+
+  test('cold reopen preserves native tool history and explicit legacy selections instead of forcing new defaults', async () =>
+    withFixture({}, async (f) => {
+      for (const [index, tools] of [undefined, 'read', ''].entries()) {
+        const info = {
+          ...f.info,
+          tools,
+          sessionFile: path.join(f.root, 'subagents', 'restored-tools-' + index + '.jsonl'),
+        };
+        json(path.join(f.agentDir, 'settings.json'), {
+          ...baseSettings,
+          defaultTools: ['read', 'codemode'],
+        });
+        const first = await f.create({ info });
+        const expected =
+          tools === 'read' ? ['read'] : tools === '' ? ['fixture_tool'] : ['read', 'fixture_tool'];
+        if (tools === undefined) first.setActiveToolsByName(expected);
+        await prompt(first, 'record original tool selection');
+        await f.close(first);
+        json(path.join(f.agentDir, 'settings.json'), {
+          ...baseSettings,
+          defaultTools: ['write', 'codemode'],
+        });
+        const second = await f.create({ info });
+        assert.equal(second.sessionId, first.sessionId);
+        assert.equal(second.sessionFile, info.sessionFile);
+        assert.deepEqual(second.settingsManager.getDefaultTools(), ['write', 'codemode']);
+        assert.deepEqual(new Set(second.getActiveToolNames()), new Set(expected));
+        await prompt(second, 'continue with saved tools');
+        assert.deepEqual(
+          new Set(getCurrentTools(second.messages).map((tool) => tool.name)), new Set(expected),
+        );
+        assert.equal(assistants(second).length, 2);
+        await f.close(second);
+      }
     }));
 
   test('standard JSONL opens/resumes in the same file without entering the default resume list', async () =>
