@@ -125,7 +125,7 @@ test('keeps the browser mounted beneath details through commands and shortcuts',
     const config = path.join(process.env.PI_CODING_AGENT_DIR, "pi-subagents", "config.json");
     fs.mkdirSync(path.dirname(config), { recursive: true });
     fs.writeFileSync(config, JSON.stringify({ shortcut: "ctrl+shift+a" }));
-    AgentManager.prototype.listAgentInfos = () => [{ canonicalName: "/worker", status: "running" }];
+    AgentManager.prototype.listAgentInfos = () => [{ taskName: "worker", status: "running" }];
     for (const entrypoint of ["command", "shortcut"]) {
       for (const openDetails of [false, true]) {
         const f = host();
@@ -133,7 +133,7 @@ test('keeps the browser mounted beneath details through commands and shortcuts',
         const queries = [];
         AgentManager.prototype.getAgentInfo = (task, parentSessionId) => {
           queries.push({ task, parentSessionId });
-          return { canonicalName: task, parentSessionId };
+          return { taskName: task, parentSessionId };
         };
         let browser, closeDetails, overlays = 0, settled = false, browserMounted = false;
         const details = new Promise(resolve => { closeDetails = resolve; });
@@ -168,7 +168,7 @@ test('keeps the browser mounted beneath details through commands and shortcuts',
             browser.handleInput("\r"); // A repeat Enter must not open another overlay.
             await new Promise(resolve => setImmediate(resolve));
             assert.equal(overlays, 1);
-            assert.deepEqual(queries, [{ task: "/worker", parentSessionId: "parent" }]);
+            assert.deepEqual(queries, [{ task: "worker", parentSessionId: "parent" }]);
             assert.equal(browserMounted, true);
             assert.equal(settled, false);
             closeDetails();
@@ -203,8 +203,8 @@ test('uses the native render context for errors without changing successful tool
     const f = host();
     await extension(f.pi);
     const success = {
-      spawn_agent: "✓ /worker · test/fake · high", wait_agent: "success-only",
-      list_agents: "✓ 0 of 0 agents", read_agent_response: "✓ /worker",
+      spawn_agent: "✓ worker · test/fake · high", wait_agent: "success-only",
+      list_agents: "✓ 0 agents", read_agent_response: "✓ worker",
       send_message: "✓ steered", interrupt_agent: "↯ previous: running",
     };
     const failure = {
@@ -213,8 +213,8 @@ test('uses the native render context for errors without changing successful tool
       send_message: "✗ send failed", interrupt_agent: "✗ interrupt failed",
     };
     const details = {
-      task_name: "/worker", provider: "test", modelId: "fake", thinking: "high",
-      agent_name: "/worker", message: "success-only", agents: [], total: 0,
+      task_name: "worker", provider: "test", modelId: "fake", thinking: "high",
+      agent_name: "worker", message: "success-only", agents: [],
       delivery: "steer", previous_status: "running", status: "failed",
     };
     for (const [name, definition] of f.tools) {
@@ -261,14 +261,14 @@ test('keeps model-facing guidance compact without losing async contracts', () =>
     await extension(f.pi);
     const spawn = f.tools.get("spawn_agent");
     const description = spawn.description;
-    assert.ok(description.includes("well-scoped task"));
-    assert.ok(description.includes("working directory but not its conversation"));
-    assert.ok(description.includes("Returns on task acceptance"));
-    assert.ok(description.includes("results and errors arrive automatically"));
-    assert.ok(description.includes("Continue other assigned work"));
+    assert.ok(description.includes("scoped task"));
+    assert.match(description, /working directory.*not.*conversation/i);
+    assert.match(description, /returns on .*acceptance/i);
+    assert.match(description, /results.*errors.*arrive automatically/i);
+    assert.match(description, /continue other.*work/i);
     assert.ok(description.includes("wait_agent only when blocked"));
-    assert.ok(spawn.parameters.properties.task_name.description.includes("Unique in this parent session"));
-    assert.ok(spawn.parameters.properties.task_name.description.includes("ASCII letters, digits, _, -, and /"));
+    assert.match(spawn.parameters.properties.task_name.description, /unique.*parent session/i);
+    assert.ok(spawn.parameters.properties.task_name.description.includes("ASCII letters, digits, _, -, and internal /"));
     assert.ok(spawn.parameters.properties.message.description.includes("Self-contained task: context, paths, constraints, and expected output"));
     assert.ok(spawn.parameters.properties.agent_type.description.includes("omit for a generic subagent"));
     const wait = f.tools.get("wait_agent");
@@ -278,12 +278,16 @@ test('keeps model-facing guidance compact without losing async contracts', () =>
     assert.ok(wait.description.includes("message and timed_out, not content"));
     assert.ok(wait.description.includes("Use only when blocked"));
     assert.ok(wait.description.includes("does not stop agents"));
-    assert.ok(wait.description.endsWith("prefer longer waits (minutes) to avoid busy polling."));
+    assert.match(wait.description, /prefer.*waits.*minutes.*avoid.*polling/i);
     const read = f.tools.get("read_agent_response");
-    assert.ok(read.description.includes("Non-blocking"));
-    assert.ok(read.description.includes("programmatic access"));
+    assert.match(read.description, /non-blocking/i);
+    assert.match(read.description, /not a transcript/i);
+    assert.ok(read.description.includes("not polling"));
     assert.ok(f.tools.get("send_message").description.includes("input acceptance, not completion"));
     assert.ok(f.tools.get("interrupt_agent").description.includes("cooperative cancellation"));
+    const list = f.tools.get("list_agents");
+    for (const term of ["resident", "initializing", "idle", "cleanup", "history"]) assert.ok(list.description.includes(term), term);
+    assert.deepEqual(Object.keys(list.parameters.properties), ["path_prefix"]);
     const checkBudget = () => {
       let chars = 0;
       for (const tool of f.tools.values()) {
@@ -292,7 +296,7 @@ test('keeps model-facing guidance compact without losing async contracts', () =>
           return value;
         });
       }
-      // Keep the shared-tool budget while allowing the three shipped role descriptions.
+      // Bound the current guidance, including strict path rules and the three shipped roles.
       // These are dependency-free prose guards, not exact token counts.
       const templateChars = spawn.description.split("\n\nAgent templates:\n")[1].length;
       assert.ok(chars - templateChars <= 2000, "Shared tool guidance exceeds 2000 characters: " + (chars - templateChars));
@@ -329,10 +333,9 @@ test('preserves the six schemas, dynamic routing, tool arguments, and return wra
     assert.deepEqual(Object.keys(waitSchema.properties), ["timeout_ms"]);
     assert.equal(waitSchema.required, undefined);
     assert.equal(waitSchema.additionalProperties, false);
-    assert.deepEqual(plain(f.tools.get("list_agents").parameters), object({
-      path_prefix: string, include_all: { type: "boolean" },
-      limit: { type: "integer", minimum: 1, maximum: 100 }, offset: { type: "integer", minimum: 0 },
-    }));
+    assert.deepEqual(plain(f.tools.get("list_agents").parameters), {
+      ...object({ path_prefix: { ...string, pattern: "^[a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+)*$" } }), additionalProperties: false,
+    });
     for (const name of ["read_agent_response", "interrupt_agent"]) assert.deepEqual(plain(f.tools.get(name).parameters), object({ target: string }, ["target"]));
     assert.deepEqual(plain(f.tools.get("send_message").parameters), object({ target: string, message: string }, ["target", "message"]));
     const config = path.join(f.ctx.cwd, "pi-subagents", "config.json");
@@ -344,7 +347,7 @@ test('preserves the six schemas, dynamic routing, tool arguments, and return wra
     assert.deepEqual(spawnSchema.properties.thinking.enum, ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
     assert.deepEqual(spawnSchema.required, ["task_name", "message"]);
     const description = f.tools.get("spawn_agent").description;
-    assert.ok(description.includes("not its conversation"));
+    assert.match(description, /working directory.*not.*conversation/i);
     assert.ok(!description.includes("Available parent skills"));
     assert.ok(!Object.hasOwn(spawnSchema.properties, "skills"));
     for (const skills of [
@@ -357,10 +360,10 @@ test('preserves the six schemas, dynamic routing, tool arguments, and return wra
       assert.deepEqual(plain(f.tools.get("spawn_agent").parameters), spawnSchema);
     }
     let spawned;
-    AgentManager.prototype.spawnAgent = async params => { spawned = params; return { task_name: "/task", nickname: null }; };
+    AgentManager.prototype.spawnAgent = async params => { spawned = params; return { task_name: "task", nickname: null }; };
     AgentManager.prototype.getAgentInfo = () => ({ provider: "test", modelId: "fake", thinking: "high" });
     const spawn = await f.call("spawn_agent", { task_name: "task", message: "work", model: "test/fake", thinking: "high" });
-    assert.deepEqual(spawn, { content: [{ type: "text", text: "Spawned /task." }], details: { task_name: "/task", nickname: null, provider: "test", modelId: "fake", thinking: "high" } });
+    assert.deepEqual(spawn, { content: [{ type: "text", text: "Spawned task." }], details: { task_name: "task", nickname: null, provider: "test", modelId: "fake", thinking: "high" } });
     assert.equal(spawned.parentSessionId, "parent");
     assert.equal(spawned.cwd, f.ctx.cwd);
     assert.equal(spawned.parentSessionFile, "parent.jsonl");
@@ -370,36 +373,35 @@ test('preserves the six schemas, dynamic routing, tool arguments, and return wra
     const signal = new AbortController().signal;
     const waiting = f.call("wait_agent", {}, f.ctx, signal);
     await new Promise(resolve => setImmediate(resolve));
-    options.onCompletion({ agentName: "/task", status: "completed", finalResponse: "must not repeat", parentSessionId: "parent" });
+    options.onCompletion({ taskName: "task", status: "completed", finalResponse: "must not repeat", parentSessionId: "parent" });
     const wait = await waiting;
     const expectedWait = { message: "Wait completed.", timed_out: false };
     assert.deepEqual(JSON.parse(wait.content[0].text), expectedWait);
     assert.deepEqual(wait.details, expectedWait);
     assert.deepEqual(wait.structuredContent, expectedWait);
     let listed;
-    AgentManager.prototype.listAgents = (...args) => { listed = args; return Array.from({ length: 12 }, (_, n) => ({ agent_name: "/" + n, agent_status: "completed", ...(args[2] ? { parent_session_id: "other" } : {}) })); };
+    const agents = Array.from({ length: 12 }, (_, n) => ({ agent_name: String(n), agent_status: "completed" }));
+    AgentManager.prototype.listAgents = (...args) => { listed = args; return agents; };
     const list = await f.call("list_agents", {});
-    assert.deepEqual(listed, [undefined, "parent", false]);
-    assert.equal(list.details.returned, 10);
-    assert.equal(list.details.next_offset, 10);
-    const history = await f.call("list_agents", { include_all: true, offset: 10 });
-    assert.deepEqual(listed, [undefined, "parent", true]);
-    assert.equal(history.details.returned, 2);
-    assert.equal(history.details.agents[0].parent_session_id, "other");
+    assert.deepEqual(listed, [undefined, "parent"]);
+    assert.deepEqual(list, { content: [{ type: "text", text: JSON.stringify({ agents }, null, 2) }], details: { agents }, structuredContent: { agents } });
+    const prefixed = await f.call("list_agents", { path_prefix: "review/auth" });
+    assert.deepEqual(listed, ["review/auth", "parent"], "Validated path prefixes are passed without normalization");
+    assert.deepEqual(prefixed.structuredContent, { agents });
     let scoped;
-    AgentManager.prototype.readAgentResponse = (...args) => { scoped = args; return { agent_name: "/task", status: "completed", finalResponse: "answer" }; };
-    const read = await f.call("read_agent_response", { target: " /task " });
-    assert.deepEqual(scoped, ["task", "parent"]);
-    assert.deepEqual(read.details, { agent_name: "/task", status: "completed" });
+    AgentManager.prototype.readAgentResponse = (...args) => { scoped = args; return { agent_name: "task", status: "completed", finalResponse: "answer" }; };
+    const read = await f.call("read_agent_response", { target: " task " });
+    assert.deepEqual(scoped, [" task ", "parent"], "Manager owns target trimming and validation");
+    assert.deepEqual(read.details, { agent_name: "task", status: "completed" });
     assert.equal(JSON.parse(read.content[0].text).finalResponse, "answer");
     for (const delivery of ["steer", "prompt"]) {
       AgentManager.prototype.sendMessage = async (...args) => { scoped = args; return { delivery, status: "running" }; };
-      const send = await f.call("send_message", { target: "/task", message: "next" });
+      const send = await f.call("send_message", { target: "task", message: "next" });
       assert.deepEqual(scoped, ["parent", "task", "next"]);
-      assert.deepEqual(send.details, { target: "/task", delivery, status: "running" });
+      assert.deepEqual(send.details, { target: "task", delivery, status: "running" });
     }
     AgentManager.prototype.interruptAgent = async (...args) => { scoped = args; return { previous_status: "running" }; };
-    const interrupt = await f.call("interrupt_agent", { target: "/task" });
+    const interrupt = await f.call("interrupt_agent", { target: "task" });
     assert.deepEqual(scoped, ["parent", "task"]);
     assert.deepEqual(interrupt, { content: [{ type: "text", text: "Interrupt request handled." }], details: { previous_status: "running" } });
     await f.emit("session_shutdown", { reason: "quit" });
@@ -407,7 +409,57 @@ test('preserves the six schemas, dynamic routing, tool arguments, and return wra
   );
 });
 
-test('exposes validated structured data without changing text, pagination or response truncation', () => {
+test('validates strict list path prefixes and rejects removed arguments through Pi native schema validation', () => {
+  probe(
+    hostFixture +
+      `const { validateToolArguments } = await import(${JSON.stringify(import.meta.resolve('@earendil-works/pi-ai'))});` +
+      String.raw`
+    const f = host();
+    await extension(f.pi);
+    const tool = f.tools.get("list_agents");
+    const validate = args => validateToolArguments(tool, { type: "toolCall", id: "resident-list", name: "list_agents", arguments: tool.prepareArguments(args) });
+    for (const args of [{}, { path_prefix: "review" }, { path_prefix: "review/auth" }, { path_prefix: "Review_1-A/part" }, { path_prefix: "123" }, { path_prefix: "true" }])
+      assert.deepEqual(validate(args), args, "Valid relative paths are not normalized");
+    for (const path_prefix of [null, 123, true, false, [], ["review"], {}, "", " ", "\t", "/", "/review", "//review", "review/", "review//", "review//auth",
+      " review", "review ", " review ", "review\n", "review\r", "review\r\n", "review\t", "review auth",
+      "review/ auth", "review/auth ", "review\\auth", ".", "..", "review/./auth", "review/../auth",
+      "review.auth", "review/*", "review?", "review#auth", "review:auth", "review%2fauth", "审查", "review/\u0000auth", "review\u2028", "review\u2029"])
+      assert.throws(() => validate({ path_prefix }), undefined, JSON.stringify(path_prefix));
+    for (const args of [{ include_all: true }, { include_all: false }, { limit: 1 }, { offset: 0 },
+      { path_prefix: "review", include_all: true, limit: 100, offset: 1 }, { unknown: true }])
+      assert.throws(() => validate(args), undefined, JSON.stringify(args));
+    assert.equal(options, undefined, "schema rejection does not create a Manager");
+  `,
+  );
+});
+
+test('keeps resident ordering and both render modes consistent with public list data', () => {
+  probe(
+    hostFixture +
+      String.raw`
+    const f = host();
+    await extension(f.pi);
+    AgentManager.prototype.listAgentInfos = () => { throw new Error("public lists must not read disk history"); };
+    const entries = ["completed", "starting", "failed", "running", "interrupted"].map((status, n) => ({
+      agent_name: "resident-" + n, agent_status: status,
+    }));
+    AgentManager.prototype.listAgents = (...args) => {
+      assert.deepEqual(args, [undefined, "parent"]);
+      return entries;
+    };
+    const expected = { agents: [entries[1], entries[3], entries[0], entries[2], entries[4]] };
+    const result = await f.call("list_agents", {});
+    assert.deepEqual(result, { content: [{ type: "text", text: JSON.stringify(expected, null, 2) }], details: expected, structuredContent: expected });
+    const theme = { fg: (_color, text) => text };
+    const render = expanded => f.tools.get("list_agents").renderResult(result, { expanded }, theme, { isError: false }).render(120).join("\n").trim();
+    assert.equal(render(false), "✓ 5 agents");
+    assert.deepEqual(JSON.parse(render(true)), expected);
+    await f.emit("session_shutdown", { reason: "quit" });
+  `,
+  );
+});
+
+test('exposes validated structured data and full resident lists without changing response truncation', () => {
   probe(
     hostFixture +
       `const { Value } = await import(${JSON.stringify(import.meta.resolve('typebox/value'))});` +
@@ -425,46 +477,40 @@ test('exposes validated structured data without changing text, pagination or res
     const statuses = ["starting", "running", "completed", "failed", "interrupted"];
     await f.emit("session_start");
     for (const status of ["completed", "failed"]) {
-      options.onCompletion({ agentName: "/worker", status, finalResponse: "private body", error: "private error", parentSessionId: "parent" });
+      options.onCompletion({ taskName: "worker", status, finalResponse: "private body", error: "private error", parentSessionId: "parent" });
       const result = await f.call("wait_agent", {});
       const expected = { message: "Wait completed.", timed_out: false };
       assert.deepEqual(check("wait_agent", result), expected);
       assert.deepEqual(result.details, expected);
     }
-    assert.equal(Value.Check(f.tools.get("wait_agent").outputSchema, { message: "Wait completed.", timed_out: false, agent_name: "/worker" }), false);
-    assert.equal(Value.Check(f.tools.get("wait_agent").outputSchema, { agent_name: "/worker", status: "completed" }), false);
+    assert.equal(Value.Check(f.tools.get("wait_agent").outputSchema, { message: "Wait completed.", timed_out: false, agent_name: "worker" }), false);
+    assert.equal(Value.Check(f.tools.get("wait_agent").outputSchema, { agent_name: "worker", status: "completed" }), false);
     for (const status of statuses) {
-      AgentManager.prototype.listAgents = (_prefix, _parent, all) => [{
-        agent_name: "/worker", agent_status: status, last_task_message: "excluded task",
-        ...(all ? { parent_session_id: "other" } : {}),
-      }];
+      AgentManager.prototype.listAgents = () => [{ agent_name: "worker", agent_status: status }];
       const listed = check("list_agents", await f.call("list_agents", {}));
-      assert.deepEqual(listed, { total: 1, returned: 1, offset: 0, limit: 10, next_offset: null, agents: [{ agent_name: "/worker", agent_status: status }] });
-      const history = check("list_agents", await f.call("list_agents", { include_all: true }));
-      assert.equal(history.agents[0].parent_session_id, "other");
-      AgentManager.prototype.readAgentResponse = () => ({ agent_name: "/worker", status, last_task_message: null });
+      assert.deepEqual(listed, { agents: [{ agent_name: "worker", agent_status: status }] });
+      AgentManager.prototype.readAgentResponse = () => ({ agent_name: "worker", status, last_task_message: null });
       const pending = check("read_agent_response", await f.call("read_agent_response", { target: "worker" }));
       assert.equal(Object.hasOwn(pending, "finalResponse"), false);
       assert.equal(Object.hasOwn(pending, "error"), false);
     }
-    AgentManager.prototype.listAgents = () => Array.from({ length: 12 }, (_, n) => ({ agent_name: "/" + n, agent_status: "completed" }));
-    const first = check("list_agents", await f.call("list_agents", {}));
-    assert.equal(first.returned, 10);
-    assert.equal(first.next_offset, 10);
-    const last = check("list_agents", await f.call("list_agents", { offset: 10 }));
-    assert.equal(last.returned, 2);
-    assert.equal(last.next_offset, null);
-    const empty = check("list_agents", await f.call("list_agents", { offset: 20 }));
-    assert.equal(empty.returned, 0);
-    assert.deepEqual(empty.agents, []);
+    for (const count of [12, 101]) {
+      const agents = Array.from({ length: count }, (_, n) => ({ agent_name: "worker-" + n, agent_status: "completed" }));
+      AgentManager.prototype.listAgents = () => agents;
+      const result = await f.call("list_agents", {});
+      assert.deepEqual(check("list_agents", result), { agents }, count + " residents must all be returned");
+      assert.deepEqual(result.details, { agents });
+      const theme = { fg: (_color, text) => text };
+      assert.equal(f.tools.get("list_agents").renderResult(result, { expanded: false }, theme, { isError: false }).render(120).join("\n").trim(), "✓ " + count + " agents");
+    }
     AgentManager.prototype.listAgents = () => [];
-    assert.equal(check("list_agents", await f.call("list_agents", {})).total, 0);
+    assert.deepEqual(check("list_agents", await f.call("list_agents", {})), { agents: [] });
     for (const fields of [{ finalResponse: "" }, { finalResponse: "answer" }, { error: "child failed" }]) {
-      const expected = { agent_name: "/worker", status: fields.error ? "failed" : "completed", last_task_message: "task", ...fields };
+      const expected = { agent_name: "worker", status: fields.error ? "failed" : "completed", last_task_message: "task", ...fields };
       AgentManager.prototype.readAgentResponse = () => expected;
       assert.deepEqual(check("read_agent_response", await f.call("read_agent_response", { target: "worker" })), expected);
     }
-    const expected = { agent_name: "/worker", status: "completed", last_task_message: null,
+    const expected = { agent_name: "worker", status: "completed", last_task_message: null,
       finalResponse: '中文🙂"\\\n'.repeat(10_000),
     };
     AgentManager.prototype.readAgentResponse = () => expected;
@@ -543,7 +589,7 @@ test('prefers exact registered model IDs before legacy thinking suffixes without
       assert.deepEqual(f.tools.get("spawn_agent").parameters.properties.model.enum, models);
       assert.deepEqual(f.notifications, [["spawn_agent models not available: test/fake:unknown, fake, test/*:high", "warning"]]);
       let spawned;
-      AgentManager.prototype.spawnAgent = async params => { spawned = params; return { task_name: "/task" }; };
+      AgentManager.prototype.spawnAgent = async params => { spawned = params; return { task_name: "task" }; };
       AgentManager.prototype.getAgentInfo = () => ({ ...spawned.model, thinking: spawned.inheritedThinking });
       for (const model of models) {
         await f.call("spawn_agent", { task_name: "task", message: "work", model });
@@ -637,7 +683,7 @@ test('activity waits keep notifications compact and preserve natural or idle con
     const f = host();
     await extension(f.pi);
     await f.emit("session_start");
-    const event = { parentSessionId: "parent", agentName: "/task", status: "completed", finalResponse: "notification body" };
+    const event = { parentSessionId: "parent", taskName: "task", status: "completed", finalResponse: "notification body" };
     for (const idle of [false, true]) {
       f.ctx.isIdle = () => idle;
       const waiting = f.call("wait_agent", {});
@@ -709,7 +755,7 @@ test('consumes only the latest pending activity and clears it at the next contex
     await extension(f.pi);
     await f.emit("session_start");
     f.ctx.isIdle = () => false;
-    const mail = { parentSessionId: "parent", agentName: "/worker", status: "completed", finalResponse: "mail is retained" };
+    const mail = { parentSessionId: "parent", taskName: "worker", status: "completed", finalResponse: "mail is retained" };
     const input = { text: "new instruction", source: "extension", streamingBehavior: "followUp" };
     const expectPending = async message => {
       const result = await f.call("wait_agent", {});
@@ -761,7 +807,7 @@ test('broadcasts activity to concurrent waits without stealing messages or cance
     f.ctx.isIdle = () => false;
     let interrupted = 0, finished = 0;
     AgentManager.prototype.interruptAgent = async () => { interrupted++; };
-    AgentManager.prototype.listAgents = () => [{ agent_name: "/worker", agent_status: "running" }];
+    AgentManager.prototype.listAgents = () => [{ agent_name: "worker", agent_status: "running" }];
     const controller = new AbortController();
     const canceled = f.call("wait_agent", {}, f.ctx, controller.signal);
     const rejection = assert.rejects(canceled, error => error === controller.signal.reason);
@@ -774,11 +820,11 @@ test('broadcasts activity to concurrent waits without stealing messages or cance
     assert.equal(getEventListeners(controller.signal, "abort").length, 0);
     assert.equal(interrupted, 0);
     assert.equal((await f.call("list_agents", {})).details.agents[0].agent_status, "running");
-    options.onCompletion({ parentSessionId: "other", agentName: "/ignored", status: "completed" });
-    options.onActivityChange({ parentSessionId: "parent", agentName: "/worker", active: false, status: "interrupted" });
+    options.onCompletion({ parentSessionId: "other", taskName: "ignored", status: "completed" });
+    options.onActivityChange({ parentSessionId: "parent", taskName: "worker", active: false, status: "interrupted" });
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(finished, 0, "other sessions and status-only updates are not notification activity");
-    const event = { parentSessionId: "parent", agentName: "/worker", status: "completed", finalResponse: "original child output" };
+    const event = { parentSessionId: "parent", taskName: "worker", status: "completed", finalResponse: "original child output" };
     options.onCompletion(event);
     const results = await Promise.all(waits);
     results.forEach(result => assert.deepEqual(result.details, { message: "Wait completed.", timed_out: false }));
@@ -799,7 +845,7 @@ test('cancels and detaches old waits on session start and shutdown, clearing pen
     const f = host();
     await extension(f.pi);
     await f.emit("session_start");
-    const mail = { parentSessionId: "parent", agentName: "/old", status: "completed", finalResponse: "old session output" };
+    const mail = { parentSessionId: "parent", taskName: "old", status: "completed", finalResponse: "old session output" };
     for (const lifecycle of ["session_start", "session_shutdown"]) {
       await f.emit("context", { messages: [] });
       const controller = new AbortController();
@@ -911,7 +957,7 @@ test('validates timeout-only arguments and clamps the minimum with a test-local 
       assert.equal(timers.size, 0, "canceling a wait clears its timeout");
       for (const activity of [
         () => f.emit("input", { text: "cleanup", source: "interactive" }),
-        () => options.onCompletion({ parentSessionId: "parent", agentName: "/worker", status: "completed" }),
+        () => options.onCompletion({ parentSessionId: "parent", taskName: "worker", status: "completed" }),
       ]) {
         const wait = f.call("wait_agent", {});
         await new Promise(resolve => setImmediate(resolve));
@@ -1002,8 +1048,8 @@ test('only native parent cancellation suppresses notification wakeups until a re
         await f.emit("session_start");
       }],
       ["child failure does not interrupt the parent", false, () => {
-        options.onActivityChange({ parentSessionId: "parent", agentName: "/failed-child", active: false, status: "failed" });
-        options.onCompletion({ parentSessionId: "parent", agentName: "/failed-child", status: "failed", error: "child budget exceeded" });
+        options.onActivityChange({ parentSessionId: "parent", taskName: "failed-child", active: false, status: "failed" });
+        options.onCompletion({ parentSessionId: "parent", taskName: "failed-child", status: "failed", error: "child budget exceeded" });
       }],
     ];
     for (const [label, interrupted, prepare] of cases) {
@@ -1023,15 +1069,15 @@ test('only native parent cancellation suppresses notification wakeups until a re
               await f.emit("context", { messages: [] });
               const wait = waiting ? f.call("wait_agent", {}) : undefined;
               await new Promise(resolve => setImmediate(resolve));
-              const agentName = "/child-" + sent++;
-              options.onCompletion({ parentSessionId: "parent", agentName, status, finalResponse: "retained result" });
+              const taskName = "child-" + sent++;
+              options.onCompletion({ parentSessionId: "parent", taskName, status, finalResponse: "retained result" });
               await wait;
               assert.equal(f.messages.length, initial + sent, label + ": every notification is retained");
               const { message, delivery } = f.messages.at(-1);
               assert.equal(message.customType, "pi-subagent-completion", label);
               assert.equal(message.display, true, label);
               assert.ok(message.content.includes("retained result"), label);
-              assert.deepEqual(message.details, { agent_name: agentName, status }, label);
+              assert.deepEqual(message.details, { agent_name: taskName, status }, label);
               assert.deepEqual(delivery, { deliverAs: "steer", triggerTurn: !interrupted && (!waiting || idle) },
                 label + ": " + JSON.stringify({ status, waiting, idle }));
             }
@@ -1056,28 +1102,28 @@ test('keeps scoped notifications, bounded full output, and widget/shortcut integ
     await extension(f.pi);
     await f.emit("session_start");
     assert.deepEqual([...f.shortcuts.keys()], ["ctrl+shift+a"]);
-    options.onActivityChange({ parentSessionId: "other", agentName: "/ignored", active: true });
-    options.onActivityChange({ parentSessionId: "parent", agentName: "/task", active: true });
+    options.onActivityChange({ parentSessionId: "other", taskName: "ignored", active: true });
+    options.onActivityChange({ parentSessionId: "parent", taskName: "task", active: true });
     const [key, widget] = f.widgets.at(-1);
     assert.equal(key, "pi-subagents");
     const theme = { fg: (_color, text) => text };
-    assert.ok(widget({}, theme).render(80).join("\n").includes("/task"));
+    assert.ok(widget({}, theme).render(80).join("\n").includes("task"));
     assert.ok(widget({}, theme).render(30).join("\n").includes("/subagents"));
-    options.onCompletion({ parentSessionId: "other", agentName: "/ignored", status: "completed" });
+    options.onCompletion({ parentSessionId: "other", taskName: "ignored", status: "completed" });
     assert.equal(f.messages.length, 0);
-    const event = { parentSessionId: "parent", agentName: "/task", status: "completed", finalResponse: "answer" };
+    const event = { parentSessionId: "parent", taskName: "task", status: "completed", finalResponse: "answer" };
     options.onCompletion(event);
     assert.deepEqual(f.messages[0], { message: {
       customType: "pi-subagent-completion",
-      content: "<subagent_notification>\n" + JSON.stringify({ agent_name: "/task", status: "completed", final_response: "answer" }, null, 2) + "\n</subagent_notification>",
-      display: true, details: { agent_name: "/task", status: "completed" },
+      content: "<subagent_notification>\n" + JSON.stringify({ agent_name: "task", status: "completed", final_response: "answer" }, null, 2) + "\n</subagent_notification>",
+      display: true, details: { agent_name: "task", status: "completed" },
     }, delivery: { deliverAs: "steer", triggerTurn: true } });
     options.onCompletion({ ...event, finalResponse: "x".repeat(100_000) });
     const large = f.messages.at(-1).message;
     assert.ok(Buffer.byteLength(large.content) <= 50 * 1024);
     assert.ok(large.content.includes("Output truncated"));
     assert.ok(fs.readFileSync(large.details.fullOutputPath, "utf8").includes("x".repeat(100_000)));
-    options.onActivityChange({ parentSessionId: "parent", agentName: "/task", active: false });
+    options.onActivityChange({ parentSessionId: "parent", taskName: "task", active: false });
     assert.equal(f.widgets.at(-1)[1], undefined);
     await f.emit("session_shutdown", { reason: "quit" });
     options.onCompletion(event);
@@ -1093,9 +1139,9 @@ test('startup summaries retain saved configured colors without exposing them in 
       String.raw`
     let lists = 0, samples = 0;
     let entries = [
-      { canonicalName: "/configured", status: "running", color: "red" },
-      { canonicalName: "/invalid", status: "running", color: {} },
-      { canonicalName: "/old", status: "running" },
+      { taskName: "configured", status: "running", color: "red" },
+      { taskName: "invalid", status: "running", color: {} },
+      { taskName: "old", status: "running" },
     ];
     AgentManager.prototype.listAgentInfos = () => { lists++; return entries; };
     AgentManager.prototype.listAgents = () => { throw new Error("presentation must not use the public tool view"); };
@@ -1114,7 +1160,7 @@ test('startup summaries retain saved configured colors without exposing them in 
     await new Promise(resolve => setTimeout(resolve, 450));
     assert.ok(samples > sampled);
     assert.equal(lists, 1, "timer sampling must not reread history/templates");
-    entries = [{ canonicalName: "/configured", status: "running" }];
+    entries = [{ taskName: "configured", status: "running" }];
     const next = { ...f.ctx, sessionManager: { getSessionId: () => "next-parent" } };
     await f.emit("session_start", {}, next);
     assert.ok(!f.widgets.at(-1)[1]({}, theme).render(120).join("").includes("\x1b[48;"), "no previous-parent badge color");
@@ -1130,15 +1176,15 @@ test('summarizes every current-session agent by latest status without polling hi
       String.raw`
     let listed = 0, sampled = 0;
     let entries = [
-      ...[0, 1, 2].map(n => ({ agent_name: "/r" + n, agent_status: n ? "running" : "starting" })),
-      ...[0, 1, 2].map(n => ({ agent_name: "/c" + n, agent_status: "completed" })),
-      ...[0, 1, 2].map(n => ({ agent_name: "/f" + n, agent_status: "failed" })),
-      ...[0, 1, 2].map(n => ({ agent_name: "/i" + n, agent_status: "interrupted" })),
+      ...[0, 1, 2].map(n => ({ agent_name: "r" + n, agent_status: n ? "running" : "starting" })),
+      ...[0, 1, 2].map(n => ({ agent_name: "c" + n, agent_status: "completed" })),
+      ...[0, 1, 2].map(n => ({ agent_name: "f" + n, agent_status: "failed" })),
+      ...[0, 1, 2].map(n => ({ agent_name: "i" + n, agent_status: "interrupted" })),
     ];
     let expectedParent = "parent";
-    AgentManager.prototype.listAgentInfos = (prefix, parent, all) => {
-      assert.equal(prefix, undefined); assert.equal(parent, expectedParent); assert.notEqual(all, true);
-      listed++; return entries.map(entry => ({ canonicalName: entry.agent_name, status: entry.agent_status }));
+    AgentManager.prototype.listAgentInfos = (prefix, parent) => {
+      assert.equal(prefix, undefined); assert.equal(parent, expectedParent);
+      listed++; return entries.map(entry => ({ taskName: entry.agent_name, status: entry.agent_status }));
     };
     AgentManager.prototype.getWidgetSnapshot = parent => {
       assert.equal(parent, expectedParent); sampled++; return [];
@@ -1152,21 +1198,21 @@ test('summarizes every current-session agent by latest status without polling hi
     const title = () => lines()[0];
     assert.equal(title(), "● Agents · 3 running · 3 completed · 3 failed · 3 interrupted · /subagents to view details");
     assert.equal(lines().length, 7);
-    assert.ok(lines().slice(1).join("\n").includes("/r0"));
-    assert.ok(!lines().slice(1).join("\n").match(/\/[cfi][0-2]/));
+    assert.ok(lines().slice(1).join("\n").includes("r0"));
+    assert.ok(!lines().slice(1).join("\n").match(/\b[cfi][0-2]\b/));
     const update = (name, status) => options.onActivityChange({
-      parentSessionId: "parent", agentName: name, status,
+      parentSessionId: "parent", taskName: name, status,
       active: status === "starting" || status === "running",
     });
-    update("/r1", "running"); update("/r1", "running"); update("/r0", "running");
-    options.onActivityChange({ parentSessionId: "other", agentName: "/ignored", active: false, status: "failed" });
+    update("r1", "running"); update("r1", "running"); update("r0", "running");
+    options.onActivityChange({ parentSessionId: "other", taskName: "ignored", active: false, status: "failed" });
     assert.equal(title(), "● Agents · 3 running · 3 completed · 3 failed · 3 interrupted · /subagents to view details");
-    update("/r0", "completed");
+    update("r0", "completed");
     assert.equal(title(), "● Agents · 2 running · 4 completed · 3 failed · 3 interrupted · /subagents to view details");
-    update("/c0", "starting"); update("/c0", "running");
-    update("/f0", "failed"); update("/i0", "interrupted");
+    update("c0", "starting"); update("c0", "running");
+    update("f0", "failed"); update("i0", "interrupted");
     assert.equal(title(), "● Agents · 3 running · 3 completed · 3 failed · 3 interrupted · /subagents to view details");
-    update("/r1", "failed"); update("/r2", "interrupted"); update("/c0", "completed");
+    update("r1", "failed"); update("r2", "interrupted"); update("c0", "completed");
     assert.deepEqual(lines(), ["○ Agents · 4 completed · 4 failed · 4 interrupted · /subagents to view details"]);
     const stoppedAt = sampled;
     await new Promise(resolve => setTimeout(resolve, 450));
@@ -1179,9 +1225,9 @@ test('summarizes every current-session agent by latest status without polling hi
     await f.emit("session_start", {}, next);
     assert.equal(f.widgets.at(-1)[1], undefined);
     assert.deepEqual(component.render(140), []);
-    options.onActivityChange({ parentSessionId: "parent", agentName: "/old", active: false, status: "completed" });
+    options.onActivityChange({ parentSessionId: "parent", taskName: "old", active: false, status: "completed" });
     assert.equal(f.widgets.at(-1)[1], undefined);
-    options.onActivityChange({ parentSessionId: expectedParent, agentName: "/new", active: true, status: "running" });
+    options.onActivityChange({ parentSessionId: expectedParent, taskName: "new", active: true, status: "running" });
     const newFactory = f.widgets.filter(([, content]) => typeof content === "function").at(-1)[1];
     const fresh = newFactory({}, { fg: (_c, s) => s });
     assert.equal(fresh.render(140)[0], "● Agents · 1 running · /subagents to view details");
@@ -1198,9 +1244,9 @@ test('restores a settled-only session heading without starting periodic history 
       String.raw`
     let lists = 0, samples = 0;
     AgentManager.prototype.listAgentInfos = () => { lists++; return [
-      { canonicalName: "/done", status: "completed" },
-      { canonicalName: "/error", status: "failed" },
-      { canonicalName: "/stopped", status: "interrupted" },
+      { taskName: "done", status: "completed" },
+      { taskName: "error", status: "failed" },
+      { taskName: "stopped", status: "interrupted" },
     ]; };
     AgentManager.prototype.getWidgetSnapshot = () => { samples++; return []; };
     const f = host();
@@ -1231,19 +1277,19 @@ test('updates live model summaries without messages, focus changes, or repeated 
     await extension(f.pi);
     await f.emit("session_start");
     rows = [{
-      canonicalName: "/review", status: "running", provider: "openai-codex",
+      taskName: "review", status: "running", provider: "openai-codex",
       modelId: "gpt-6.1-sol", thinking: "max", tokens: 33800,
       contextUsage: { contextWindow: 500000, tokens: 310000, percent: 62 },
       compactionCount: 1, elapsedMs: 12300, activeTools: ["read"],
       lastTaskMessage: "PRIVATE TASK DESCRIPTION", turnCount: 17, toolUses: 99,
     }];
-    options.onActivityChange({ parentSessionId: "parent", agentName: "/review", active: true });
+    options.onActivityChange({ parentSessionId: "parent", taskName: "review", active: true });
     const factories = () => f.widgets.filter(([, content]) => typeof content === "function");
     const factory = factories().at(-1)[1];
     let renders = 0;
     const component = factory({ terminal: { rows: 40 }, requestRender() { renders++; } }, { fg: (_c, s) => s });
     const text = component.render(140).join("\n");
-    assert.ok(text.includes("/review"));
+    assert.ok(text.includes("review"));
     assert.ok(text.includes("openai-codex/gpt-6.1-sol/max"));
     assert.ok(text.includes("33.8k token (62% · ↓1)"));
     assert.ok(text.includes("12s"));
@@ -1258,7 +1304,7 @@ test('updates live model summaries without messages, focus changes, or repeated 
     assert.ok(scopes.length > 1 && scopes.every(scope => scope === "parent"));
     assert.equal(f.messages.length, 0);
     rows = [];
-    options.onActivityChange({ parentSessionId: "parent", agentName: "/review", active: false });
+    options.onActivityChange({ parentSessionId: "parent", taskName: "review", active: false });
     assert.equal(f.widgets.at(-1)[1], undefined);
     await f.emit("session_shutdown", { reason: "quit" });
     component.dispose?.();
@@ -1276,7 +1322,7 @@ test('does not mount summary widgets in RPC, JSON, or print mode', () => {
       f.ctx.hasUI = mode === "rpc";
       await extension(f.pi);
       await f.emit("session_start");
-      options.onActivityChange({ parentSessionId: "parent", agentName: "/task", active: true });
+      options.onActivityChange({ parentSessionId: "parent", taskName: "task", active: true });
       assert.equal(f.widgets.length, 0);
       await f.emit("session_shutdown", { reason: "quit" });
       assert.equal(f.widgets.length, 0);
@@ -1291,7 +1337,7 @@ test.each(['regular', 'fullscreen'] as const)(
     const { AgentSummaryWidget } = await import('../src/widget.js');
     let rows = [
       {
-        canonicalName: '/review',
+        taskName: 'review',
         status: 'running' as const,
         provider: 'openai-codex',
         modelId: 'gpt-6.1-sol',
@@ -1426,7 +1472,7 @@ test('reports persistence/cleanup errors on every shutdown reason even if widget
       await extension(f.pi);
       await f.emit("session_start");
       const count = shutdownCalls;
-      options.onActivityChange({ parentSessionId: "parent", agentName: "/task", active: true });
+      options.onActivityChange({ parentSessionId: "parent", taskName: "task", active: true });
       AgentManager.prototype.shutdown = async function() {
         shutdownCalls++;
         throw new AggregateError([new Error("save failed"), new Error("dispose failed")], "shutdown failed");
@@ -1527,7 +1573,7 @@ test.each(runtimes)(
         assert.equal(parent.requests.length, 1, cancellation + ": child completion must not wake the canceled parent");
         assert.equal(child.activeStreams, 0, cancellation);
         const notification = notifications()[0];
-        assert.deepEqual(notification.details, { agent_name: "/survivor", status: "completed" });
+        assert.deepEqual(notification.details, { agent_name: "survivor", status: "completed" });
         assert.equal(notification.display, true);
         assert.ok(textOf(notification).includes("response:hold child " + cancellation), "completed child output stays in history");
         await session.prompt("resume after " + cancellation);
@@ -1602,7 +1648,7 @@ test.each(runtimes)(
       const spawnTool = () => session.getToolDefinition("spawn_agent");
       const schema = JSON.stringify(spawnTool().parameters);
       const checkDescription = (description, firstLine) => {
-        assert.ok(description.includes("Continue other assigned work"));
+        assert.match(description, /continue other.*work/i);
         assert.ok(description.includes("wait_agent only when blocked"));
         assert.ok(description.includes("  Description:\n    " + firstLine + "\n    <rules>\n      <rule>Reuse & trust.</rule>\n    </rules>\n    Give exact paths.\n    - Narrow scope."), description);
         assert.ok(description.includes("model: test/fake — thinking: off"), description);
@@ -1800,12 +1846,12 @@ test.each(runtimes)(
       'if (typeof waited !== "object" || typeof waited.message !== "string" || waited.timed_out !== false || Object.keys(waited).length !== 2) throw new Error("wait contract");',
       'await tools.fixture_child_done({ expected: "child: first" });',
       'const listed = await tools.list_agents({});',
-      'if (typeof listed !== "object" || listed.total !== 1 || listed.agents[0].agent_name !== "/worker" || listed.next_offset !== null) throw new Error("list contract");',
+      'if (listed === null || typeof listed !== "object" || Object.keys(listed).join() !== "agents" || !Array.isArray(listed.agents) || listed.agents.length !== 1 || Object.keys(listed.agents[0]).sort().join() !== "agent_name,agent_status" || listed.agents[0].agent_name !== "worker" || listed.agents[0].agent_status !== "completed") throw new Error("list contract");',
       'const response = await tools.read_agent_response({ target: "worker" });',
       'if (typeof response !== "object" || response.finalResponse !== "child: first") throw new Error("read contract");',
       'const missing = await Promise.allSettled([tools.read_agent_response({ target: "missing" }), tools.wait_agent({ timeout_ms: 3600001 })]);',
       'if (missing.some(result => result.status !== "rejected")) throw new Error("tool errors must reject");',
-      'const redacted = await tools.read_agent_response({ target: "/worker" });',
+      'const redacted = await tools.read_agent_response({ target: "worker" });',
       'if (redacted !== "redacted by test hook") throw new Error("native redaction must not leak structured data");',
       'await tools.send_message({ target: "worker", message: "x".repeat(100000) });',
       'const second = await tools.wait_agent({});',
@@ -1825,6 +1871,7 @@ test.each(runtimes)(
     });
     settingsManager.setProjectTrusted(false);
     const successful = [], failures = [];
+    let workerReads = 0;
     const services = await createAgentSessionServices({ cwd: agentDir, agentDir, settingsManager,
       resourceLoaderOptions: {
         noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
@@ -1845,7 +1892,7 @@ test.each(runtimes)(
             },
           });
           pi.on("tool_result", event => {
-            if (event.toolName === "read_agent_response" && event.input.target === "/worker")
+            if (event.toolName === "read_agent_response" && event.input.target === "worker" && ++workerReads === 2)
               return { content: [{ type: "text", text: "redacted by test hook" }] };
           });
           pi.on("tool_execution_end", event => {
@@ -1879,6 +1926,7 @@ test.each(runtimes)(
       assert.ok(!output.includes("x".repeat(1000)), "codemode must only print the selected fields");
       assert.equal(successful.length, 5, JSON.stringify({ names: successful.map(event => event.toolName), errors }));
       assert.equal(failures.length, 2);
+      assert.equal(workerReads, 3, "only the second legal worker read is redacted");
       assert.ok(failures.every(event => event.result.structuredContent === undefined));
       const large = successful.find(event => event.result.details?.truncated);
       assert.ok(large);
@@ -1957,7 +2005,7 @@ test.each(runtimes)(
               } else {
                 const spawned = await session.getToolDefinition("spawn_agent").execute("early-child",
                   { task_name: "worker", message: "original child task" }, undefined, undefined, ctx);
-                assert.equal(spawned.details.task_name, "/worker");
+                assert.equal(spawned.details.task_name, "worker");
                 fs.writeFileSync(path.join(child.directory, "release-response"), "");
                 await earlyNotice.promise;
               }
@@ -2026,7 +2074,7 @@ test.each(runtimes)(
           const notices = request.userTexts.filter(text => text.startsWith("<subagent_notification>"));
           assert.equal(notices.length, 1);
           const original = JSON.parse(notices[0].replace("<subagent_notification>", "").replace("</subagent_notification>", ""));
-          assert.deepEqual(original, { agent_name: "/worker", status: "completed", final_response: "child: original child task" });
+          assert.deepEqual(original, { agent_name: "worker", status: "completed", final_response: "child: original child task" });
           assert.equal(session.messages.filter(message => message.role === "custom" && message.customType === "pi-subagent-completion").length, 1);
         }
         const controller = new AbortController();
@@ -2214,9 +2262,38 @@ test.each(runtimes)(
             assert.match(JSON.stringify(result.result.content), /timeout_ms.*integer/i);
           } finally { clearTimeout(guard); }
         }
+        // Exercise the native nested-tool schema path; direct execute would bypass this validation.
+        for (const args of [{ include_all: true }, { limit: 1 }, { offset: 0 }]) {
+          const rejected = await ctx.executeTool("list_agents", args);
+          assert.equal(rejected.isError, true, "removed list arguments: " + JSON.stringify(args));
+          assert.match(JSON.stringify(rejected.result.content), new RegExp(Object.keys(args)[0]));
+        }
+        for (const path_prefix of [null, 123, true, false, [], ["review"], {}, "", "   ",
+          "/review", "review/", " review ", "review//auth", "review\n", "review\r", "review\u2028", "review\u2029"]) {
+          const rejected = await ctx.executeTool("list_agents", { path_prefix });
+          assert.equal(rejected.isError, true, "invalid list path: " + JSON.stringify(path_prefix));
+          assert.match(JSON.stringify(rejected.result.content), /path_prefix/);
+        }
+        assert.equal(created, 0, "invalid list arguments must not allocate children");
         const spawned = await call("spawn_agent", { task_name: "worker", message: "child work" });
-        assert.equal(spawned.details.task_name, "/worker");
+        assert.equal(spawned.details.task_name, "worker");
+        for (const target of ["/worker", "worker/"]) {
+          for (const name of ["read_agent_response", "send_message", "interrupt_agent"]) {
+            const args = name === "send_message" ? { target, message: "must not deliver" } : { target };
+            const rejected = await ctx.executeTool(name, args);
+            assert.equal(rejected.isError, true, name + ": " + target);
+            assert.match(JSON.stringify(rejected.result.content), /task_name must use/);
+          }
+          const rejected = await ctx.executeTool("spawn_agent", { task_name: target, message: "must not run" });
+          assert.equal(rejected.isError, true, "invalid spawn: " + target);
+          assert.match(JSON.stringify(rejected.result.content), /task_name must use/);
+        }
+        assert.equal(created, 1, "invalid names must not allocate children");
+        assert.equal(disposed, 0, "invalid targets must not stop the existing worker");
         assert.equal((await call("list_agents", {})).details.agents[0].agent_status, "running");
+        assert.deepEqual((await call("list_agents", { path_prefix: "worker" })).details.agents,
+          [{ agent_name: "worker", agent_status: "running" }]);
+        assert.deepEqual((await call("list_agents", { path_prefix: "work" })).details.agents, []);
         // Spawn acceptance precedes the worker's assistant-response timer.
         const responseDeadline = Date.now() + 2_000;
         while (!timeouts.size && Date.now() < responseDeadline) await delay(5);
@@ -2225,13 +2302,13 @@ test.each(runtimes)(
         const blocked = await ctx.executeTool("spawn_agent", { task_name: "blocked", message: "over capacity" });
         assert.equal(blocked.isError, true);
         assert.match(JSON.stringify(blocked.result.content), /capacity/i);
-        assert.deepEqual((await call("list_agents", {})).details.agents.map(agent => [agent.agent_name, agent.agent_status]), [["/worker", "running"]],
+        assert.deepEqual((await call("list_agents", {})).details.agents.map(agent => [agent.agent_name, agent.agent_status]), [["worker", "running"]],
           "capacity rejection must not leave an agent record");
         assert.deepEqual(counts(), activeResources, "capacity rejection must not allocate child resources");
         assert.equal(created, 1);
         assert.equal(disposed, 0);
         assert.equal(session.isStreaming, true, "the active parent does not consume child capacity");
-        assert.equal((await call("send_message", { target: "/worker", message: "steered work" })).details.delivery, "steer");
+        assert.equal((await call("send_message", { target: "worker", message: "steered work" })).details.delivery, "steer");
         const controller = new AbortController();
         const canceledWait = ctx.executeTool("wait_agent", {}, { signal: controller.signal });
         await delay(5);
@@ -2270,8 +2347,9 @@ test.each(runtimes)(
         fs.rmSync(path.join(childFixture.directory, "release-response"));
         await call("spawn_agent", { task_name: "canceled", message: "cancel child work" });
         assert.equal((await call("interrupt_agent", { target: "canceled" })).details.previous_status, "running");
-        assert.equal((await call("list_agents", {})).details.agents.find(agent => agent.agent_name === "/canceled").agent_status, "interrupted");
+        assert.equal((await call("list_agents", {})).details.agents.find(agent => agent.agent_name === "canceled").agent_status, "interrupted");
         await reclaimed("interruption");
+        assert.deepEqual((await call("list_agents", {})).structuredContent, { agents: [] }, "terminated children leave only disk history");
         assert.equal(created, 11);
         assert.equal(disposed, 11);
         assert.equal(session.isStreaming, true, "child work/cancellation must not stop the active parent turn");
@@ -2380,7 +2458,7 @@ test.each(runtimes)(
     const startChild = async task => {
       const session = runtime.session, ctx = session.extensionRunner.createContext();
       const result = await session.getToolDefinition("spawn_agent").execute("lifecycle-probe", { task_name: task, message: "pending child " + task }, undefined, undefined, ctx);
-      assert.equal(result.details.task_name, "/" + task);
+      assert.equal(result.details.task_name, task);
       return ctx.sessionManager.getSessionId();
     };
     const checkClosed = async (task, parentId) => {
@@ -2556,7 +2634,6 @@ describe('extension completion delivery and TUI', () => {
         id,
         parentSessionId: parentId,
         taskName: 'contract',
-        canonicalName: '/contract',
         status: 'completed',
         cwd: TEST_AGENT_DIR,
         provider: 'test',
@@ -2722,7 +2799,6 @@ describe('extension completion delivery and TUI', () => {
         const info: AgentInfo = {
           id,
           taskName: name,
-          canonicalName: `/${name}`,
           parentSessionId: parent,
           status: 'completed',
           cwd: TEST_AGENT_DIR,
@@ -2876,7 +2952,9 @@ describe('extension completion delivery and TUI', () => {
       browser
         .render(120)
         .map(stripVTControlCharacters)
-        .filter((line: string) => /^[› ] \//.test(line))
+        .filter((line: string) =>
+          /^[› ] \S+\s+(?:starting|running|completed|failed|interrupted)\s/.test(line),
+        )
         .map((line: string) => line.trim().replace(/^› /, '').split(/\s+/)[0]);
 
     test('always groups Active before Done with presentation-only ordering', async () => {
@@ -2889,31 +2967,27 @@ describe('extension completion delivery and TUI', () => {
           f.put('failed', { status: 'failed', createdAt: 20, completedAt: 500 });
           f.put('interrupted', { status: 'interrupted', createdAt: 10, completedAt: 400 });
           expect(browserNames(browser)).toEqual([
-            '/starting',
-            '/running',
-            '/failed',
-            '/interrupted',
-            '/completed',
+            'starting',
+            'running',
+            'failed',
+            'interrupted',
+            'completed',
           ]);
           const lines = browser.render(120);
           expect(lines).toContain(' Active (2)');
           expect(lines).toContain(' Done (3)');
           expect(lines.join('\n')).toContain('2 Active · 3 Done');
-          expect(selectedRow(browser)).toContain('/starting');
+          expect(selectedRow(browser)).toContain('starting');
           browser.handleInput('j');
-          expect(selectedRow(browser)).toContain('/running');
+          expect(selectedRow(browser)).toContain('running');
           browser.handleInput('j');
-          expect(selectedRow(browser)).toContain('/failed'); // The group heading is not selectable.
+          expect(selectedRow(browser)).toContain('failed'); // The group heading is not selectable.
           const tool = await f.tools
             .get('list_agents')
             .execute('list', {}, undefined, undefined, f.ctx);
-          expect(tool.details.agents.map((entry: any) => entry.agent_name)).toEqual([
-            '/starting',
-            '/running',
-            '/completed',
-            '/failed',
-            '/interrupted',
-          ]);
+          expect(tool.details).toEqual({ agents: [] });
+          expect(tool.structuredContent).toEqual({ agents: [] });
+          expect(JSON.parse(tool.content[0].text)).toEqual({ agents: [] });
           browser.handleInput('q');
         });
       });
@@ -2943,17 +3017,17 @@ describe('extension completion delivery and TUI', () => {
                 createdAt: 200,
                 infoFile: path.join(scope, 'c.info.json'),
               });
-              expect(browserNames(browser)).toEqual(['/newer', '/older', '/missing']);
+              expect(browserNames(browser)).toEqual(['newer', 'older', 'missing']);
               browser.handleInput('\r');
             },
             (overlay: any, index: number) =>
               overlay.handleInput(['\x1b[C', '\x1b[C', '\x1b[C', 'q'][index]),
           );
-          expect(f.opened.map((info: AgentInfo) => info.canonicalName)).toEqual([
-            '/newer',
-            '/older',
-            '/missing',
-            '/newer',
+          expect(f.opened.map((info: AgentInfo) => info.taskName)).toEqual([
+            'newer',
+            'older',
+            'missing',
+            'newer',
           ]);
         });
       },
@@ -2979,15 +3053,15 @@ describe('extension completion delivery and TUI', () => {
           ];
           const before = records.map((info) => fs.readFileSync(info.infoFile, 'utf8'));
           const expected = [
-            '/latest',
-            '/legacy',
-            '/invalid',
-            '/created-only',
-            '/tie-new',
-            '/tie-a',
-            '/tie-b',
-            '/zero',
-            '/missing',
+            'latest',
+            'legacy',
+            'invalid',
+            'created-only',
+            'tie-new',
+            'tie-a',
+            'tie-b',
+            'zero',
+            'missing',
           ];
           expect(browserNames(browser)).toEqual(expected);
           browser.handleInput('r');
@@ -3019,7 +3093,7 @@ describe('extension completion delivery and TUI', () => {
               for (const key of ['j', 'k', '\r']) browser.handleInput(key);
               expect(f.selections).toEqual([]);
               expect(selectedRow(browser)).toBe('');
-            } else expect(selectedRow(browser)).toContain('/only');
+            } else expect(selectedRow(browser)).toContain('only');
             browser.handleInput('q');
           });
         });
@@ -3076,15 +3150,15 @@ describe('extension completion delivery and TUI', () => {
             browser.handleInput('j');
             check();
           }
-          expect(selectedRow(browser)).toContain('/done/0');
-          expect(browserNames(browser).some((name: string) => name.startsWith('/active/'))).toBe(
+          expect(selectedRow(browser)).toContain('done/0');
+          expect(browserNames(browser).some((name: string) => name.startsWith('active/'))).toBe(
             true,
           );
           for (let index = 0; index < 11; index++) {
             browser.handleInput('j');
             check();
           }
-          expect(selectedRow(browser)).toContain('/done/11');
+          expect(selectedRow(browser)).toContain('done/11');
           expect(check()).toContain('  ↑ 12 more');
           browser.handleInput('q');
         });
@@ -3100,7 +3174,7 @@ describe('extension completion delivery and TUI', () => {
           f.put('worker', { status: 'completed', completedAt: 400 });
           expect(browser.render(120)).toBe(initial);
           browser.handleInput('r');
-          expect(browserNames(browser)).toEqual(['/other', '/worker']);
+          expect(browserNames(browser)).toEqual(['other', 'worker']);
           expect(browser.render(120).join('\n')).not.toMatch(/^\s*Active \(/m);
           expect(browser.render(120)).toContain(' Done (2)');
           f.put('worker', { status: 'starting' }); // A stale prior completion does not make it Done.
@@ -3109,10 +3183,10 @@ describe('extension completion delivery and TUI', () => {
           expect(browser.render(120)).toContain(' Done (1)');
           f.put('worker', { status: 'running', completedAt: undefined });
           browser.handleInput('r');
-          expect(browserNames(browser)).toEqual(['/worker', '/other']);
+          expect(browserNames(browser)).toEqual(['worker', 'other']);
           f.put('worker', { status: 'interrupted', completedAt: 700 });
           browser.handleInput('r');
-          expect(browserNames(browser)).toEqual(['/worker', '/other']);
+          expect(browserNames(browser)).toEqual(['worker', 'other']);
           browser.handleInput('q');
         });
       });
@@ -3127,7 +3201,7 @@ describe('extension completion delivery and TUI', () => {
             f.put('late', { createdAt: 1, completedAt: 600 });
             f.put('early', { createdAt: 999, completedAt: 500 });
             f.put('late', { completedAt: 99999 }, f.otherId);
-            expect(browserNames(browser)).toEqual(['/starting', '/running', '/late', '/early']);
+            expect(browserNames(browser)).toEqual(['starting', 'running', 'late', 'early']);
             browser.handleInput('\r');
           },
           (overlay: any, index: number) => {
@@ -3137,12 +3211,12 @@ describe('extension completion delivery and TUI', () => {
             overlay.handleInput(['\x1b[C', '\x1b[D', '\x1b[D', '\x1b[C', 'q'][index]);
           },
         );
-        expect(f.opened.map((info: AgentInfo) => info.canonicalName)).toEqual([
-          '/starting',
-          '/late',
-          '/starting',
-          '/running',
-          '/starting',
+        expect(f.opened.map((info: AgentInfo) => info.taskName)).toEqual([
+          'starting',
+          'late',
+          'starting',
+          'running',
+          'starting',
         ]);
         expect(f.opened.every((info: AgentInfo) => info.parentSessionId === f.parentId)).toBe(true);
       });
@@ -3214,26 +3288,26 @@ describe('extension completion delivery and TUI', () => {
                 }
                 return lines;
               };
-              const first = checkRow('/review', 'red', true);
+              const first = checkRow('review', 'red', true);
               expect(first.join('')).toContain(theme.fg('error', 'failed'.padEnd(11)));
-              checkRow('/tests', 'red', false);
-              checkRow('/plain', undefined, false);
-              checkRow('/invalid', undefined, false);
-              checkRow('/bad-record', undefined, false);
+              checkRow('tests', 'red', false);
+              checkRow('plain', undefined, false);
+              checkRow('invalid', undefined, false);
+              checkRow('bad-record', undefined, false);
               const reads = f.list.mock.calls.length;
               expect(browser.render(120)).toBe(first);
               expect(f.list).toHaveBeenCalledTimes(reads);
               browser.handleInput('j');
-              checkRow('/review', 'red', false);
-              checkRow('/tests', 'red', true);
+              checkRow('review', 'red', false);
+              checkRow('tests', 'red', true);
               browser.handleInput('j');
-              checkRow('/plain', undefined, true); // Selection also works without an identity color.
+              checkRow('plain', undefined, true); // Selection also works without an identity color.
               for (const width of [0, 1, 2, 32, 38, 50, 80, 120])
                 expect(
                   browser.render(width).every((line: string) => visibleWidth(line) <= width),
                 ).toBe(true);
               browser.handleInput('k');
-              checkRow('/tests', 'red', true);
+              checkRow('tests', 'red', true);
               // Theme invalidation changes selection/text, not explicit configured identity RGB.
               const replacement = nativeTheme(appearance === 'dark' ? 'light' : 'dark', mode);
               f.ctx.ui.theme = replacement;
@@ -3298,7 +3372,7 @@ describe('extension completion delivery and TUI', () => {
             scans = spyOn(fs, 'readdirSync');
           try {
             const summary = component.render(140);
-            expect(summary[1]).toContain(renderAgentBadge('/e2e-colored', theme, 'cyan'));
+            expect(summary[1]).toContain(renderAgentBadge('e2e-colored', theme, 'cyan'));
             expect(summary[3]).not.toMatch(/\x1b\[48;/);
             expect(summary[5]).not.toMatch(/\x1b\[48;/);
             widget.refresh();
@@ -3309,11 +3383,11 @@ describe('extension completion delivery and TUI', () => {
               const lines = browser.render(120);
               expect(
                 lines.find((line: string) =>
-                  stripVTControlCharacters(line).includes('/e2e-colored'),
+                  stripVTControlCharacters(line).includes('e2e-colored'),
                 ),
-              ).toContain(renderAgentBadge('/e2e-colored', theme, 'cyan'));
-              expect(lines.join('')).toContain('/e2e-invalid');
-              expect(lines.join('')).toContain('/e2e-plain');
+              ).toContain(renderAgentBadge('e2e-colored', theme, 'cyan'));
+              expect(lines.join('')).toContain('e2e-invalid');
+              expect(lines.join('')).toContain('e2e-plain');
               browser.handleInput('q');
             });
             expect(
@@ -3340,7 +3414,7 @@ describe('extension completion delivery and TUI', () => {
     test('sanitizes untrusted browser names and metadata before explicit badge styling', async () => {
       await withBrowser(async (f) => {
         f.put('unsafe', {
-          canonicalName: '\x1b[31m/工人😀\x1b[0m\nworker\x07',
+          taskName: '\x1b[31m工人😀\x1b[0m\nworker\x07',
           color: '#0077cc',
           modelId: '\x1b[31mmodel\x1b[0m\t中文',
           lastTaskMessage: '\x1b]8;;https://unsafe.invalid\x07public preview\x1b]8;;\x07\nmore\x9f',
@@ -3357,7 +3431,7 @@ describe('extension completion delivery and TUI', () => {
             }
           }
           const text = browser.render(120).map(stripVTControlCharacters).join('\n');
-          expect(text).toContain('/工人😀 worker');
+          expect(text).toContain('工人😀 worker');
           expect(text).toContain('public preview more');
           browser.handleInput('q');
         });
@@ -3433,7 +3507,7 @@ describe('extension completion delivery and TUI', () => {
           f.put('done', { createdAt: 100, completedAt: 100 });
           const clock = spyOn(Date, 'now').mockReturnValue(now);
           try {
-            expect(browser.render(120).find((line: string) => line.includes('/worker'))).toMatch(
+            expect(browser.render(120).find((line: string) => line.includes('worker'))).toMatch(
               /running\s+5s/,
             );
             const lists = f.list.mock.calls.length;
@@ -3445,17 +3519,17 @@ describe('extension completion delivery and TUI', () => {
             f.put('new', { status: 'running', createdAt: 300 });
             clock.mockReturnValue(now + 5000);
             browser.handleInput('j');
-            expect(selectedRow(browser)).toContain('/done');
-            expect(browser.render(120).find((line: string) => line.includes('/worker'))).toMatch(
+            expect(selectedRow(browser)).toContain('done');
+            expect(browser.render(120).find((line: string) => line.includes('worker'))).toMatch(
               /running\s+10s/,
             );
-            expect(browserNames(browser)).toEqual(['/worker', '/done']);
+            expect(browserNames(browser)).toEqual(['worker', 'done']);
             expect(browser.render(120).join('\n')).toContain('original preview');
             expect(f.list).toHaveBeenCalledTimes(lists);
             browser.handleInput('r');
-            expect(browserNames(browser)).toEqual(['/new', '/worker', '/done']);
+            expect(browserNames(browser)).toEqual(['new', 'worker', 'done']);
             expect(browser.render(120).join('\n')).toContain('updated preview');
-            expect(browser.render(120).find((line: string) => line.includes('/worker'))).toMatch(
+            expect(browser.render(120).find((line: string) => line.includes('worker'))).toMatch(
               /completed\s+5s/,
             );
             expect(f.list).toHaveBeenCalledTimes(lists + 1);
@@ -3484,9 +3558,9 @@ describe('extension completion delivery and TUI', () => {
           f.put('empty', { createdAt: 100, lastTaskMessage: '' });
           await f.open((browser: any) => {
             const lines = browser.render(120);
-            const review = lines.findIndex((line: string) => line.includes('/review'));
-            const plain = lines.findIndex((line: string) => line.includes('/plain'));
-            const empty = lines.findIndex((line: string) => line.includes('/empty'));
+            const review = lines.findIndex((line: string) => line.includes('review'));
+            const plain = lines.findIndex((line: string) => line.includes('plain'));
+            const empty = lines.findIndex((line: string) => line.includes('empty'));
             expect(lines[review + 1]).toBe('  中文任务 preview');
             expect(plain).toBe(review + 2);
             expect(empty).toBe(plain + 1);
@@ -3543,12 +3617,12 @@ describe('extension completion delivery and TUI', () => {
             browser.handleInput(index % 2 ? 'j' : '\x1b[B');
             browser.render(120);
           }
-          expect(selectedRow(browser)).toContain('/history/11');
+          expect(selectedRow(browser)).toContain('history/11');
           expect(browser.render(120).join('\n')).toContain('↑ 2 more');
           browser.handleInput('\x1b[A');
-          expect(selectedRow(browser)).toContain('/history/10');
+          expect(selectedRow(browser)).toContain('history/10');
           browser.handleInput('k');
-          expect(selectedRow(browser)).toContain('/history/9');
+          expect(selectedRow(browser)).toContain('history/9');
           browser.handleInput('j');
           browser.render(120);
           browser.handleInput('j');
@@ -3556,7 +3630,7 @@ describe('extension completion delivery and TUI', () => {
           f.remove(history[11]);
           f.remove(history[10]);
           browser.handleInput('r');
-          expect(selectedRow(browser)).toContain('/history/9');
+          expect(selectedRow(browser)).toContain('history/9');
           for (const info of history) f.remove(info);
           browser.handleInput('r');
           expect(browser.render(80).join('\n')).toContain('No done subagents.');
@@ -3564,10 +3638,10 @@ describe('extension completion delivery and TUI', () => {
           expect(f.selections).toEqual([]);
           f.put('returned');
           browser.handleInput('r');
-          expect(selectedRow(browser)).toContain('/returned');
+          expect(selectedRow(browser)).toContain('returned');
           browser.handleInput('\r');
         });
-        expect(f.opened.map((info: AgentInfo) => info.canonicalName)).toEqual(['/returned']);
+        expect(f.opened.map((info: AgentInfo) => info.taskName)).toEqual(['returned']);
       });
     });
 
@@ -3580,7 +3654,7 @@ describe('extension completion delivery and TUI', () => {
           await f.open((browser: any) => {
             browser.render(120);
             browser.handleInput('j');
-            expect(selectedRow(browser)).toContain('/target');
+            expect(selectedRow(browser)).toContain('target');
             f.put('inserted', { createdAt: 300 });
             if (refresh === 'r pending') browser.handleInput('r');
             if (refresh === 'Tab ignored') browser.handleInput('\t');
@@ -3590,7 +3664,7 @@ describe('extension completion delivery and TUI', () => {
             expect(f.list).toHaveBeenCalledTimes(reads);
           });
           expect(f.selections).toEqual([undefined]);
-          expect(f.opened[0].canonicalName).toBe('/target');
+          expect(f.opened[0].taskName).toBe('target');
         });
       },
     );
@@ -3612,32 +3686,33 @@ describe('extension completion delivery and TUI', () => {
           try {
             expect(() => browser.render(80)).not.toThrow();
             expect(removed).toBe(true);
-            expect(browser.render(80).join('\n')).not.toContain('/gone');
-            expect(selectedRow(browser, 80)).toContain('/survivor');
+            expect(browser.render(80).join('\n')).not.toContain('gone');
+            expect(selectedRow(browser, 80)).toContain('survivor');
             browser.handleInput('\r');
           } finally {
             read.mockRestore();
           }
         });
-        expect(f.opened[0].canonicalName).toBe('/survivor');
+        expect(f.opened[0].taskName).toBe('survivor');
       });
     });
 
     test.each([undefined, null, 42, '', ' \t '])(
       'skips an invalid persisted task label (%s) without opening another agent',
-      async (canonicalName) => {
+      async (taskName) => {
         await withBrowser(async (f) => {
-          f.put('invalid', { createdAt: 200, canonicalName });
+          f.put('invalid', { createdAt: 200, taskName });
           f.put('survivor', { createdAt: 100 });
           await f.open((browser: any) => {
-            expect(browser.render(80).join('\n')).toContain('/survivor');
+            expect(browser.render(80).join('\n')).toContain('survivor');
             browser.handleInput('\r');
             expect(f.selections).toEqual([]);
+            expect(f.opened).toEqual([]);
             browser.handleInput('j');
-            expect(selectedRow(browser, 80)).toContain('/survivor');
+            expect(selectedRow(browser, 80)).toContain('survivor');
             browser.handleInput('\r');
           });
-          expect(f.opened.map((info: AgentInfo) => info.canonicalName)).toEqual(['/survivor']);
+          expect(f.opened.map((info: AgentInfo) => info.taskName)).toEqual(['survivor']);
         });
       },
     );
@@ -3676,7 +3751,7 @@ describe('extension completion delivery and TUI', () => {
           (browser: any) => {
             browser.render(120);
             browser.handleInput('j');
-            expect(selectedRow(browser)).toContain('/middle');
+            expect(selectedRow(browser)).toContain('middle');
             browser.handleInput('\r');
           },
           (overlay: any) => {
@@ -3684,7 +3759,7 @@ describe('extension completion delivery and TUI', () => {
             overlay.handleInput(key);
           },
         );
-        expect(f.opened.map((info: AgentInfo) => info.canonicalName)).toEqual(['/middle']);
+        expect(f.opened.map((info: AgentInfo) => info.taskName)).toEqual(['middle']);
         expect(f.notify).toHaveBeenCalledWith(expect.stringContaining('Agent not found'), 'error');
       });
     });
@@ -3713,7 +3788,7 @@ describe('extension completion delivery and TUI', () => {
               expect(first.join('\n')).not.toContain('other-model');
               expect(first.join('\n')).not.toMatch(/all sessions|tab:/i);
               browser.handleInput('j');
-              expect(selectedRow(browser)).toContain('/second');
+              expect(selectedRow(browser)).toContain('second');
               const frame = browser.render(120);
               const reads = f.list.mock.calls.length;
               const renders = f.requestRender.mock.calls.length;
@@ -3721,16 +3796,16 @@ describe('extension completion delivery and TUI', () => {
               expect(browser.render(120)).toBe(frame);
               expect(f.list).toHaveBeenCalledTimes(reads);
               expect(f.requestRender).toHaveBeenCalledTimes(renders);
-              expect(selectedRow(browser)).toContain('/second');
+              expect(selectedRow(browser)).toContain('second');
               browser.handleInput('\r');
             },
             (overlay: any, index: number) => overlay.handleInput(['\x1b[C', '\x1b[D', 'q'][index]),
           );
           expect(f.selections).toEqual([undefined]);
-          expect(f.opened.map((info: AgentInfo) => info.canonicalName)).toEqual([
-            '/second',
-            '/same',
-            '/second',
+          expect(f.opened.map((info: AgentInfo) => info.taskName)).toEqual([
+            'second',
+            'same',
+            'second',
           ]);
           expect(f.opened.every((info: AgentInfo) => info.parentSessionId === f.parentId)).toBe(
             true,
@@ -3746,7 +3821,7 @@ describe('extension completion delivery and TUI', () => {
       });
     });
 
-    test('aligns model/thinking columns and keeps private previews out of paginated tool results', async () => {
+    test('aligns disk-history columns while the public tool omits unloaded agents', async () => {
       await withBrowser(async (f) => {
         await f.open((browser: any) => {
           // Seed after manager.ready(): startup recovery must not interrupt this display fixture.
@@ -3761,10 +3836,13 @@ describe('extension completion delivery and TUI', () => {
             });
           }
           const lines = browser.render(120);
-          const firstIndex = lines.findIndex((line: string) => line.includes('/history/0'));
+          expect(browserNames(browser)).toHaveLength(10);
+          expect(lines).toContain(' Active (1)');
+          expect(lines).toContain(' Done (11)');
+          const firstIndex = lines.findIndex((line: string) => line.includes('history/0'));
           const first = lines[firstIndex];
-          const second = lines.find((line: string) => line.includes('/history/1 '));
-          expect(first).toMatch(/\/history\/0\s+running\s+\S+\s+MiniMax-M3\s+high/);
+          const second = lines.find((line: string) => line.includes('history/1 '));
+          expect(first).toMatch(/history\/0\s+running\s+\S+\s+MiniMax-M3\s+high/);
           expect(lines[firstIndex + 1]).toContain('private task context 0');
           expect(second.indexOf('a-model-name')).toBe(first.indexOf('MiniMax-M3'));
           expect(visibleWidth(second.slice(0, second.indexOf('medium')))).toBe(
@@ -3775,36 +3853,21 @@ describe('extension completion delivery and TUI', () => {
             expect(browser.render(width).every((line: string) => visibleWidth(line) <= width)).toBe(
               true,
             );
-          const narrow = browser.render(50).find((line: string) => line.includes('/history/0'));
+          const narrow = browser.render(50).find((line: string) => line.includes('history/0'));
           expect(narrow).toContain('high');
           expect(narrow).not.toContain('MiniMax-M3');
-          const all = browser.render(80).find((line: string) => line.includes('/history/0'));
+          const all = browser.render(80).find((line: string) => line.includes('history/0'));
           expect(all).toContain('MiniMax-M3');
           expect(all).toContain('high');
           expect(all).not.toContain(f.parentId.slice(-8));
           browser.handleInput('q');
         });
-        const list = (params: any) =>
-          f.tools.get('list_agents').execute('list', params, undefined, undefined, f.ctx);
-        const first = await list({});
-        expect(JSON.parse(first.content[0].text)).toMatchObject({
-          total: 12,
-          returned: 10,
-          offset: 0,
-          limit: 10,
-          next_offset: 10,
-        });
-        expect(first.details.agents[0]).toEqual({
-          agent_name: '/history/0',
-          agent_status: 'running',
-        });
-        expect(first.content[0].text).not.toContain('private task context');
-        expect(JSON.parse((await list({ offset: 10 })).content[0].text)).toMatchObject({
-          total: 12,
-          returned: 2,
-          offset: 10,
-          next_offset: null,
-        });
+        const listed = await f.tools
+          .get('list_agents')
+          .execute('list', {}, undefined, undefined, f.ctx);
+        expect(JSON.parse(listed.content[0].text)).toEqual({ agents: [] });
+        expect(listed.details).toEqual({ agents: [] });
+        expect(listed.structuredContent).toEqual({ agents: [] });
       });
     });
 
@@ -3812,7 +3875,7 @@ describe('extension completion delivery and TUI', () => {
       await withBrowser(async (f) => {
         // Inject wide labels directly because task creation accepts ASCII names.
         f.put('wide', {
-          canonicalName: '/中文很长的名称'.repeat(6),
+          taskName: '中文很长的名称'.repeat(6),
           modelId: '宽模型'.repeat(10),
           lastTaskMessage: '\x1b[31m中文任务 😀\tcombining é '.repeat(20) + '\x1b[0m',
         });
@@ -3977,7 +4040,7 @@ describe('extension completion delivery and TUI', () => {
               input('j');
             }
             const selected = selectedRow(browser);
-            expect(selected).toContain('/history/7');
+            expect(selected).toContain('history/7');
             for (const closeKey of ['\x1b', 'q']) {
               input('\r');
               input('\r');
@@ -3999,7 +4062,7 @@ describe('extension completion delivery and TUI', () => {
               expect(selectedRow(browser)).toBe(selected);
             }
             input('j');
-            expect(selectedRow(browser)).toContain('/history/8');
+            expect(selectedRow(browser)).toContain('history/8');
             input('q');
             await command;
             expect(mounted).toBe(false);
@@ -4037,7 +4100,7 @@ describe('extension completion delivery and TUI', () => {
             expect(browser.render(120)).toBe(frame);
             release();
             await f.flushDetails();
-            expect(selectedRow(browser)).toContain('/target');
+            expect(selectedRow(browser)).toContain('target');
             expect(f.selections).toEqual([]);
             browser.handleInput('\r');
             await f.flushDetails();
@@ -4064,7 +4127,7 @@ describe('extension completion delivery and TUI', () => {
           f.put('other', { createdAt: 100 });
           await f.open(
             async (browser: any) => {
-              expect(selectedRow(browser)).toContain('/target');
+              expect(selectedRow(browser)).toContain('target');
               const reads = f.list.mock.calls.length;
               f.requestRender.mockImplementationOnce(() => {
                 // The return selection has been restored, but its frame has not rendered yet.
@@ -4076,20 +4139,20 @@ describe('extension completion delivery and TUI', () => {
               if (action === 'navigate') browser.handleInput('j');
               if (action === 'refresh') browser.handleInput('r');
               const expected =
-                action === 'navigate' ? '/other' : action === 'refresh' ? '/inserted' : '/target';
+                action === 'navigate' ? 'other' : action === 'refresh' ? 'inserted' : 'target';
               expect(selectedRow(browser)).toContain(expected);
               if (action === 'refresh') {
                 expect(f.list).toHaveBeenCalledTimes(reads + 2);
-                expect(browserNames(browser)).toContain('/inserted');
+                expect(browserNames(browser)).toContain('inserted');
               } else {
                 expect(f.list).toHaveBeenCalledTimes(reads + 1);
-                expect(browserNames(browser)).not.toContain('/inserted');
+                expect(browserNames(browser)).not.toContain('inserted');
                 browser.handleInput('k');
                 browser.render(80);
                 browser.invalidate();
                 browser.render(80);
                 expect(f.list).toHaveBeenCalledTimes(reads + 1);
-                expect(browserNames(browser)).not.toContain('/inserted');
+                expect(browserNames(browser)).not.toContain('inserted');
               }
               browser.handleInput('q');
             },
@@ -4106,10 +4169,10 @@ describe('extension completion delivery and TUI', () => {
             f.put('target', { status: 'running', createdAt: 1 });
             for (let index = 0; index < 15; index++)
               f.put('done/' + index, { completedAt: 100 - index });
-            expect(selectedRow(browser)).toContain('/target');
+            expect(selectedRow(browser)).toContain('target');
             browser.handleInput('\r');
             await f.flushDetails();
-            expect(selectedRow(browser)).toContain('/target');
+            expect(selectedRow(browser)).toContain('target');
             const lines = browser.render(120);
             expect(lines.join('\n')).not.toMatch(/^\s*Active \(/m);
             expect(lines).toContain(' Done (16)');
@@ -4147,7 +4210,7 @@ describe('extension completion delivery and TUI', () => {
             expect.stringContaining('detail creation failed'),
             'error',
           );
-          expect(selectedRow(browser)).toContain('/worker');
+          expect(selectedRow(browser)).toContain('worker');
           f.ctx.ui.custom = custom;
           browser.handleInput('\r');
           await f.flushDetails();
@@ -4165,15 +4228,15 @@ describe('extension completion delivery and TUI', () => {
         await f.open(async (browser: any) => {
           browser.render(120);
           browser.handleInput('j');
-          expect(selectedRow(browser)).toContain('/middle');
+          expect(selectedRow(browser)).toContain('middle');
           browser.handleInput('\r');
           await f.flushDetails();
           browser.handleInput('j'); // No render between closing details and the next key.
-          expect(selectedRow(browser)).toContain('/last');
+          expect(selectedRow(browser)).toContain('last');
           browser.handleInput('\r');
           await f.flushDetails();
           browser.handleInput('k');
-          expect(selectedRow(browser)).toContain('/middle');
+          expect(selectedRow(browser)).toContain('middle');
           browser.handleInput('q');
         });
       });
@@ -4190,11 +4253,11 @@ describe('extension completion delivery and TUI', () => {
             async (browser: any) => {
               browser.render(120);
               if (change === 'pending selection') browser.handleInput('j');
-              browser.handleInput('\r'); // Open the actual displayed /a, not an unrendered index.
+              browser.handleInput('\r'); // Open the actual displayed a, not an unrendered index.
               await f.flushDetails();
-              expect(f.opened[0].canonicalName).toBe('/a');
+              expect(f.opened[0].taskName).toBe('a');
               browser.handleInput('j'); // No return-frame render before navigation.
-              expect(selectedRow(browser)).toContain('/b');
+              expect(selectedRow(browser)).toContain('b');
               browser.handleInput('q');
             },
             (overlay: any) => {
@@ -4224,7 +4287,7 @@ describe('extension completion delivery and TUI', () => {
             } else overlay.handleInput('q');
           },
         );
-        expect(f.opened.map((info: AgentInfo) => info.canonicalName)).toEqual(['/first']);
+        expect(f.opened.map((info: AgentInfo) => info.taskName)).toEqual(['first']);
       });
     });
 
@@ -4286,7 +4349,7 @@ describe('extension completion delivery and TUI', () => {
                 expect.stringContaining('overlay mounting failed'),
                 'error',
               );
-              expect(selectedRow(browser)).toContain('/worker');
+              expect(selectedRow(browser)).toContain('worker');
             } else expect(hides).toBe(1);
           } finally {
             detail?.dispose();
@@ -4311,7 +4374,7 @@ describe('extension completion delivery and TUI', () => {
             expect.stringContaining('return-frame request failed'),
             'error',
           );
-          expect(selectedRow(browser)).toContain('/worker');
+          expect(selectedRow(browser)).toContain('worker');
           browser.handleInput('\r');
           await f.flushDetails();
           expect(f.opened).toHaveLength(2);
@@ -4418,7 +4481,7 @@ test('six public tools carry native usage through metadata and the detail footer
     expect(
       (await execute('spawn_agent', { task_name: 'worker', message: 'sample ten' })).content[0]
         .text,
-    ).toBe('Spawned /worker.');
+    ).toBe('Spawned worker.');
     await done(10);
     const beforeRead = sent.length;
     const read = await execute('read_agent_response', { target: 'worker' });
@@ -4431,7 +4494,13 @@ test('six public tools carry native usage through metadata and the detail footer
       timed_out: false,
     });
     expect(sent).toHaveLength(beforeRead);
-    expect((await execute('list_agents', {})).content[0].text).not.toContain('contextUsage');
+    const listed = await execute('list_agents', {});
+    const resident = { agents: [{ agent_name: 'worker', agent_status: 'completed' }] };
+    expect(JSON.parse(listed.content[0].text)).toEqual(resident);
+    expect(listed.details).toEqual(resident);
+    expect(listed.structuredContent).toEqual(resident);
+    expect(JSON.stringify(listed)).not.toContain('contextUsage');
+    expect(JSON.stringify(listed)).not.toContain('response:sample ten');
     let detailOpened = 0;
     let detailClosed = Promise.resolve();
     let detailError: unknown;

@@ -114,11 +114,11 @@ describe('configured agent colors', () => {
     const theme = nativeTheme('dark');
     for (const value of invalid) {
       expect(resolveAgentColor(value)).toBeUndefined();
-      const label = renderAgentBadge('/worker', theme, value as any, 'text');
-      expect(label).toBe(theme.fg('text', '/worker'));
+      const label = renderAgentBadge('worker', theme, value as any, 'text');
+      expect(label).toBe(theme.fg('text', 'worker'));
       expect(label).not.toMatch(/\x1b\[(?:48;|7m)/);
     }
-    expect(renderAgentBadge('/worker', undefined, undefined)).toBe('/worker');
+    expect(renderAgentBadge('worker', undefined, undefined)).toBe('worker');
   });
 
   for (const appearance of ['dark', 'light'] as const) {
@@ -134,9 +134,9 @@ describe('configured agent colors', () => {
           '#0077aa',
           '#0077cc',
         ]) {
-          const badge = renderAgentBadge('/中文😀é', theme, color);
-          expect(stripVTControlCharacters(badge)).toBe(' /中文😀é ');
-          expect(visibleWidth(badge)).toBe(visibleWidth('/中文😀é') + 2);
+          const badge = renderAgentBadge('中文😀é', theme, color);
+          expect(stripVTControlCharacters(badge)).toBe(' 中文😀é ');
+          expect(visibleWidth(badge)).toBe(visibleWidth('中文😀é') + 2);
           expect(badge).toContain(backgroundAnsi(parseColor(resolveAgentColor(color)!), mode));
           expect(badge).toEndWith('\x1b[49m\x1b[39m');
           expect(badge).not.toContain('\x1b[7m');
@@ -184,7 +184,7 @@ describe('configured agent colors', () => {
         const theme = nativeTheme(appearance, mode);
         const open = backgroundAnsi(theme.colors.selectedBg, mode);
         for (const color of ['red', undefined, 'invalid']) {
-          const badge = renderAgentBadge('/worker', theme, color);
+          const badge = renderAgentBadge('worker', theme, color);
           for (const width of [0, 1, 2, 10, 32, 80]) {
             const text = badge + theme.fg('dim', ' 中文😀é'.repeat(30));
             const selected = paintAgentLine(text, width, theme, true);
@@ -211,15 +211,15 @@ describe('configured agent colors', () => {
 
   test('plain hosts can render configured badges without theme identity colors', () => {
     const theme = { fg: (_: string, text: string) => text } as Theme;
-    expect(renderAgentBadge('/worker', theme, 'red')).toBe(
-      renderAgentBadge('/worker', undefined, 'red'),
+    expect(renderAgentBadge('worker', theme, 'red')).toBe(
+      renderAgentBadge('worker', undefined, 'red'),
     );
     expect(paintAgentLine('short', 80, theme, true)).toBe('short');
     expect(paintAgentLine('longer', 3, undefined)).toBe(truncateToWidth('longer', 3, '…'));
-    expect(renderAgentBadge('/worker', nativeTheme('dark'), 'red')).toBe(
-      renderAgentBadge('/worker', nativeTheme('light'), 'red'),
+    expect(renderAgentBadge('worker', nativeTheme('dark'), 'red')).toBe(
+      renderAgentBadge('worker', nativeTheme('light'), 'red'),
     );
-    expect(renderAgentBadge('/worker', nativeTheme('dark'), '#000000')).toContain(
+    expect(renderAgentBadge('worker', nativeTheme('dark'), '#000000')).toContain(
       foregroundAnsi(parseColor('#FFFFFF'), 'truecolor'),
     );
   });

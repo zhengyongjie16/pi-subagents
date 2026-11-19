@@ -131,7 +131,6 @@ Rules:
 export interface AgentInfo {
   id: string;
   taskName: string;
-  canonicalName: string;
   parentSessionId: string;
   parentSessionFile?: string;
   agentType?: string;
@@ -164,7 +163,7 @@ export interface AgentInfo {
 
 /** Read-only parent-widget data; never persisted or exposed as a tool result. */
 export interface AgentWidgetSnapshot {
-  readonly canonicalName: string;
+  readonly taskName: string;
   readonly color?: string;
   readonly status: 'starting' | 'running';
   readonly provider?: string;
@@ -181,8 +180,6 @@ export interface AgentWidgetSnapshot {
 export interface AgentListEntry {
   agent_name: string;
   agent_status: AgentRuntimeStatus;
-  last_task_message: string | null;
-  parent_session_id?: string;
 }
 
 export interface AgentResponseEntry {
@@ -251,7 +248,7 @@ interface LiveAgent {
 
 export interface AgentCompletionEvent {
   parentSessionId: string;
-  agentName: string;
+  taskName: string;
   status: AgentRuntimeStatus;
   finalResponse?: string;
   error?: string;
@@ -259,7 +256,7 @@ export interface AgentCompletionEvent {
 
 export interface AgentActivityEvent {
   parentSessionId: string;
-  agentName: string;
+  taskName: string;
   active: boolean;
   /** Exact latest status, including terminal states; active remains backward-compatible. */
   status?: AgentRuntimeStatus;
@@ -534,14 +531,30 @@ function scopeDirs(parentSessionId: string): string[] {
   return runsRoots().map((root) => path.join(root, key));
 }
 
+export const TASK_PATH_PATTERN = '^[a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+)*$';
+const taskPathRegex = new RegExp(TASK_PATH_PATTERN);
+
 function normalizeTaskName(name: string): string {
-  const normalized = name.trim().replace(/^\/+|\/+$/g, '');
-  if (!/^[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*$/.test(normalized)) {
+  const normalized = name.trim();
+  if (!taskPathRegex.test(normalized)) {
     throw new Error(
       'task_name must use letters, digits, underscores, dashes, and optional slash path separators',
     );
   }
   return normalized;
+}
+
+function parseTaskPrefix(prefix: string | undefined): string | undefined {
+  if (prefix !== undefined && (typeof prefix !== 'string' || !taskPathRegex.test(prefix))) {
+    throw new Error(
+      'path_prefix must be a non-empty relative task path using letters, digits, underscores, dashes, and single slash separators; whitespace and leading/trailing slashes are not allowed',
+    );
+  }
+  return prefix;
+}
+
+function matchesTaskPrefix(taskName: string, prefix: string | undefined): boolean {
+  return prefix === undefined || taskName === prefix || taskName.startsWith(`${prefix}/`);
 }
 
 export function normalizeContextUsage(value: unknown): ContextUsage | undefined {
@@ -617,7 +630,6 @@ export function readInfoFile(file: string): AgentInfo | undefined {
           : 'interrupted';
       delete info.closedAt;
     }
-    delete (info as any).childProcess;
     return info as AgentInfo;
   } catch {
     return undefined;
@@ -1336,7 +1348,7 @@ export class AgentManager {
     try {
       this.options.onActivityChange?.({
         parentSessionId: info.parentSessionId,
-        agentName: info.canonicalName,
+        taskName: info.taskName,
         active: info.status === 'starting' || info.status === 'running',
         status: info.status,
       });
@@ -1427,7 +1439,6 @@ export class AgentManager {
       const info: AgentInfo = {
         id,
         taskName,
-        canonicalName: `/${taskName}`,
         parentSessionId: params.parentSessionId,
         parentSessionFile: params.parentSessionFile,
         agentType: params.agent_type,
@@ -1459,7 +1470,7 @@ export class AgentManager {
         if (error instanceof Error && error.message === message) throw error;
         throw new Error(message, { cause: error });
       }
-      return { task_name: info.canonicalName, nickname: null };
+      return { task_name: info.taskName, nickname: null };
     } finally {
       if (lock !== undefined) {
         fs.closeSync(lock);
@@ -1480,15 +1491,15 @@ export class AgentManager {
       throwIfAborted(this.shutdownController.signal);
       if (this.live.has(info.id))
         throw new Error(
-          `Agent ${info.canonicalName} already has a live session. Retry after startup finishes.`,
+          `Agent ${info.taskName} already has a live session. Retry after startup finishes.`,
         );
       if (isRunActive(info.id))
         throw new Error(
-          `Agent ${info.canonicalName} is active in another host; refusing to reopen its session file.`,
+          `Agent ${info.taskName} is active in another host; refusing to reopen its session file.`,
         );
       if (resume && !fs.existsSync(info.sessionFile))
         throw new Error(
-          `Cannot resume agent ${info.canonicalName}: session history is missing: ${info.sessionFile}`,
+          `Cannot resume agent ${info.taskName}: session history is missing: ${info.sessionFile}`,
         );
     };
     for (;;) {
@@ -1535,7 +1546,7 @@ export class AgentManager {
         this.notifyStatusChange(info);
         this.notifyCompletion({
           parentSessionId: info.parentSessionId,
-          agentName: info.canonicalName,
+          taskName: info.taskName,
           status: 'failed',
           error: message,
         });
@@ -1582,7 +1593,7 @@ export class AgentManager {
         throw new Error('Child session is closing.');
     };
     const timeout = new Error(
-      `Timed out waiting for agent ${live.info.canonicalName} initialization or prompt acceptance.`,
+      `Timed out waiting for agent ${live.info.taskName} initialization or prompt acceptance.`,
     );
     try {
       checkCanceled();
@@ -1841,7 +1852,7 @@ export class AgentManager {
     return boundedWait(
       this.settleRun(live, run),
       CLEANUP_WAIT_TIMEOUT_MS,
-      `Agent ${live.info.canonicalName} is still finishing after ${CLEANUP_WAIT_TIMEOUT_MS} ms; its session file remains locked until submitted work exits.`,
+      `Agent ${live.info.taskName} is still finishing after ${CLEANUP_WAIT_TIMEOUT_MS} ms; its session file remains locked until submitted work exits.`,
     );
   }
 
@@ -2006,7 +2017,7 @@ export class AgentManager {
       if (status !== 'interrupted')
         this.notifyCompletion({
           parentSessionId: live.info.parentSessionId,
-          agentName: live.info.canonicalName,
+          taskName: live.info.taskName,
           status,
           ...(status === 'completed' ? { finalResponse: live.info.finalResponse } : {}),
           ...(error !== undefined ? { error: live.info.error } : {}),
@@ -2066,7 +2077,7 @@ export class AgentManager {
         activity = live.broadcaster.getWidgetActivity();
       } catch {} // Display failure cannot fail, cancel, or finalize an agent.
       snapshots.push({
-        canonicalName: info.canonicalName,
+        taskName: info.taskName,
         color: info.color,
         status: info.status,
         provider,
@@ -2082,26 +2093,23 @@ export class AgentManager {
     return snapshots;
   }
 
-  listAgentInfos(
-    pathPrefix: string | undefined,
-    parentSessionId: string,
-    includeAll = false,
-  ): AgentInfo[] {
-    const prefix = pathPrefix?.trim().replace(/^\/+/, '');
-    const infos = includeAll ? readAllInfos() : readScopeInfos(parentSessionId);
-    return infos.filter((info) => !prefix || info.taskName.startsWith(prefix));
+  /** Parent-scoped disk history for the UI, including agents no longer resident. */
+  listAgentInfos(pathPrefix: string | undefined, parentSessionId: string): AgentInfo[] {
+    const prefix = parseTaskPrefix(pathPrefix);
+    return readScopeInfos(parentSessionId).filter((info) => matchesTaskPrefix(info.taskName, prefix));
   }
 
-  listAgents(
-    pathPrefix: string | undefined,
-    parentSessionId: string,
-    includeAll = false,
-  ): AgentListEntry[] {
-    return this.listAgentInfos(pathPrefix, parentSessionId, includeAll).map((info) => ({
-      agent_name: info.canonicalName,
+  listAgents(pathPrefix: string | undefined, parentSessionId: string): AgentListEntry[] {
+    const prefix = parseTaskPrefix(pathPrefix);
+    const infos = [...this.live.values()]
+      .map(({ info }) => info)
+      .filter(
+        (info) =>
+          info.parentSessionId === parentSessionId && matchesTaskPrefix(info.taskName, prefix),
+      );
+    return sortInfos(infos).map((info) => ({
+      agent_name: info.taskName,
       agent_status: info.status,
-      last_task_message: previewText(info.lastTaskMessage),
-      ...(includeAll ? { parent_session_id: info.parentSessionId } : {}),
     }));
   }
 
@@ -2114,7 +2122,7 @@ export class AgentManager {
   readAgentResponse(target: string, parentSessionId: string): AgentResponseEntry {
     const info = this.getAgentInfo(target, parentSessionId);
     return {
-      agent_name: info.canonicalName,
+      agent_name: info.taskName,
       status: info.status,
       ...(info.finalResponse !== undefined ? { finalResponse: info.finalResponse } : {}),
       ...(info.error ? { error: info.error } : {}),
@@ -2165,20 +2173,16 @@ export class AgentManager {
     }
     const run = live.run;
     if (run?.awaitingPrompt)
-      throw new Error(
-        `Agent ${info.canonicalName} is still starting. Retry after startup finishes.`,
-      );
+      throw new Error(`Agent ${info.taskName} is still starting. Retry after startup finishes.`);
     const current = live;
     const session = current.session!;
     if (!run || run.finalizedRun || !session.isStreaming)
-      throw new Error(`Agent ${info.canonicalName} is finishing. Retry after cleanup.`);
+      throw new Error(`Agent ${info.taskName} is finishing. Retry after cleanup.`);
     // Register before SDK steer: input handlers and observers may synchronously reenter.
     const { promise: pending, resolve: resolvePending } = Promise.withResolvers<void>();
     run.pendingSteers.add(pending);
     let steer: Promise<unknown> | undefined;
-    const timeout = new Error(
-      `Timed out waiting for agent ${info.canonicalName} steering acceptance.`,
-    );
+    const timeout = new Error(`Timed out waiting for agent ${info.taskName} steering acceptance.`);
     try {
       steer = session.steer(message, undefined, { source: 'rpc' });
       await boundedWait(steer, DEFAULT_STARTUP_TIMEOUT_MS, timeout, this.shutdownController.signal);
@@ -2191,7 +2195,7 @@ export class AgentManager {
         !session.isStreaming
       ) {
         throw new Error(
-          `Agent ${info.canonicalName} ended while steering input was being processed; delivery cannot be confirmed. Retry after cleanup.`,
+          `Agent ${info.taskName} ended while steering input was being processed; delivery cannot be confirmed. Retry after cleanup.`,
         );
       }
       current.info.lastTaskMessage = message;
@@ -2277,7 +2281,7 @@ export class AgentManager {
     } else {
       if (isRunActive(persisted.id))
         throw new Error(
-          `Agent ${persisted.canonicalName} is active in another host and cannot be controlled by this manager.`,
+          `Agent ${persisted.taskName} is active in another host and cannot be controlled by this manager.`,
         );
       persisted.status = 'interrupted';
       persisted.completedAt = Date.now();
@@ -2321,7 +2325,7 @@ export class AgentManager {
     return boundedWait(
       this.terminateSession(live),
       CLEANUP_WAIT_TIMEOUT_MS,
-      `Agent ${live.info.canonicalName} is still closing after ${CLEANUP_WAIT_TIMEOUT_MS} ms; its session file remains locked until actual cleanup completes.`,
+      `Agent ${live.info.taskName} is still closing after ${CLEANUP_WAIT_TIMEOUT_MS} ms; its session file remains locked until actual cleanup completes.`,
     );
   }
 
@@ -2381,7 +2385,7 @@ export class AgentManager {
       if (errors.length)
         throw new AggregateError(
           errors,
-          `Failed to clean up ${live.info.canonicalName}: ${errors.map(formatAgentError).join('; ')}`,
+          `Failed to clean up ${live.info.taskName}: ${errors.map(formatAgentError).join('; ')}`,
         );
     });
     // Keep tracking late cleanup even after every caller's finite wait has expired.

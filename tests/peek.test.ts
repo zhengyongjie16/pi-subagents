@@ -644,6 +644,12 @@ describe('footer context information and metadata polling', () => {
     clock = controlledClock();
   });
 
+  test.each(['worker', 'review/api'])('renders taskName %s without a leading slash', (taskName) => {
+    const { overlay } = createOverlay({}, undefined, undefined, { taskName });
+    const header = stripVTControlCharacters(overlay.render(80)[0]);
+    expect(header).toStartWith(`╭ ${taskName} `);
+  });
+
   test.each([
     [undefined, '?%/?'],
     [savedContextUsage, '10%/500k'],

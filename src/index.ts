@@ -29,6 +29,7 @@ import {
   getRunsDir,
   loadSubagentConfig,
   previewText,
+  TASK_PATH_PATTERN,
   THINKING_LEVELS,
   type AgentCompletionEvent,
   type AgentInfo,
@@ -88,10 +89,6 @@ function boundedTextResult(text: string, details?: any) {
     fullOutputPath: bounded.fullOutputPath,
     truncated: true,
   });
-}
-
-function cleanTarget(target: string): string {
-  return target.trim().replace(/^\/+/, '');
 }
 
 function parentSessionId(ctx: any): string {
@@ -302,7 +299,7 @@ export default async function index_(pi: ExtensionAPI) {
     const waiting = inputWaiters.size > 0;
     const payload = JSON.stringify(
       {
-        agent_name: event.agentName,
+        agent_name: event.taskName,
         status: event.status,
         ...(event.finalResponse !== undefined ? { final_response: event.finalResponse } : {}),
         ...(event.error ? { error: event.error } : {}),
@@ -317,7 +314,7 @@ export default async function index_(pi: ExtensionAPI) {
         content: `<subagent_notification>\n${bounded.text}\n</subagent_notification>`,
         display: true,
         details: {
-          agent_name: event.agentName,
+          agent_name: event.taskName,
           status: event.status,
           ...(bounded.fullOutputPath ? { fullOutputPath: bounded.fullOutputPath } : {}),
         },
@@ -353,14 +350,14 @@ export default async function index_(pi: ExtensionAPI) {
     () => {
       if (!activeContext) return [];
       const snapshots = manager?.getWidgetSnapshot(parentSessionId(activeContext)) ?? [];
-      const names = new Set(snapshots.map((snapshot) => snapshot.canonicalName));
+      const names = new Set(snapshots.map((snapshot) => snapshot.taskName));
       // Preserve early-start and external-host indicators without polling storage.
       const fallback: AgentWidgetSnapshot[] = [];
-      for (const [canonicalName, status] of agentStatuses) {
-        if ((status === 'starting' || status === 'running') && !names.has(canonicalName))
+      for (const [taskName, status] of agentStatuses) {
+        if ((status === 'starting' || status === 'running') && !names.has(taskName))
           fallback.push({
-            canonicalName,
-            color: agentColors.get(canonicalName),
+            taskName,
+            color: agentColors.get(taskName),
             status,
             activeTools: [],
           });
@@ -384,13 +381,13 @@ export default async function index_(pi: ExtensionAPI) {
       onError: reportError,
       onActivityChange: (event) => {
         if (!isCurrentSession(event.parentSessionId)) return;
-        if (event.status) agentStatuses.set(event.agentName, event.status);
-        else if (event.active) agentStatuses.set(event.agentName, 'running');
+        if (event.status) agentStatuses.set(event.taskName, event.status);
+        else if (event.active) agentStatuses.set(event.taskName, 'running');
         else {
           // A legacy notification cannot invent a terminal status or erase a known one.
-          const previous = agentStatuses.get(event.agentName);
+          const previous = agentStatuses.get(event.taskName);
           if (previous === 'starting' || previous === 'running')
-            agentStatuses.delete(event.agentName);
+            agentStatuses.delete(event.taskName);
         }
         refreshAgentWidget();
       },
@@ -440,7 +437,8 @@ ${getAgentDefinitionsDescription()}`;
     get parameters() {
       return Type.Object({
         task_name: Type.String({
-          description: 'Unique in this parent session; use ASCII letters, digits, _, -, and /.',
+          description:
+            'Unique in this parent session; use ASCII letters, digits, _, -, and internal / separators.',
         }),
         message: Type.String({
           description: 'Self-contained task: context, paths, constraints, and expected output.',
@@ -608,9 +606,9 @@ ${getAgentDefinitionsDescription()}`;
     // One scoped metadata read seeds external-host summaries too; no presentation
     // fields are added to list_agents and the 200ms sampler never rereads storage.
     for (const info of manager.listAgentInfos(undefined, parentSessionId(ctx))) {
-      agentStatuses.set(info.canonicalName, info.status);
+      agentStatuses.set(info.taskName, info.status);
       const color = resolveAgentColor(info.color);
-      if (color) agentColors.set(info.canonicalName, color);
+      if (color) agentColors.set(info.taskName, color);
     }
     refreshAgentWidget();
   });
@@ -705,41 +703,26 @@ ${getAgentDefinitionsDescription()}`;
     name: 'list_agents',
     label: 'List Agents',
     description:
-      'List current-session agent names/statuses: active first, then newest-created within each group. Use include_all only for an explicitly requested cross-session listing.',
-    parameters: Type.Object({
-      path_prefix: Type.Optional(
-        Type.String({
-          description: 'Literal task-name prefix; review/ matches descendants only.',
-        }),
-      ),
-      include_all: Type.Optional(
-        Type.Boolean({
-          description: 'Cross-session listing only; includes parent_session_id. Default false.',
-        }),
-      ),
-      limit: Type.Optional(
-        Type.Integer({ minimum: 1, maximum: 100, description: 'Page size; default 10.' }),
-      ),
-      offset: Type.Optional(
-        Type.Integer({
-          minimum: 0,
-          description: 'Zero-based offset; default 0. Use next_offset to continue.',
-        }),
-      ),
-    }),
+      'List all current-session resident subagents held by this manager, including initializing and retained idle sessions until cleanup completes. Unloaded history is omitted. Active first, then newest-created within each group.',
+    parameters: Type.Object(
+      {
+        path_prefix: Type.Optional(
+          Type.String({
+            pattern: TASK_PATH_PATTERN,
+            description:
+              'Relative task path: matches itself and descendants. No whitespace or leading/trailing slash; omit for all.',
+          }),
+        ),
+      },
+      { additionalProperties: false },
+    ),
     outputSchema: Type.Object(
       {
-        total: Type.Integer({ minimum: 0 }),
-        returned: Type.Integer({ minimum: 0, maximum: 100 }),
-        offset: Type.Integer({ minimum: 0 }),
-        limit: Type.Integer({ minimum: 1, maximum: 100 }),
-        next_offset: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]),
         agents: Type.Array(
           Type.Object(
             {
               agent_name: Type.String(),
               agent_status: agentStatusSchema,
-              parent_session_id: Type.Optional(Type.String()),
             },
             { additionalProperties: false },
           ),
@@ -747,6 +730,12 @@ ${getAgentDefinitionsDescription()}`;
       },
       { additionalProperties: false },
     ),
+    prepareArguments(args: any) {
+      const prefix = args?.path_prefix;
+      if (prefix !== undefined && typeof prefix !== 'string')
+        throw new Error('path_prefix must be a string');
+      return args;
+    },
     async execute(
       _id: string,
       params: any,
@@ -754,12 +743,8 @@ ${getAgentDefinitionsDescription()}`;
       _onUpdate: any,
       ctx: any,
     ) {
-      const listed = ensureManager(ctx).listAgents(
-        params.path_prefix,
-        parentSessionId(ctx),
-        params.include_all === true,
-      );
-      const ordered = [
+      const listed = ensureManager(ctx).listAgents(params.path_prefix, parentSessionId(ctx));
+      const agents = [
         ...listed.filter(
           (agent) => agent.agent_status === 'starting' || agent.agent_status === 'running',
         ),
@@ -767,24 +752,7 @@ ${getAgentDefinitionsDescription()}`;
           (agent) => agent.agent_status !== 'starting' && agent.agent_status !== 'running',
         ),
       ];
-      const limit = Number.isInteger(params.limit) ? Math.max(1, Math.min(100, params.limit)) : 10;
-      const offset = Number.isInteger(params.offset) ? Math.max(0, params.offset) : 0;
-      const agents = ordered
-        .slice(offset, offset + limit)
-        .map(({ agent_name, agent_status, parent_session_id }) => ({
-          agent_name,
-          agent_status,
-          ...(parent_session_id ? { parent_session_id } : {}),
-        }));
-      const nextOffset = offset + agents.length < ordered.length ? offset + agents.length : null;
-      const result = {
-        total: ordered.length,
-        returned: agents.length,
-        offset,
-        limit,
-        next_offset: nextOffset,
-        agents,
-      };
+      const result = { agents };
       return {
         ...textResult(JSON.stringify(result, null, 2), result),
         structuredContent: result,
@@ -795,10 +763,9 @@ ${getAgentDefinitionsDescription()}`;
     },
     renderResult(result: any, options: any, theme: Theme, context: ToolRenderContext) {
       if (context.isError) return new Text(theme.fg('error', '✗ list failed'), 0, 0);
-      const agents = result.details?.agents || [];
-      const total = result.details?.total ?? agents.length;
+      const agents = result.details?.agents ?? [];
       if (!options.expanded)
-        return new Text(theme.fg('success', `✓ ${agents.length} of ${total} agents`), 0, 0);
+        return new Text(theme.fg('success', `✓ ${agents.length} agents`), 0, 0);
       return new Text(result.content?.[0]?.text || JSON.stringify(result.details, null, 2), 0, 0);
     },
   });
@@ -809,7 +776,7 @@ ${getAgentDefinitionsDescription()}`;
     description:
       "Read an agent's latest run status and available final text/error, not a transcript. Non-blocking; use for rereads or programmatic access, not polling.",
     parameters: Type.Object({
-      target: Type.String({ description: 'Current-session agent name, e.g. /review.' }),
+      target: Type.String({ description: 'Current-session agent name, e.g. review.' }),
     }),
     outputSchema: Type.Object(
       {
@@ -831,10 +798,7 @@ ${getAgentDefinitionsDescription()}`;
       ctx: any,
     ) {
       try {
-        const result = ensureManager(ctx).readAgentResponse(
-          cleanTarget(params.target),
-          parentSessionId(ctx),
-        );
+        const result = ensureManager(ctx).readAgentResponse(params.target, parentSessionId(ctx));
         return {
           ...boundedTextResult(JSON.stringify(result, null, 2), {
             agent_name: result.agent_name,
@@ -866,7 +830,7 @@ ${getAgentDefinitionsDescription()}`;
     description:
       'Steer a running subagent, or start another run with its history once idle. Returns on input acceptance, not completion.',
     parameters: Type.Object({
-      target: Type.String({ description: 'Current-session agent name, e.g. /review.' }),
+      target: Type.String({ description: 'Current-session agent name, e.g. review.' }),
       message: Type.String({ description: 'Message text to send.' }),
     }),
     async execute(
@@ -879,7 +843,7 @@ ${getAgentDefinitionsDescription()}`;
       try {
         const result = await ensureManager(ctx).sendMessage(
           parentSessionId(ctx),
-          cleanTarget(params.target),
+          params.target,
           params.message,
         );
         return textResult(
@@ -915,7 +879,7 @@ ${getAgentDefinitionsDescription()}`;
     description:
       'Request cooperative cancellation of the current run (no rollback). History can be resumed with send_message after cleanup.',
     parameters: Type.Object({
-      target: Type.String({ description: 'Current-session agent name, e.g. /review.' }),
+      target: Type.String({ description: 'Current-session agent name, e.g. review.' }),
     }),
     async execute(
       _id: string,
@@ -925,10 +889,7 @@ ${getAgentDefinitionsDescription()}`;
       ctx: any,
     ) {
       try {
-        const result = await ensureManager(ctx).interruptAgent(
-          parentSessionId(ctx),
-          cleanTarget(params.target),
-        );
+        const result = await ensureManager(ctx).interruptAgent(parentSessionId(ctx), params.target);
         return textResult('Interrupt request handled.', result);
       } catch (error) {
         throw new Error(`interrupt_agent failed: ${formatAgentError(error)}`);
@@ -1012,7 +973,7 @@ ${getAgentDefinitionsDescription()}`;
       const offset = navigation === 'next' ? 1 : -1;
       const next = entries[(currentIndex + offset + entries.length) % entries.length];
       try {
-        info = manager.getAgentInfo(next.canonicalName, scopeId);
+        info = manager.getAgentInfo(next.taskName, scopeId);
       } catch (error) {
         ctx.ui.notify(formatAgentError(error), 'error');
         return;
@@ -1047,7 +1008,7 @@ ${getAgentDefinitionsDescription()}`;
             if (!disposed) {
               snapshot = listBrowserAgents(manager, currentSessionId);
               const entries = [...snapshot.active, ...snapshot.done];
-              const index = entries.findIndex((entry) => entry.canonicalName === selection.task);
+              const index = entries.findIndex((entry) => entry.taskName === selection.task);
               selected = Math.max(0, Math.min(index === -1 ? selected : index, entries.length - 1));
               displayedCount = entries.length;
               redraw();
@@ -1111,17 +1072,17 @@ ${getAgentDefinitionsDescription()}`;
               index++
             ) {
               const info = entries[index];
-              if (typeof info.canonicalName !== 'string' || !info.canonicalName.trim()) continue;
+              if (typeof info.taskName !== 'string' || !info.taskName.trim()) continue;
               if (index === selected)
                 displayedSelection = {
-                  task: info.canonicalName,
+                  task: info.taskName,
                   parentSessionId: currentSessionId,
                 };
               const isSelected = index === selected;
               const color = resolveAgentColor(info.color);
               const pointer = isSelected ? fg('accent', '› ') : '  ';
               const badge = renderAgentBadge(
-                formatColumn(info.canonicalName, nameWidth - (color ? 2 : 0)).trimEnd(),
+                formatColumn(info.taskName, nameWidth - (color ? 2 : 0)).trimEnd(),
                 theme,
                 color,
                 isSelected ? 'accent' : 'text',

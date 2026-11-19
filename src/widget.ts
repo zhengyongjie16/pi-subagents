@@ -132,7 +132,7 @@ function agentHeader(
   theme: Theme | undefined,
   color: string | undefined,
 ): string {
-  const name = sanitize(snapshot.canonicalName);
+  const name = sanitize(snapshot.taskName);
   const badgePadding = color ? 2 : 0;
   const thinking = sanitize(snapshot.thinking ?? '');
   const elapsed = snapshot.elapsedMs;

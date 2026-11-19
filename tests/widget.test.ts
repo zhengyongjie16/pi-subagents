@@ -65,7 +65,7 @@ afterEach(() => {
 });
 
 function snapshot(extra: Partial<AgentWidgetSnapshot> = {}): AgentWidgetSnapshot {
-  return { canonicalName: '/worker', status: 'running', activeTools: [], ...extra };
+  return { taskName: 'worker', status: 'running', activeTools: [], ...extra };
 }
 
 function controller(
@@ -198,24 +198,24 @@ describe('configured summary badges', () => {
   test('shared template colors survive removal and theme invalidation without sampling, IO or remounting', () => {
     const dark = nativeTheme('dark');
     let agents = [
-      snapshot({ canonicalName: '/review', color: '#DC2626' }),
-      snapshot({ canonicalName: '/tests', color: '#DC2626' }),
+      snapshot({ taskName: 'review', color: '#DC2626' }),
+      snapshot({ taskName: 'tests', color: '#DC2626' }),
     ];
     const getSnapshots = mock(() => agents);
     const widget = controller(getSnapshots);
     const f = host({ theme: dark });
     widget.attach(f.ctx);
-    expect(f.render()[1]).toContain(renderAgentBadge('/review', dark, 'red'));
-    expect(f.render()[3]).toContain(renderAgentBadge('/tests', dark, 'red'));
+    expect(f.render()[1]).toContain(renderAgentBadge('review', dark, 'red'));
+    expect(f.render()[3]).toContain(renderAgentBadge('tests', dark, 'red'));
     agents = [agents[1]];
     widget.refresh();
-    expect(f.render()[1]).toContain(renderAgentBadge('/tests', dark, 'red'));
+    expect(f.render()[1]).toContain(renderAgentBadge('tests', dark, 'red'));
     const samples = getSnapshots.mock.calls.length;
     const light = nativeTheme('light');
     f.ui.theme = light;
     f.component.invalidate();
     const updated = f.render()[1];
-    expect(updated).toContain(renderAgentBadge('/tests', light, 'red'));
+    expect(updated).toContain(renderAgentBadge('tests', light, 'red'));
     expect(updated).toContain(light.fg('accent', '⠋'));
     expect(getSnapshots).toHaveBeenCalledTimes(samples);
     expect(f.setWidget).toHaveBeenCalledTimes(1);
@@ -225,7 +225,7 @@ describe('configured summary badges', () => {
     try {
       for (let frame = 0; frame < 5; frame++) {
         clock!.tick();
-        expect(f.render()[1]).toContain(renderAgentBadge('/tests', light, 'red'));
+        expect(f.render()[1]).toContain(renderAgentBadge('tests', light, 'red'));
       }
       expect(reads).not.toHaveBeenCalled();
       expect(scans).not.toHaveBeenCalled();
@@ -249,7 +249,7 @@ describe('configured summary badges', () => {
       ]).attach(f.ctx);
       const lines = f.render();
       expect(lines).toHaveLength(3);
-      expect(lines[1]).toContain(theme.fg('accent', '/worker'));
+      expect(lines[1]).toContain(theme.fg('accent', 'worker'));
       expect(lines[2]).toContain('plain activity');
       expect(lines.join('')).not.toMatch(/\x1b\[48;/);
     },
@@ -274,6 +274,12 @@ describe('summary content', () => {
     widget.attach(f.ctx);
     widget.refresh();
     expect(getSnapshots).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(['worker', 'review/api'])('renders taskName %s without a leading slash', (taskName) => {
+    const f = host();
+    controller(() => [snapshot({ taskName })]).attach(f.ctx);
+    expect(f.render()[1]).toBe(`└─ ⠋ ${taskName}`);
   });
 
   test('renders the agreed title, combined model metadata, cumulative tokens and this-run seconds only', () => {
@@ -309,7 +315,7 @@ describe('summary content', () => {
     controller(() => Object.freeze([agent]), errors).attach(f.ctx);
     const lines = f.render();
     expect(lines[0]).toBe('● Agents · 1 running · /subagents to view details');
-    expect(lines[1]).toContain('/worker · openai-codex/gpt-6.1-sol/max');
+    expect(lines[1]).toContain('worker · openai-codex/gpt-6.1-sol/max');
     expect(lines[1]).toContain('33.8k token (62% · ↓1) · 12s');
     expect(lines[2]).toContain('reading, editing…');
     expect(lines.join('\n')).not.toMatch(/thinking:|hidden while|turns|tool use|cost|\$/);
@@ -571,7 +577,7 @@ describe('summary content', () => {
     const f = host({ theme });
     controller(() => [
       snapshot({
-        canonicalName: '\x1b[31m/工人👩🏽‍💻e\u0301\x1b[0m\n\x07\x9fworker',
+        taskName: '\x1b[31m工人👩🏽‍💻e\u0301\x1b[0m\n\x07\x9fworker',
         provider: '\x1b]8;;https://example.com\x07代理\x1b]8;;\x07',
         modelId: '模型\t👨‍👩‍👧‍👦'.repeat(12),
         thinking: 'high',
@@ -686,8 +692,8 @@ describe('session status summary', () => {
   test('shows all nonzero statuses while only active agents get detail rows', () => {
     let agents = [
       snapshot(),
-      snapshot({ canonicalName: '/second' }),
-      snapshot({ canonicalName: '/third', status: 'starting' }),
+      snapshot({ taskName: 'second' }),
+      snapshot({ taskName: 'third', status: 'starting' }),
     ];
     let counts = { running: 3, completed: 3, failed: 3, interrupted: 3 };
     const source = mock(() => agents);
@@ -751,7 +757,7 @@ describe('session status summary', () => {
   test('counts every active agent rather than just the visible overflow rows', () => {
     const f = host();
     controller(
-      () => Array.from({ length: 6 }, (_, i) => snapshot({ canonicalName: '/worker' + i })),
+      () => Array.from({ length: 6 }, (_, i) => snapshot({ taskName: 'worker' + i })),
       mock((_error: unknown) => {}),
       () => ({ running: 6, completed: 100, failed: 1, interrupted: 1 }),
     ).attach(f.ctx);
@@ -821,7 +827,7 @@ describe('layout budgets', () => {
     let count = 1;
     const f = host();
     const widget = controller(() =>
-      Array.from({ length: count }, (_, i) => snapshot({ canonicalName: '/worker' + i })),
+      Array.from({ length: count }, (_, i) => snapshot({ taskName: 'worker' + i })),
     );
     widget.attach(f.ctx);
     for (count = 1; count <= 8; count++) {
@@ -833,8 +839,8 @@ describe('layout budgets', () => {
       if (count > 1) expect(lines[2]).toBe('│    └─ thinking…');
       if (count > 5) {
         expect(lines[11]).toBe(`└─ +${count - 5} more · /subagents`);
-        expect(lines[9]).toContain('/worker4');
-        expect(lines.join('\n')).not.toContain('/worker5');
+        expect(lines[9]).toContain('worker4');
+        expect(lines.join('\n')).not.toContain('worker5');
       } else {
         expect(lines.at(-2)!).toStartWith('└─');
         expect(lines.at(-1)!).toBe('     └─ thinking…');
@@ -845,7 +851,7 @@ describe('layout budgets', () => {
   test('short terminals preserve the /subagents hint and reserve parent editor space', () => {
     const f = host();
     controller(() =>
-      Array.from({ length: 6 }, (_, i) => snapshot({ canonicalName: '/worker' + i })),
+      Array.from({ length: 6 }, (_, i) => snapshot({ taskName: 'worker' + i })),
     ).attach(f.ctx);
     for (const rows of [0, 1, 4, 10, 11, 12, 13, 16, 20, 24]) {
       (f.tui.terminal as any).rows = rows;
@@ -869,7 +875,7 @@ describe('native spinner clock', () => {
       }
     }
     const f = host();
-    const source = mock(() => [snapshot(), snapshot({ canonicalName: '/second' })]);
+    const source = mock(() => [snapshot(), snapshot({ taskName: 'second' })]);
     const widget = controller(source);
     widget.attach(f.ctx);
     const sample = [...clock!.timers.values()].find((timer) => timer.delay === 200)!;
@@ -967,7 +973,7 @@ describe('native spinner clock', () => {
     const widget = controller(source, errors);
     const f = host();
     expect(() => widget.attach(f.ctx)).not.toThrow();
-    expect(f.text()).toContain('/worker');
+    expect(f.text()).toContain('worker');
     expect([...clock!.timers.values()].map((timer) => timer.delay)).toEqual([200]);
     expect(errors).toHaveBeenCalledTimes(1);
     widget.refresh();
