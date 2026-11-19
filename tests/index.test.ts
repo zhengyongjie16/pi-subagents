@@ -1460,7 +1460,7 @@ test.each(runtimes)(
     const agentDir = process.env.PI_CODING_AGENT_DIR;
     const config = path.join(agentDir, "pi-subagents", "config.json");
     fs.mkdirSync(path.dirname(config), { recursive: true });
-    fs.writeFileSync(config, JSON.stringify({ maxIdleSessions: 0, extensions: [fixturePath] }));
+    fs.writeFileSync(config, JSON.stringify({ extensions: [fixturePath] }));
     const settings = { compaction: { enabled: false }, retry: { enabled: false }, cacheWarming: "off" };
     fs.writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify(settings));
     const textOf = message => typeof message.content === "string" ? message.content :
@@ -2079,7 +2079,7 @@ test.each(runtimes)(
     const config = path.join(agentDir, "pi-subagents", "config.json");
     fs.mkdirSync(path.dirname(config));
     // This probe exercises actual repeated child cleanup, not hot idle retention.
-    fs.writeFileSync(config, JSON.stringify({ retentionDays: 0, maxIdleSessions: 0, extensions: [childFixture.extension] }));
+    fs.writeFileSync(config, JSON.stringify({ retentionDays: 0, maxAgents: 1, extensions: [childFixture.extension] }));
     const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false }, steeringMode: "one-at-a-time" });
     settingsManager.setProjectTrusted(false);
     const parentRequests = [];
@@ -2182,6 +2182,11 @@ test.each(runtimes)(
       const counts = () => ({ sessions: childSessions.size, subscriptions: subscriptions.size, timeouts: timeouts.size, intervals: intervals.size, servers: servers.size });
       const empty = { sessions: 0, subscriptions: 0, timeouts: 0, intervals: 0, servers: 0 };
       const reclaimed = async label => {
+        // Keep continuations cold via host-managed native shutdown, after native work drains.
+        for (const child of childSessions) {
+          await child.waitForIdle();
+          child.extensionRunner.createContext().shutdown();
+        }
         const deadline = Date.now() + 2_000;
         while (Object.values(counts()).some(Boolean) && Date.now() < deadline) await delay(5);
         assert.deepEqual(counts(), empty, label);
@@ -2212,6 +2217,20 @@ test.each(runtimes)(
         const spawned = await call("spawn_agent", { task_name: "worker", message: "child work" });
         assert.equal(spawned.details.task_name, "/worker");
         assert.equal((await call("list_agents", {})).details.agents[0].agent_status, "running");
+        // Spawn acceptance precedes the worker's assistant-response timer.
+        const responseDeadline = Date.now() + 2_000;
+        while (!timeouts.size && Date.now() < responseDeadline) await delay(5);
+        assert.equal(timeouts.size, 1, "worker response timer must be active before comparing resources");
+        const activeResources = counts();
+        const blocked = await ctx.executeTool("spawn_agent", { task_name: "blocked", message: "over capacity" });
+        assert.equal(blocked.isError, true);
+        assert.match(JSON.stringify(blocked.result.content), /capacity/i);
+        assert.deepEqual((await call("list_agents", {})).details.agents.map(agent => [agent.agent_name, agent.agent_status]), [["/worker", "running"]],
+          "capacity rejection must not leave an agent record");
+        assert.deepEqual(counts(), activeResources, "capacity rejection must not allocate child resources");
+        assert.equal(created, 1);
+        assert.equal(disposed, 0);
+        assert.equal(session.isStreaming, true, "the active parent does not consume child capacity");
         assert.equal((await call("send_message", { target: "/worker", message: "steered work" })).details.delivery, "steer");
         const controller = new AbortController();
         const canceledWait = ctx.executeTool("wait_agent", {}, { signal: controller.signal });

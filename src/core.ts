@@ -63,6 +63,7 @@ async function boundedWait<T>(
 }
 export const DEFAULT_RETENTION_DAYS = 14;
 export const DEFAULT_MODEL_RESPONSE_TIMEOUT_MS = 10 * 60_000;
+export const DEFAULT_MAX_AGENTS = 5;
 const ACTIVITY_PERSIST_INTERVAL_MS = 5_000;
 export const DEFAULT_THINKING = 'high';
 
@@ -79,7 +80,7 @@ export interface SubagentConfig {
   models?: string[];
   modelsFromEnabledModels?: boolean;
   modelResponseTimeoutMs?: number;
-  maxIdleSessions?: number;
+  maxAgents?: number;
   extensions?: string[];
 }
 
@@ -317,9 +318,23 @@ function isThinkingLevel(value: unknown): value is ThinkingLevel {
   return typeof value === 'string' && (THINKING_LEVELS as readonly string[]).includes(value);
 }
 
+let warnedLegacyIdleCap = false;
+
 function normalizeConfig(value: unknown): SubagentConfig {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   const raw = value as Record<string, unknown>;
+  if (
+    Object.hasOwn(raw, 'maxAgents') &&
+    (!Number.isSafeInteger(raw.maxAgents) || (raw.maxAgents as number) < 1)
+  ) {
+    throw new Error(`maxAgents must be a positive safe integer (${CONFIG_PATH}).`);
+  }
+  if (Object.hasOwn(raw, 'maxIdleSessions') && !warnedLegacyIdleCap) {
+    warnedLegacyIdleCap = true;
+    console.warn(
+      '[subagents] maxIdleSessions is no longer supported; use maxAgents (default 5, shared by active and idle subagents).',
+    );
+  }
   const extensions = stringList(raw.extensions);
   const models = stringList(raw.models);
   const retentionDays =
@@ -345,19 +360,21 @@ function normalizeConfig(value: unknown): SubagentConfig {
     ...(models ? { models } : {}),
     ...(raw.modelsFromEnabledModels === true ? { modelsFromEnabledModels: true } : {}),
     ...(modelResponseTimeoutMs !== undefined ? { modelResponseTimeoutMs } : {}),
-    ...(Number.isSafeInteger(raw.maxIdleSessions) && (raw.maxIdleSessions as number) >= 0
-      ? { maxIdleSessions: raw.maxIdleSessions as number }
-      : {}),
+    ...(raw.maxAgents !== undefined ? { maxAgents: raw.maxAgents as number } : {}),
     ...(extensions ? { extensions } : {}),
   };
 }
 
 export function loadSubagentConfig(): SubagentConfig {
+  let value: unknown;
   try {
-    if (fs.existsSync(CONFIG_PATH))
-      return normalizeConfig(JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')));
-  } catch {}
-  return {};
+    if (!fs.existsSync(CONFIG_PATH)) return {};
+    value = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+  } catch {
+    return {};
+  }
+  // Invalid explicit capacity must not silently fall back to a different limit.
+  return normalizeConfig(value);
 }
 
 export function getRunsDir(config: SubagentConfig = loadSubagentConfig()): string {
@@ -1286,11 +1303,11 @@ export class AgentManager {
   private readonly live = new Map<string, LiveAgent>();
   private readonly shutdownController = new AbortController();
   private readonly reconciliation: Promise<void>;
-  private readonly maxIdleSessions: number;
+  private readonly maxAgents: number;
 
   constructor(private readonly options: AgentManagerOptions = {}) {
     ensureBaseDirs();
-    this.maxIdleSessions = loadSubagentConfig().maxIdleSessions ?? 4;
+    this.maxAgents = loadSubagentConfig().maxAgents ?? DEFAULT_MAX_AGENTS;
     pruneExpiredRuns();
     this.reconciliation = this.reconcileInactiveRuns();
     // Callers may await ready() after reconciliation has already settled.
@@ -1434,8 +1451,6 @@ export class AgentManager {
         status: 'starting',
         lastTaskMessage: params.message,
       };
-      saveInfo(info);
-      this.notifyStatusChange(info);
       const prompt = [definition?.prompt, params.message].filter(Boolean).join('\n\n');
       try {
         await this.startLiveAgent(info, prompt, params.message, false);
@@ -1461,27 +1476,52 @@ export class AgentManager {
     displayMessage = message,
     resume = true,
   ): Promise<void> {
-    throwIfAborted(this.shutdownController.signal);
-    if (this.live.has(info.id))
-      throw new Error(
-        `Agent ${info.canonicalName} already has a live session. Retry after startup finishes.`,
-      );
-    if (isRunActive(info.id))
-      throw new Error(
-        `Agent ${info.canonicalName} is active in another host; refusing to reopen its session file.`,
-      );
-    if (resume && !fs.existsSync(info.sessionFile))
-      throw new Error(
-        `Cannot resume agent ${info.canonicalName}: session history is missing: ${info.sessionFile}`,
-      );
-    // Native open initializes an existing empty file with a valid header. Even handled
-    // first inputs then have a resumable path; no metadata heuristic can prove history exists.
+    const checkAvailable = () => {
+      throwIfAborted(this.shutdownController.signal);
+      if (this.live.has(info.id))
+        throw new Error(
+          `Agent ${info.canonicalName} already has a live session. Retry after startup finishes.`,
+        );
+      if (isRunActive(info.id))
+        throw new Error(
+          `Agent ${info.canonicalName} is active in another host; refusing to reopen its session file.`,
+        );
+      if (resume && !fs.existsSync(info.sessionFile))
+        throw new Error(
+          `Cannot resume agent ${info.canonicalName}: session history is missing: ${info.sessionFile}`,
+        );
+    };
+    for (;;) {
+      // Eviction yields: recheck shutdown, ownership and same-agent starts every time.
+      checkAvailable();
+      if (this.live.size < this.maxAgents) break;
+      const idle = [...this.live.values()]
+        .filter(
+          (live) =>
+            !live.run &&
+            !live.closing &&
+            !live.nativeWork &&
+            !live.pendingCompactions.size &&
+            live.session?.isIdle,
+        )
+        .sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
+      if (!idle)
+        throw new Error(
+          `Subagent capacity reached (${this.maxAgents}/${this.maxAgents}). No safely idle session can be evicted; wait for current work to finish, then retry.`,
+        );
+      // Register closing before SDK hooks can reenter. Cleanup timeouts do not free slots.
+      idle.closing = true;
+      await this.waitForTermination(idle);
+      throwIfAborted(this.shutdownController.signal);
+      // Another continuation may have completed and been evicted while cleanup yielded.
+      if (resume) info = this.getAgentInfo(info.taskName, info.parentSessionId);
+    }
+    // Keep the final capacity check through live.set synchronous: no extra counter or lock.
+    // Even handled first inputs need a resumable native header-only session.
     if (!resume) {
       try {
         fs.closeSync(fs.openSync(info.sessionFile, 'wx', 0o600));
       } catch (error) {
-        // The persisted record and active notification were already published by the
-        // caller; record the terminal failure so nothing dangles in 'starting'.
         const message = formatAgentError(error);
         info.status = 'failed';
         info.error = message;
@@ -1741,13 +1781,6 @@ export class AgentManager {
       } finally {
         live.pendingCompactions.delete(promise);
         resolve();
-        if (this.live.get(live.info.id) === live && !live.run && !live.closing) {
-          try {
-            this.trimIdleSessions();
-          } catch (error) {
-            this.failSession(live, error);
-          }
-        }
       }
     };
   }
@@ -1759,12 +1792,6 @@ export class AgentManager {
       () => {
         if (this.live.get(live.info.id) !== live || live.nativeWork !== work) return;
         delete live.nativeWork;
-        // Manual compaction (or extension-owned work) may have no RunState to settle.
-        try {
-          if (!live.run && !live.closing) this.trimIdleSessions();
-        } catch (error) {
-          this.failSession(live, error);
-        }
       },
       (error) => {
         if (live.nativeWork !== work) {
@@ -1806,7 +1833,6 @@ export class AgentManager {
       }
       delete live.run;
       live.lastUsedAt = performance.now();
-      this.trimIdleSessions();
     });
     return run.settlement;
   }
@@ -1817,23 +1843,6 @@ export class AgentManager {
       CLEANUP_WAIT_TIMEOUT_MS,
       `Agent ${live.info.canonicalName} is still finishing after ${CLEANUP_WAIT_TIMEOUT_MS} ms; its session file remains locked until submitted work exits.`,
     );
-  }
-
-  private trimIdleSessions(): void {
-    const idle = [...this.live.values()]
-      .filter(
-        (live) =>
-          !live.run &&
-          !live.closing &&
-          !live.nativeWork &&
-          !live.pendingCompactions.size &&
-          live.session?.isIdle,
-      )
-      .sort((a, b) => a.lastUsedAt - b.lastUsedAt);
-    for (const live of idle.slice(0, Math.max(0, idle.length - this.maxIdleSessions))) {
-      live.closing = true;
-      this.scheduleTermination(live);
-    }
   }
 
   private failSession(live: LiveAgent, error: unknown): void {
@@ -2247,7 +2256,7 @@ export class AgentManager {
     }
     if (live?.run) {
       const run = live.run;
-      if (!live.session || !run.promptFinished || this.maxIdleSessions === 0) live.closing = true;
+      if (!live.session || !run.promptFinished) live.closing = true;
       this.requestCancellation(live, run, new Error('Agent interrupted.'));
       let failure: unknown;
       try {

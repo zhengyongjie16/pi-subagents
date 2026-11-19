@@ -113,7 +113,7 @@ Optional settings live in `~/.pi/agent/pi-subagents/config.json`:
 ```json
 {
   "retentionDays": 14,
-  "maxIdleSessions": 4,
+  "maxAgents": 5,
   "modelResponseTimeoutMs": 600000,
   "modelsFromEnabledModels": true,
   "extensions": ["+codemode"]
@@ -124,14 +124,16 @@ Optional settings live in `~/.pi/agent/pi-subagents/config.json`:
 | --- | --- | --- |
 | `storageDir` | `~/.pi/agent/pi-subagents/runs` | Run history; accepts absolute, home-relative, or config-directory-relative paths |
 | `retentionDays` | `14` | Remove expired inactive runs and saved outputs at manager startup; `0` disables cleanup |
-| `maxIdleSessions` | `4` | LRU cap on idle SDK sessions, not active tasks; `0` closes sessions after each run |
+| `maxAgents` | `5` | Shared resident-session cap per `AgentManager`, excluding the main agent |
 | `modelResponseTimeoutMs` | `600000` | Per-assistant-response timeout, excluding tools and total task runtime; `0` disables it |
 | `shortcut` | Unbound | Browser shortcut, for example `ctrl+shift+a` |
 | `models` | None | Exact `provider/model-id` pairs allowed for per-task model overrides |
 | `modelsFromEnabledModels` | `false` | Add Pi's scoped models from `enabledModels` and `--models` |
 | `extensions` | None | Extensions used unless a template supplies a non-empty replacement list |
 
-Template/default-extension changes apply to new agents; model-routing changes apply when a parent session starts. New agents without `tools` use current Pi defaults; existing agents retain saved explicit or legacy tool selections, and cold resumes follow Pi's native tool-history restoration rather than forcing the latest defaults. Parent-only tool restrictions no longer carry over: configure a template allowlist when needed. The response timeout is read for each new assistant response. Reload Pi after shortcut or resource changes; restart after changing storage, retention, or idle-session policy. Keep storage separate from Pi's native session directory to avoid child entries in `/resume`; changing its location does not move existing history.
+`maxAgents` must be a positive safe integer; invalid values, including `0`, cause a configuration error. Legacy `maxIdleSessions` is ignored with a migration warning; replace it with `maxAgents`. The old `maxIdleSessions: 0` close-after-each-run mode is no longer supported.
+
+Template/default-extension changes apply to new agents; model-routing changes apply when a parent session starts. New agents without `tools` use current Pi defaults; existing agents retain saved explicit or legacy tool selections, and cold resumes follow Pi's native tool-history restoration rather than forcing the latest defaults. Parent-only tool restrictions no longer carry over: configure a template allowlist when needed. The response timeout is read for each new assistant response. Reload Pi after shortcut or resource changes; restart after changing storage, retention, or `maxAgents`. Keep storage separate from Pi's native session directory to avoid child entries in `/resume`; changing its location does not move existing history.
 
 ### Model routing
 
@@ -143,6 +145,7 @@ Unavailable allowlist entries produce warnings. A selected model is validated ag
 
 - **Automatic results:** completed and failed runs notify the parent, including during a wait; an uninterrupted idle parent starts a continuation turn. Notifications during an active wait share the parent's natural continuation rather than starting an extra turn. Canceling a wait does not stop agents.
 - **Activity waits:** use `wait_agent` only when blocked, with `{}` or an optional `timeout_ms` integer/null. Omitted/null defaults to 30,000 ms; values below 10,000 ms (including zero and negatives) are raised to 10,000 ms, and values above 3,600,000 ms are rejected. Clamped waits append an explanation to the message. There are no `targets`: a wait observes parent input from every source (including extension and follow-up input), agent notifications, or timeout—not a particular child's terminal status. It returns only `{ "message": "...", "timed_out": false }`: `Wait completed.` for a notification, `Wait interrupted by new input.` for input, or `Wait timed out.` with `timed_out: true`. Original input and notification content still reaches Pi normally; read a specific child with `read_agent_response`. The latest activity before a wait can satisfy it immediately and is consumed once; old pending activity is cleared before preparing the next model context. Session changes cancel waits and clear pending activity.
+- **Capacity:** Within one `AgentManager`, initializing, active, idle, and closing sessions (until cleanup completes) share `maxAgents`. A spawn or cold resume at capacity reclaims the least-recently-used safely idle session and waits for cleanup before starting; without a safe candidate, it fails with a capacity error rather than queuing. Hot continuations reuse their slot. Completion does not trigger idle-only trimming. Cold history occupies no slot, so `list_agents` may list more agents than the cap.
 - **Session reuse:** completion, ordinary model errors, and interruption leave sessions reusable once pending work drains. Reclaimed sessions reopen saved history; missing history is an error. Template edits do not change existing agents' saved configuration. Reused sessions keep loaded resources; rebuilt sessions reread both prompt files and rediscover skills.
 - **Shared process:** cancellation is cooperative and does not undo completed tool actions. Child extensions run headlessly and share the host's event loop and module state; unresponsive tools or extensions can affect the parent.
 - **Output:** notifications and response text use a 50 KB / 2,000-line truncation budget. Full output is saved under `storageDir/_outputs`, with a readable path in the notice. Structured response data remains complete even when the text preview is truncated.
