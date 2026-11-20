@@ -239,7 +239,6 @@ interface LiveAgent {
   lastUsedAt: number;
   lastActivityPersistedAt: number;
   widgetStats?: {
-    session: AgentSession;
     entryCount: number;
     tokens: number;
     compactionCount: number;
@@ -2051,7 +2050,7 @@ export class AgentManager {
         try {
           const entryCount = session.sessionManager.getEntryCount();
           stats = live.widgetStats;
-          if (stats?.session !== session || stats.entryCount !== entryCount) {
+          if (!stats || stats.entryCount !== entryCount) {
             let tokens = 0;
             let compactionCount = 0;
             for (const entry of session.sessionManager.getEntries()) {
@@ -2064,7 +2063,7 @@ export class AgentManager {
                 if (typeof value === 'number' && Number.isFinite(value) && value >= 0)
                   tokens += value;
             }
-            stats = live.widgetStats = { session, entryCount, tokens, compactionCount };
+            stats = live.widgetStats = { entryCount, tokens, compactionCount };
           }
         } catch {
           stats = undefined; // Unknown is not zero; retry on the next UI refresh.
@@ -2096,7 +2095,9 @@ export class AgentManager {
   /** Parent-scoped disk history for the UI, including agents no longer resident. */
   listAgentInfos(pathPrefix: string | undefined, parentSessionId: string): AgentInfo[] {
     const prefix = parseTaskPrefix(pathPrefix);
-    return readScopeInfos(parentSessionId).filter((info) => matchesTaskPrefix(info.taskName, prefix));
+    return readScopeInfos(parentSessionId).filter((info) =>
+      matchesTaskPrefix(info.taskName, prefix),
+    );
   }
 
   listAgents(pathPrefix: string | undefined, parentSessionId: string): AgentListEntry[] {

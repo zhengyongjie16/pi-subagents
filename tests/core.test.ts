@@ -1628,8 +1628,6 @@ describe('resident agent lists', () => {
       expect(manager.listAgents('review', parent)).toEqual(
         entries.filter((entry) => entry.agent_name.startsWith('review/')),
       );
-      for (const prefix of [' review/ \n', ' \t ', '/review', 'review//'])
-        expect(() => manager.listAgents(prefix, parent)).toThrow('path_prefix');
       expect(manager.listAgents(undefined, foreign)).toEqual([
         { agent_name: 'review/api', agent_status: 'running' },
       ]);
@@ -1639,8 +1637,6 @@ describe('resident agent lists', () => {
       expect(history.map((info) => info.taskName)).toContain('review/cold');
       expect(history.every((info) => info.parentSessionId === parent)).toBe(true);
       expect(manager.listAgentInfos('review', parent)).toHaveLength(5);
-      expect(() => manager.listAgentInfos(' review/ ', parent)).toThrow('path_prefix');
-      expect(() => manager.listAgentInfos('/review', parent)).toThrow('path_prefix');
       observer = new AgentManager();
       await observer.ready();
       expect(observer.listAgents(undefined, parent)).toEqual([]);
@@ -1701,13 +1697,41 @@ describe('strict list path prefixes', () => {
     const scans = spyOn(fs, 'readdirSync');
     try {
       for (const prefix of [
-        '', ' ', '\t', '\n', '/', '/review', '//review',
-        'review/', 'review//', 'review//auth',
-        ' review', 'review ', ' review ', 'review\n', 'review\r', 'review\r\n', 'review\t',
-        'review auth', 'review/ auth', 'review/auth ', 'review\\auth',
-        '.', '..', 'review/./auth', 'review/../auth',
-        'review.auth', 'review/*', 'review?', 'review#auth', 'review:auth',
-        'review%2fauth', '审查', 'review/\u0000auth', 'review\u2028', 'review\u2029',
+        '',
+        ' ',
+        '\t',
+        '\n',
+        '/',
+        '/review',
+        '//review',
+        'review/',
+        'review//',
+        'review//auth',
+        ' review',
+        'review ',
+        ' review ',
+        'review\n',
+        'review\r',
+        'review\r\n',
+        'review\t',
+        'review auth',
+        'review/ auth',
+        'review/auth ',
+        'review\\auth',
+        '.',
+        '..',
+        'review/./auth',
+        'review/../auth',
+        'review.auth',
+        'review/*',
+        'review?',
+        'review#auth',
+        'review:auth',
+        'review%2fauth',
+        '审查',
+        'review/\u0000auth',
+        'review\u2028',
+        'review\u2029',
       ]) {
         expect(() => manager.listAgents(prefix, parent)).toThrow('path_prefix');
         expect(() => manager.listAgentInfos(prefix, parent)).toThrow('path_prefix');
@@ -1727,8 +1751,15 @@ describe('strict list path prefixes', () => {
 
   test('matches exact paths and descendants without matching sibling name prefixes', async () => {
     const tasks = [
-      'review', 'review/auth', 'review/auth/session', 'review/auth2',
-      'review2', 'reviewer', 'Review_1-A', 'Review_1-A/part', 'Review_1-A2',
+      'review',
+      'review/auth',
+      'review/auth/session',
+      'review/auth2',
+      'review2',
+      'reviewer',
+      'Review_1-A',
+      'Review_1-A/part',
+      'Review_1-A2',
     ];
     writeConfig({ maxAgents: tasks.length });
     const parent = 'list-path-boundaries-' + randomUUID();
@@ -1739,13 +1770,24 @@ describe('strict list path prefixes', () => {
         await settled(manager, manager.getAgentInfo(task, parent));
       }
       const lists = [
-        (prefix?: string) => manager.listAgents(prefix, parent).map((entry) => entry.agent_name).sort(),
-        (prefix?: string) => manager.listAgentInfos(prefix, parent).map((info) => info.taskName).sort(),
+        (prefix?: string) =>
+          manager
+            .listAgents(prefix, parent)
+            .map((entry) => entry.agent_name)
+            .sort(),
+        (prefix?: string) =>
+          manager
+            .listAgentInfos(prefix, parent)
+            .map((info) => info.taskName)
+            .sort(),
       ];
       for (const names of lists) {
         expect(names()).toEqual([...tasks].sort());
         expect(names('review')).toEqual([
-          'review', 'review/auth', 'review/auth/session', 'review/auth2',
+          'review',
+          'review/auth',
+          'review/auth/session',
+          'review/auth2',
         ]);
         expect(names('review/auth')).toEqual(['review/auth', 'review/auth/session']);
         expect(names('review2')).toEqual(['review2']);
@@ -1941,7 +1983,7 @@ describe('widget snapshots', () => {
     }
   });
 
-  test('cumulates only assistant usage, caches by entry count/session identity, and is memory-only', async () => {
+  test('cumulates only assistant usage, caches per live agent by entry count, and is memory-only', async () => {
     const parent = 'widget-cache-' + randomUUID();
     const manager = new AgentManager();
     try {
@@ -1957,6 +1999,8 @@ describe('widget snapshots', () => {
         replacement = other.session!;
       const store = source.sessionManager,
         otherStore = replacement.sessionManager;
+      expect(live.widgetStats).toBeUndefined();
+      expect(other.widgetStats).toBeUndefined();
       const base = structuredClone(fixture.instances[0].requests[0].message);
       const usage = {
         ...base.usage,
@@ -2021,7 +2065,9 @@ describe('widget snapshots', () => {
         spyOn(fs, 'existsSync'),
       ];
       try {
-        const snapshot = manager.getWidgetSnapshot(parent)[0];
+        const snapshots = manager.getWidgetSnapshot(parent);
+        expect(snapshots.map((entry) => entry.tokens)).toEqual([56, 9]);
+        const snapshot = snapshots[0];
         expect(snapshot).toMatchObject({
           tokens: 56,
           compactionCount: 2,
@@ -2029,23 +2075,18 @@ describe('widget snapshots', () => {
         });
         expect(snapshot.contextUsage).not.toBe(live.info.contextUsage);
         snapshot.contextUsage!.tokens = 999;
-        for (let index = 0; index < 5; index++)
-          expect(manager.getWidgetSnapshot(parent)[0].contextUsage).toEqual(before.contextUsage);
+        for (let index = 0; index < 5; index++) {
+          const repeated = manager.getWidgetSnapshot(parent);
+          expect(repeated.map((entry) => entry.tokens)).toEqual([56, 9]);
+          expect(repeated[0].contextUsage).toEqual(before.contextUsage);
+        }
         expect(scan).toHaveBeenCalledTimes(1);
         expect(otherScan).toHaveBeenCalledTimes(1);
         expect(sample).not.toHaveBeenCalled();
-        // Swap two real native sessions at the same entry count; identity must invalidate both caches.
-        live.session = replacement;
-        other.session = source;
-        expect(manager.getWidgetSnapshot(parent).map((entry) => entry.tokens)).toEqual([9, 56]);
-        expect(scan).toHaveBeenCalledTimes(2);
-        expect(otherScan).toHaveBeenCalledTimes(2);
         for (const operation of io) expect(operation).not.toHaveBeenCalled();
         expect(live.info).toEqual(before);
         expect(other.info).toEqual(otherBefore);
       } finally {
-        live.session = source;
-        other.session = replacement;
         for (const operation of io) operation.mockRestore();
         sample.mockRestore();
       }
@@ -2095,8 +2136,9 @@ describe('widget snapshots', () => {
         await manager.sendMessage(parent, 'worker', 'hold second');
         await waitUntil(() => fixture.instances.at(-1)!.activeStreams === 1);
         const live = manager['live'].get(info.id)!;
-        if (mode === 'warm') expect(live.session).toBe(firstSession);
-        else expect(live.session).not.toBe(firstSession);
+        const secondSession = live.session!;
+        if (mode === 'warm') expect(secondSession).toBe(firstSession);
+        else expect(secondSession).not.toBe(firstSession);
         const run = live.run!,
           resumedAt = run.displayStartedAt;
         expect(resumedAt).toBeGreaterThan(firstClock);
@@ -2107,6 +2149,7 @@ describe('widget snapshots', () => {
             compactionCount: 1,
             elapsedMs: 1234,
           });
+          expect(live.widgetStats).toBeDefined();
           expect(manager.getWidgetSnapshot(parent)[0].elapsedMs).toBe(1234);
         } finally {
           clock.mockRestore();
@@ -2125,6 +2168,15 @@ describe('widget snapshots', () => {
         if (mode === 'cold') await coldDispose(manager, info);
         fixture.responseGate = next.promise;
         await manager.sendMessage(parent, 'worker', 'hold third');
+        const thirdLive = manager['live'].get(info.id)!;
+        if (mode === 'warm') {
+          expect(thirdLive).toBe(live);
+          expect(thirdLive.session).toBe(secondSession);
+        } else {
+          expect(thirdLive).not.toBe(live);
+          expect(thirdLive.session).not.toBe(secondSession);
+          expect(thirdLive.widgetStats).toBeUndefined();
+        }
         expect(manager.getWidgetSnapshot(parent)[0]).toMatchObject({
           tokens: 190,
           compactionCount: 1,
@@ -5554,38 +5606,6 @@ describe('startup storage failures', () => {
 });
 
 describe('completion delivery', () => {
-  test('publishes successful and failed completions', async () => {
-    const parentSessionId = 'completion-callbacks';
-    const scope = path.join(getRunsDir(), parentScopeKey(parentSessionId));
-    fs.rmSync(scope, { recursive: true, force: true });
-    const completions: any[] = [];
-    const manager = new AgentManager({
-      onCompletion: (event: any) => completions.push(event),
-    });
-    try {
-      await manager.spawnAgent(spawnParams(parentSessionId, 'settled', 'first'));
-      await waitUntil(() => completions.some((event) => event.taskName === 'settled'));
-      expect(completions.filter((event) => event.taskName === 'settled')).toHaveLength(1);
-      expect(completions.find((event) => event.taskName === 'settled')).toMatchObject({
-        status: 'completed',
-        finalResponse: 'response:first',
-      });
-
-      await manager.spawnAgent(spawnParams(parentSessionId, 'crashed', 'crash now'));
-      await waitUntil(() => completions.some((event) => event.taskName === 'crashed'));
-      expect(completions.filter((event) => event.taskName === 'crashed')).toHaveLength(1);
-      expect(completions.find((event) => event.taskName === 'crashed')).toMatchObject({
-        status: 'failed',
-      });
-      expect(completions.find((event) => event.taskName === 'crashed').error).toContain(
-        'fixture failure',
-      );
-    } finally {
-      await manager.shutdown();
-      fs.rmSync(scope, { recursive: true, force: true });
-    }
-  });
-
   test.each(['completed', 'failed'] as const)(
     'publishes %s content once before settlement using a single event argument',
     async (status) => {
@@ -5600,7 +5620,7 @@ describe('completion delivery', () => {
       });
       try {
         await manager.spawnAgent(
-          spawnParams(parentSessionId, 'one', status === 'failed' ? 'crash now' : 'first'),
+          spawnParams(parentSessionId, 'one', status === 'failed' ? 'fail now' : 'first'),
         );
         await settled(manager, manager.getAgentInfo('one', parentSessionId));
         order.push('settlement');

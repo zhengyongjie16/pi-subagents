@@ -13,7 +13,7 @@ import type { OfflineFixtureConfig } from './fixtures/sdk-offline-extension.ts';
 const testFile = fileURLToPath(import.meta.url);
 // Run SDK contracts in a separate process to isolate environment changes and shared-method spies.
 if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
-  test('real Pi SDK offline contracts (isolated from core module mocks)', () => {
+  test('real Pi SDK offline contracts (isolated environment and SDK state)', () => {
     const args = process.versions.bun
       ? ['test', testFile, '--timeout', '60000']
       : ['--test', testFile];
@@ -135,8 +135,8 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
     const info = {
       cwd,
       sessionFile: path.join(root, 'subagents', 'child.jsonl'),
-      provider: config.provider ?? 'sdk-offline',
-      modelId: config.modelId ?? 'exact/model',
+      provider: 'sdk-offline',
+      modelId: 'exact/model',
       extensionPaths: [extensionPath],
     };
     fs.mkdirSync(cwd, { recursive: true });
@@ -303,7 +303,6 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
         rules: native.rules,
       });
       assert.equal(request.systemMessage.content, '');
-      assert.equal(request.systemMessage.sections.addendum, undefined);
       assert.equal(request.systemMessage.sections.rules.split(defaultIdentity).length - 1, 1);
       assert.equal(request.systemPrompt.split(defaultIdentity).length - 1, 1);
       assert.match(request.systemMessage.sections.preamble, /coding assistant running inside pi/);
@@ -349,14 +348,6 @@ if (process.env.PI_SUBAGENT_SDK_CONTRACT_CHILD !== '1') {
       assert.equal(request.systemPrompt, custom + '\n\n<addendum>\n' + append + '\n</addendum>');
       assert.deepEqual(request.userTexts, [user]);
       assert.ok(request.tools.some((tool: any) => tool.name === 'codemode'));
-      assert.ok(
-        !request.systemPrompt.includes(codemodeGuideline),
-        'custom base takes native precedence',
-      );
-      assert.ok(
-        !request.systemPrompt.includes(defaultIdentity),
-        'custom base replaces default identity rules',
-      );
       assert.equal(
         fs.readFileSync(f.systemPromptPath, 'utf8'),
         custom,

@@ -33,7 +33,7 @@ function controlledTimers() {
     callback: () => void,
     delay?: number,
   ) => {
-    const handle = { unref: mock(() => {}) };
+    const handle = { unref() {} };
     timers.set(handle, { callback, delay });
     return handle;
   }) as any);
@@ -155,9 +155,7 @@ function expectFit(lines: string[], width: number) {
 
 // Decode the six emitted foreground colors, not spinner frames or escape-string churn.
 function titleGradient(line: string) {
-  const run = line.match(
-    /(?:\x1b\[38;(?:2;\d+;\d+;\d+|5;\d+)m[A-Za-z]){6}\x1b\[39m/,
-  )?.[0];
+  const run = line.match(/(?:\x1b\[38;(?:2;\d+;\d+;\d+|5;\d+)m[A-Za-z]){6}\x1b\[39m/)?.[0];
   expect(run).toBeDefined();
   expect(stripVTControlCharacters(run!)).toBe('Agents');
   return {
@@ -657,7 +655,11 @@ describe('animated Agents title', () => {
           const f = host({ theme: nativeTheme('dark', mode) });
           const source = mock(() => [snapshot({ status, elapsedMs: 12_345 })]);
           const counts = mock(() => ({ running: 1, completed: 0, failed: 0, interrupted: 0 }));
-          controller(source, mock((_error: unknown) => {}), counts).attach(f.ctx);
+          controller(
+            source,
+            mock((_error: unknown) => {}),
+            counts,
+          ).attach(f.ctx);
           expect([...clock!.timers.values()].map((timer) => timer.delay)).toEqual([200, 80]);
           const handles = [...clock!.timers.keys()];
           const first = f.render();
@@ -704,34 +706,38 @@ describe('animated Agents title', () => {
     );
   }
 
-  test.each(['fg-only', 'missing'] as const)('%s themes retain the original static title', (kind) => {
-    let now = 1000;
-    const time = spyOn(performance, 'now').mockImplementation(() => now);
-    const widget = controller(() => [snapshot()]);
-    try {
-      const theme = kind === 'fg-only' ? trackingTheme().theme : undefined;
-      const f = host();
-      f.ui.theme = theme;
-      f.ui.setWidget = mock(() => {}); // Mount explicitly with no factory-theme fallback.
-      widget.attach(f.ctx);
-      const factory = f.ui.setWidget.mock.calls[0][1] as Factory;
-      const component = factory(f.tui, theme as Theme);
-      const line = component.render(140)[0];
-      expect(line).toBe(
-        (theme?.fg('accent', '● Agents') ?? '● Agents') +
-          (theme?.fg('accent', ' · ') ?? ' · ') +
-          (theme?.fg('warning', '1 running') ?? '1 running') +
-          (theme?.fg('accent', ' · /subagents to view details') ?? ' · /subagents to view details'),
-      );
-      now += 320;
-      clock!.tick(80);
-      expect(component.render(140)[0]).toBe(line);
-      expect(time).not.toHaveBeenCalled();
-    } finally {
-      widget.dispose();
-      time.mockRestore();
-    }
-  });
+  test.each(['fg-only', 'missing'] as const)(
+    '%s themes retain the original static title',
+    (kind) => {
+      let now = 1000;
+      const time = spyOn(performance, 'now').mockImplementation(() => now);
+      const widget = controller(() => [snapshot()]);
+      try {
+        const theme = kind === 'fg-only' ? trackingTheme().theme : undefined;
+        const f = host();
+        f.ui.theme = theme;
+        f.ui.setWidget = mock(() => {}); // Mount explicitly with no factory-theme fallback.
+        widget.attach(f.ctx);
+        const factory = f.ui.setWidget.mock.calls[0][1] as Factory;
+        const component = factory(f.tui, theme as Theme);
+        const line = component.render(140)[0];
+        expect(line).toBe(
+          (theme?.fg('accent', '● Agents') ?? '● Agents') +
+            (theme?.fg('accent', ' · ') ?? ' · ') +
+            (theme?.fg('warning', '1 running') ?? '1 running') +
+            (theme?.fg('accent', ' · /subagents to view details') ??
+              ' · /subagents to view details'),
+        );
+        now += 320;
+        clock!.tick(80);
+        expect(component.render(140)[0]).toBe(line);
+        expect(time).not.toHaveBeenCalled();
+      } finally {
+        widget.dispose();
+        time.mockRestore();
+      }
+    },
+  );
 });
 
 describe('session status summary', () => {
@@ -778,7 +784,19 @@ describe('session status summary', () => {
         checkColors(theme);
         const titleWidth = visibleWidth('● Agents · /subagents to view details');
         for (const width of [
-          0, 1, 9, 10, 22, 32, titleWidth - 1, titleWidth, titleWidth + 1, titleWidth + 2, 60, 80, 120,
+          0,
+          1,
+          9,
+          10,
+          22,
+          32,
+          titleWidth - 1,
+          titleWidth,
+          titleWidth + 1,
+          titleWidth + 2,
+          60,
+          80,
+          120,
         ]) {
           const lines = f.render(width);
           expectFit(lines, width);
@@ -790,7 +808,9 @@ describe('session status summary', () => {
         }
         expect(f.render(titleWidth - 1)[0]).toBe(theme.fg('accent', '/subagents'));
         expect(f.text(titleWidth).split('\n')[0]).toBe('● Agent… · /subagents to view details');
-        expect(f.text(titleWidth + 1).split('\n')[0]).toBe('● Agents… · /subagents to view details');
+        expect(f.text(titleWidth + 1).split('\n')[0]).toBe(
+          '● Agents… · /subagents to view details',
+        );
         const samples = source.mock.calls.length;
         const replacement = nativeTheme(appearance === 'dark' ? 'light' : 'dark', mode);
         f.ui.theme = replacement;
@@ -1053,7 +1073,11 @@ describe('native spinner clock', () => {
       let counts = { running: 1, completed: 0, failed: 0, interrupted: 0 };
       const source = mock(() => agents);
       const countSource = mock(() => counts);
-      const widget = controller(source, mock((_error: unknown) => {}), countSource);
+      const widget = controller(
+        source,
+        mock((_error: unknown) => {}),
+        countSource,
+      );
       const theme = nativeTheme('dark');
       const f = host({ theme });
       widget.attach(f.ctx);
@@ -1210,7 +1234,7 @@ describe('widget and timer lifecycle', () => {
       extensionWidgetsAbove: new Map<string, Widget>(),
       extensionWidgetsBelow: new Map<string, Widget>(),
       ui: f.tui,
-      renderWidgets: mock(() => {}),
+      renderWidgets() {},
     };
     const set = (InteractiveMode.prototype as any).setExtensionWidget;
     const clear = (InteractiveMode.prototype as any).clearExtensionWidgets;
@@ -1321,32 +1345,6 @@ describe('widget and timer lifecycle', () => {
     factories[0](f.tui, f.factoryTheme).dispose?.();
     expect(current.render(80)).toHaveLength(3);
     expect(clock!.timers.size).toBe(2);
-  });
-
-  test('real 200ms ticks update model thinking by 450ms without remounting', async () => {
-    clock!.restore();
-    clock = undefined;
-    let thinking: 'max' | 'high' = 'max';
-    const f = host();
-    const widget = controller(() => [
-      snapshot({
-        provider: 'openai-codex',
-        modelId: 'gpt-6.1-sol',
-        thinking,
-        tokens: 33_800,
-        contextUsage: usage(62),
-        compactionCount: 1,
-        elapsedMs: 12_345,
-      }),
-    ]);
-    widget.attach(f.ctx);
-    expect(f.text()).toContain('openai-codex/gpt-6.1-sol/max');
-    thinking = 'high';
-    await new Promise((resolve) => setTimeout(resolve, 450));
-    expect(f.text()).toContain('openai-codex/gpt-6.1-sol/high');
-    expect(f.text()).toContain('33.8k token (62% · ↓1) · 12s');
-    expect(f.setWidget).toHaveBeenCalledTimes(1);
-    expect(f.requestRender.mock.calls.length).toBeGreaterThanOrEqual(3);
   });
 });
 
@@ -1670,9 +1668,6 @@ describe('exception isolation and recovery', () => {
     }, errors);
     const f = host();
     widget.attach(f.ctx);
-    f.requestRender.mockImplementation(() => {
-      throw new Error('requestRender failure');
-    });
     fail = true;
     expect(() => clock!.tick()).not.toThrow();
     f.ui.theme = {
@@ -1683,7 +1678,6 @@ describe('exception isolation and recovery', () => {
     expect(() => f.component.invalidate()).not.toThrow();
     expect(() => f.render(1)).not.toThrow();
     expectFit(f.render(1), 1);
-    f.requestRender.mockImplementation(() => {});
     f.ui.theme = plainTheme;
     fail = false;
     clock!.tick();

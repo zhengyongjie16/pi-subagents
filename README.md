@@ -2,6 +2,8 @@
 
 Session-scoped subagents for [Pi](https://github.com/earendil-works/pi), with background tasks, automatic results, steering, and a live session viewer. Children share the parent's working directory and process, but start with independent conversation context. No additional Pi process or child TUI is started.
 
+This extension originated as a fork of [pi-codex-subagents](https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-codex-subagents). Following extensive refactoring, it is now maintained in a standalone repository, as there is no longer a need to track upstream updates. The original project is an excellent project.
+
 Requires **Pi 1.1.0 or newer** and **Node.js 22.19 or newer**. Pi supplies the SDK and UI packages. For development, use the latest Pi release.
 
 ## Install
@@ -151,7 +153,5 @@ Unavailable allowlist entries produce warnings. A selected model is validated ag
 - **Output:** notifications and response text use a 50 KB / 2,000-line truncation budget. Full output is saved under `storageDir/_outputs`, with a readable path in the notice. Structured response data remains complete even when the text preview is truncated.
 
 ## License
-
-Originally created by **[Can Celik (ogulcancelik)](https://github.com/ogulcancelik)** as [`pi-codex-subagents`](https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-codex-subagents). This standalone fork is maintained by [zhengyongjie16](https://github.com/zhengyongjie16).
 
 [MIT](LICENSE). Original work copyright (c) 2025 Can Celik; modifications copyright (c) 2026 zhengyongjie16.

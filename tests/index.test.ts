@@ -48,7 +48,37 @@ const toolNames = [
   'interrupt_agent',
 ];
 
-// Separate processes keep module mocks, SDK caches, and agent directories out of sibling suites.
+function terminalFixture(columns: number, rows: number) {
+  let input = (_data: string) => {};
+  let resize = () => {};
+  const writes: string[] = [];
+  const terminal: Terminal & { columns: number; rows: number } = {
+    columns,
+    rows,
+    kittyProtocolActive: false,
+    start(onInput, onResize) {
+      input = onInput;
+      resize = onResize;
+    },
+    stop() {},
+    async drainInput() {},
+    write(data) {
+      writes.push(data);
+    },
+    moveBy() {},
+    hideCursor() {},
+    showCursor() {},
+    clearLine() {},
+    clearFromCursor() {},
+    clearScreen() {},
+    setTitle() {},
+    setProgress() {},
+    setProgramStatus() {},
+  };
+  return { terminal, writes, input: (data: string) => input(data), resize: () => resize() };
+}
+
+// Separate processes keep prototype stubs, SDK caches, and agent directories out of sibling suites.
 function probe(source: string, executable = process.execPath, extensionEntry = entry): void {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-host-'));
   try {
@@ -1296,10 +1326,13 @@ test('updates live model summaries without messages, focus changes, or repeated 
     assert.ok(text.includes("reading"));
     assert.ok(!text.includes("PRIVATE TASK") && !text.includes("tool use") && !text.includes("↻"));
     const mounted = factories().length;
+    assert.equal(mounted, 1);
     rows = [{ ...rows[0], thinking: "high", tokens: 40000 }];
     await new Promise(resolve => setTimeout(resolve, 450));
-    assert.ok(renders > 0);
-    assert.ok(component.render(140).join("\n").includes("openai-codex/gpt-6.1-sol/high"));
+    assert.ok(renders >= 3);
+    const updated = component.render(140).join("\n");
+    assert.ok(updated.includes("openai-codex/gpt-6.1-sol/high"));
+    assert.ok(updated.includes("40.0k token (62% · ↓1) · 12s"));
     assert.equal(factories().length, mounted);
     assert.ok(scopes.length > 1 && scopes.every(scope => scope === "parent"));
     assert.equal(f.messages.length, 0);
@@ -1334,7 +1367,6 @@ test('does not mount summary widgets in RPC, JSON, or print mode', () => {
 test.each(['regular', 'fullscreen'] as const)(
   'native %s summary redraws and resizes without taking editor focus',
   async (mode) => {
-    const { AgentSummaryWidget } = await import('../src/widget.js');
     let rows = [
       {
         taskName: 'review',
@@ -1347,32 +1379,7 @@ test.each(['regular', 'fullscreen'] as const)(
         activeTools: ['read'],
       },
     ];
-    let input = (_data: string) => {};
-    let resize = () => {};
-    const writes: string[] = [];
-    const terminal: Terminal & { columns: number; rows: number } = {
-      columns: 140,
-      rows: 40,
-      kittyProtocolActive: false,
-      start(onInput, onResize) {
-        input = onInput;
-        resize = onResize;
-      },
-      stop() {},
-      async drainInput() {},
-      write(data) {
-        writes.push(data);
-      },
-      moveBy() {},
-      hideCursor() {},
-      showCursor() {},
-      clearLine() {},
-      clearFromCursor() {},
-      clearScreen() {},
-      setTitle() {},
-      setProgress() {},
-      setProgramStatus() {},
-    };
+    const { terminal, writes, input, resize } = terminalFixture(140, 40);
     const tui = mode === 'regular' ? new TuiMainScreen(terminal) : new TuiAltScreen(terminal);
     let component: any;
     let mounts = 0;
@@ -2824,7 +2831,6 @@ describe('extension completion delivery and TUI', () => {
       let shutdown: (() => Promise<void>) | undefined;
       const { default: subagentExtension } = await import('../src/index.js');
 
-      const originalList = AgentManager.prototype.listAgents;
       const originalInfos = AgentManager.prototype.listAgentInfos;
       const originalInfo = AgentManager.prototype.getAgentInfo;
       const originalConnect = (SubagentPeekOverlay.prototype as any).connectSocket;
@@ -2933,7 +2939,6 @@ describe('extension completion delivery and TUI', () => {
         await run(fixture);
       } finally {
         await shutdown?.();
-        AgentManager.prototype.listAgents = originalList;
         AgentManager.prototype.listAgentInfos = originalInfos;
         AgentManager.prototype.getAgentInfo = originalInfo;
         (SubagentPeekOverlay.prototype as any).connectSocket = originalConnect;
@@ -3909,32 +3914,7 @@ describe('extension completion delivery and TUI', () => {
           f.put('native', { lastTaskMessage: '中文任务 '.repeat(30) });
           f.theme = nativeTheme('dark');
           f.ctx.ui.theme = f.theme;
-          let input: (data: string) => void = () => {};
-          let resize = () => {};
-          const writes: string[] = [];
-          const terminal: Terminal & { columns: number; rows: number } = {
-            columns: 120,
-            rows: 35,
-            kittyProtocolActive: false,
-            start(onInput, onResize) {
-              input = onInput;
-              resize = onResize;
-            },
-            stop() {},
-            async drainInput() {},
-            write(data) {
-              writes.push(data);
-            },
-            moveBy() {},
-            hideCursor() {},
-            showCursor() {},
-            clearLine() {},
-            clearFromCursor() {},
-            clearScreen() {},
-            setTitle() {},
-            setProgress() {},
-            setProgramStatus() {},
-          };
+          const { terminal, writes, input, resize } = terminalFixture(120, 35);
           const tui = mode === 'regular' ? new TuiMainScreen(terminal) : new TuiAltScreen(terminal);
           f.tui = tui;
           await f.open((browser: any) => {
@@ -3979,30 +3959,7 @@ describe('extension completion delivery and TUI', () => {
           codingAgent.initTheme('dark', false);
           for (let index = 0; index < 12; index++)
             f.put('history/' + index, { createdAt: 100 - index });
-          let input: (data: string) => void = () => {};
-          const writes: string[] = [];
-          const terminal: Terminal = {
-            columns: 120,
-            rows: 40,
-            kittyProtocolActive: false,
-            start(onInput) {
-              input = onInput;
-            },
-            stop() {},
-            async drainInput() {},
-            write(data) {
-              writes.push(data);
-            },
-            moveBy() {},
-            hideCursor() {},
-            showCursor() {},
-            clearLine() {},
-            clearFromCursor() {},
-            clearScreen() {},
-            setTitle() {},
-            setProgress() {},
-            setProgramStatus() {},
-          };
+          const { terminal, writes, input } = terminalFixture(120, 40);
           const tui = mode === 'regular' ? new TuiMainScreen(terminal) : new TuiAltScreen(terminal);
           let browser: any;
           let mounted = false;

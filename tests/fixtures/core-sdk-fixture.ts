@@ -100,11 +100,7 @@ interface CoreFixtureOptions {
   onStart?: (pi: ExtensionAPI, ctx: ExtensionContext) => void | Promise<void>;
   onShutdown?: () => void | Promise<void>;
   onSettled?: (aborted: boolean, pi: ExtensionAPI) => void | Promise<void>;
-  input?: (
-    event: InputEvent,
-    ctx: ExtensionContext,
-    instance: CoreFixtureInstance,
-  ) => Promise<InputEventResult | void> | InputEventResult | void;
+  input?: (event: InputEvent) => Promise<InputEventResult | void> | InputEventResult | void;
   tokens?: number | ((text: string) => number);
 }
 export interface CoreFixtureState extends CoreFixtureOptions {
@@ -282,7 +278,7 @@ export default function coreSdkFixture(pi: ExtensionAPI) {
               typeof state.tokens === 'function' ? state.tokens(text) : (state.tokens ?? 60000);
             message.usage.input = tokens;
             message.usage.totalTokens = tokens;
-            if (text.startsWith('fail') || text.startsWith('crash')) {
+            if (text.startsWith('fail')) {
               message.stopReason = 'error';
               message.errorMessage = 'fixture failure';
               stream.push({ type: 'error', reason: 'error', error: message });
@@ -327,11 +323,10 @@ export default function coreSdkFixture(pi: ExtensionAPI) {
     if (state.shutdownAtStart) ctx.shutdown();
     await state.startupGate;
     await state.onStart?.(pi, ctx);
-    instance.events.push('initialized');
   });
   pi.on('input', async (event, ctx) => {
     instance.inputs.push({ ...event });
-    const result = await state.input?.(event, ctx, instance);
+    const result = await state.input?.(event);
     if (result) return result;
     if (event.text.startsWith('handled work')) {
       pi.sendUserMessage('hold handled-owned-work');
@@ -352,7 +347,6 @@ export default function coreSdkFixture(pi: ExtensionAPI) {
   });
   pi.on('session_shutdown', async () => {
     instance.shutdowns++;
-    instance.events.push('session_shutdown');
     await state.shutdownGate;
     await state.onShutdown?.();
   });

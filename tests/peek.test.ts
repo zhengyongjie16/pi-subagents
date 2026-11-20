@@ -1058,9 +1058,28 @@ describe('footer context information and metadata polling', () => {
         throw new Error('failed to construct chat');
       },
     );
-    const connect = spyOn(net, 'connect');
+    const connect = spyOn(net, 'connect').mockImplementation(() => {
+      throw new Error('unexpected socket startup');
+    });
     try {
-      expect(() => createOverlay()).toThrow('failed to construct chat');
+      // Bypass createOverlay's connectSocket stub so this observes real startup ordering.
+      expect(
+        () =>
+          new SubagentPeekOverlay(
+            { terminal: { rows: 90 }, requestRender() {} } as unknown as TUI,
+            { fg: (_color: string, text: string) => text } as Theme,
+            {
+              id: 'peek-constructor-' + randomUUID(),
+              taskName: 'rendering',
+              provider: 'test',
+              modelId: 'fake',
+              cwd,
+              sessionFile: join(tmpdir(), 'peek-absent-' + randomUUID() + '.jsonl'),
+            } as AgentInfo,
+            () => {},
+            nativeCodemodeRenderers,
+          ),
+      ).toThrow('failed to construct chat');
       expect(connect).not.toHaveBeenCalled();
       expect(clock!.timers.size).toBe(0);
       expect(clock!.set).not.toHaveBeenCalled();

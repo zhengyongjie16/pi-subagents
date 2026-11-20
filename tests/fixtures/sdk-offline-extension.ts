@@ -16,8 +16,6 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 
 export interface OfflineFixtureConfig {
-  provider?: string;
-  modelId?: string;
   prefix?: string;
   codemodeScript?: string;
   toolCalls?: Array<{ name: string; arguments: Record<string, unknown> }>;
@@ -38,7 +36,7 @@ export interface OfflineFixtureConfig {
   shutdownAtStart?: boolean;
   shutdownError?: boolean;
   stopReason?: 'error' | 'aborted';
-  resources?: { skillPaths?: string[]; promptPaths?: string[]; themePaths?: string[] };
+  resources?: { skillPaths?: string[]; promptPaths?: string[] };
 }
 
 // Module-scoped state records factory reuse across sessions.
@@ -59,8 +57,8 @@ export default async function (pi: ExtensionAPI) {
   record('factory', { invocation, moduleVersion: MODULE_VERSION });
   if (config.factoryGate) await waitForRelease('factory');
 
-  const providerId = config.provider ?? 'sdk-offline';
-  const modelId = config.modelId ?? 'exact/model';
+  const providerId = 'sdk-offline';
+  const modelId = 'exact/model';
   const models: Model<string>[] = [modelId, 'other-model'].map((id) => ({
     id,
     provider: providerId,
