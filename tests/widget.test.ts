@@ -26,7 +26,7 @@ const plainTheme = { fg: (_color: string, text: string) => text } as Theme;
 const controllers: AgentSummaryWidget[] = [];
 let clock: ReturnType<typeof controlledTimers> | undefined;
 
-// Only these two spies are restored; no module mocks, global fake clock or mock.restore().
+// Restore timer spies individually; no module mocks, global fake clock or mock.restore().
 function controlledTimers() {
   const timers = new Map<object, { callback: () => void; delay?: number }>();
   const set = spyOn(globalThis, 'setInterval').mockImplementation(((
@@ -151,6 +151,19 @@ function expectFit(lines: string[], width: number) {
     expect(visibleWidth(line)).toBeLessThanOrEqual(width);
     expect(stripVTControlCharacters(line)).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
   }
+}
+
+// Decode the six emitted foreground colors, not spinner frames or escape-string churn.
+function titleGradient(line: string) {
+  const run = line.match(
+    /(?:\x1b\[38;(?:2;\d+;\d+;\d+|5;\d+)m[A-Za-z]){6}\x1b\[39m/,
+  )?.[0];
+  expect(run).toBeDefined();
+  expect(stripVTControlCharacters(run!)).toBe('Agents');
+  return {
+    colors: [...run!.matchAll(/\x1b\[(38;[^m]+)m/g)].map((match) => match[1]),
+    outside: line.replace(run!, 'Agents'),
+  };
 }
 
 describe('configured summary badges', () => {
@@ -632,6 +645,95 @@ describe('summary content', () => {
   });
 });
 
+describe('animated Agents title', () => {
+  for (const status of ['starting', 'running'] as const) {
+    test.each(['truecolor', '256color'] as const)(
+      `${status} changes only title colors with elapsed time and shares the native clock in %s`,
+      (mode) => {
+        let now = 1000;
+        const time = spyOn(performance, 'now').mockImplementation(() => now);
+        const timeout = spyOn(globalThis, 'setTimeout');
+        try {
+          const f = host({ theme: nativeTheme('dark', mode) });
+          const source = mock(() => [snapshot({ status, elapsedMs: 12_345 })]);
+          const counts = mock(() => ({ running: 1, completed: 0, failed: 0, interrupted: 0 }));
+          controller(source, mock((_error: unknown) => {}), counts).attach(f.ctx);
+          expect([...clock!.timers.values()].map((timer) => timer.delay)).toEqual([200, 80]);
+          const handles = [...clock!.timers.keys()];
+          const first = f.render();
+          const initial = titleGradient(first[0]);
+          expect(new Set(initial.colors).size).toBeGreaterThan(1);
+          expect(
+            initial.colors.every((color) =>
+              color.startsWith(mode === 'truecolor' ? '38;2;' : '38;5;'),
+            ),
+          ).toBe(true);
+          expect(f.render()).toEqual(first);
+
+          // Neither the spinner frame nor the cached snapshot elapsedMs changes here.
+          now += 320;
+          const flowed = f.render();
+          const next = titleGradient(flowed[0]);
+          expect(next.colors).not.toEqual(initial.colors);
+          expect(next.outside).toBe(initial.outside);
+          expect(flowed.map(stripVTControlCharacters)).toEqual(first.map(stripVTControlCharacters));
+          expect(flowed.slice(1)).toEqual(first.slice(1));
+          const samples = source.mock.calls.length;
+          const statusSamples = counts.mock.calls.length;
+          const redraws = f.requestRender.mock.calls.length;
+          for (let frame = 0; frame < 4; frame++) {
+            clock!.tick(80);
+            f.component.invalidate();
+            expect(f.render()[0]).toBe(flowed[0]); // Frozen time, despite advancing spinner frames.
+          }
+          expect(f.requestRender).toHaveBeenCalledTimes(redraws + 4);
+          expect(source).toHaveBeenCalledTimes(samples);
+          expect(counts).toHaveBeenCalledTimes(statusSamples);
+          clock!.tick(200);
+          expect(source).toHaveBeenCalledTimes(samples + 1);
+          expect(counts).toHaveBeenCalledTimes(statusSamples + 1);
+          expect([...clock!.timers.keys()]).toEqual(handles);
+          expect(clock!.set).toHaveBeenCalledTimes(2);
+          expect(timeout).not.toHaveBeenCalled();
+          expect(f.setWidget).toHaveBeenCalledTimes(1);
+        } finally {
+          timeout.mockRestore();
+          time.mockRestore();
+        }
+      },
+    );
+  }
+
+  test.each(['fg-only', 'missing'] as const)('%s themes retain the original static title', (kind) => {
+    let now = 1000;
+    const time = spyOn(performance, 'now').mockImplementation(() => now);
+    const widget = controller(() => [snapshot()]);
+    try {
+      const theme = kind === 'fg-only' ? trackingTheme().theme : undefined;
+      const f = host();
+      f.ui.theme = theme;
+      f.ui.setWidget = mock(() => {}); // Mount explicitly with no factory-theme fallback.
+      widget.attach(f.ctx);
+      const factory = f.ui.setWidget.mock.calls[0][1] as Factory;
+      const component = factory(f.tui, theme as Theme);
+      const line = component.render(140)[0];
+      expect(line).toBe(
+        (theme?.fg('accent', '● Agents') ?? '● Agents') +
+          (theme?.fg('accent', ' · ') ?? ' · ') +
+          (theme?.fg('warning', '1 running') ?? '1 running') +
+          (theme?.fg('accent', ' · /subagents to view details') ?? ' · /subagents to view details'),
+      );
+      now += 320;
+      clock!.tick(80);
+      expect(component.render(140)[0]).toBe(line);
+      expect(time).not.toHaveBeenCalled();
+    } finally {
+      widget.dispose();
+      time.mockRestore();
+    }
+  });
+});
+
 describe('session status summary', () => {
   for (const appearance of ['dark', 'light'] as const) {
     test.each(['truecolor', '256color'] as const)(
@@ -651,9 +753,15 @@ describe('session status summary', () => {
         const checkColors = (current: Theme) => {
           const line = f.render(140)[0];
           const active = counts.running > 0;
-          expect(line).toContain(
-            current.fg(active ? 'accent' : 'dim', active ? '● Agents' : '○ Agents'),
-          );
+          if (active) {
+            const gradient = titleGradient(line);
+            expect(gradient.outside).toStartWith(current.fg('accent', '● ') + 'Agents');
+            expect(new Set(gradient.colors).size).toBeGreaterThan(1);
+            if (mode === '256color') expect(line).not.toContain('\x1b[38;2;');
+            else expect(gradient.colors.every((color) => color.startsWith('38;2;'))).toBe(true);
+          } else {
+            expect(line).toContain(current.fg('dim', '○ Agents'));
+          }
           for (const [status, color] of [
             ['running', 'warning'],
             ['completed', 'success'],
@@ -668,15 +776,29 @@ describe('session status summary', () => {
           );
         };
         checkColors(theme);
-        for (const width of [0, 1, 9, 10, 22, 32, 60, 80, 120]) {
-          expectFit(f.render(width), width);
+        const titleWidth = visibleWidth('● Agents · /subagents to view details');
+        for (const width of [
+          0, 1, 9, 10, 22, 32, titleWidth - 1, titleWidth, titleWidth + 1, titleWidth + 2, 60, 80, 120,
+        ]) {
+          const lines = f.render(width);
+          expectFit(lines, width);
           if (width >= 10) expect(f.text(width).split('\n')[0]).toContain('/subagents');
+          // Native truncation reserves an ellipsis and may replace the title's reset.
+          if (width >= titleWidth + 2) titleGradient(lines[0]);
+          if (width >= titleWidth)
+            expect(lines[0]).toEndWith(theme.fg('accent', ' · /subagents to view details'));
         }
+        expect(f.render(titleWidth - 1)[0]).toBe(theme.fg('accent', '/subagents'));
+        expect(f.text(titleWidth).split('\n')[0]).toBe('● Agent… · /subagents to view details');
+        expect(f.text(titleWidth + 1).split('\n')[0]).toBe('● Agents… · /subagents to view details');
         const samples = source.mock.calls.length;
         const replacement = nativeTheme(appearance === 'dark' ? 'light' : 'dark', mode);
         f.ui.theme = replacement;
         f.component.invalidate();
         checkColors(replacement);
+        f.ui.theme = undefined;
+        checkColors(theme); // A full factory theme also retains its color mode.
+        f.ui.theme = replacement;
         expect(source).toHaveBeenCalledTimes(samples);
         expect(f.setWidget).toHaveBeenCalledTimes(1);
         agents = [];
@@ -924,38 +1046,71 @@ describe('native spinner clock', () => {
     expect(clock!.timers.size).toBe(0);
   });
 
-  test('heading-only totals do not animate and stale frames cannot redraw a restarted widget', () => {
-    let agents: AgentWidgetSnapshot[] = [];
-    let counts = { running: 1, completed: 0, failed: 0, interrupted: 0 };
-    const source = mock(() => agents);
-    const widget = controller(
-      source,
-      mock((_error: unknown) => {}),
-      () => counts,
-    );
-    const f = host();
-    widget.attach(f.ctx);
-    expect([...clock!.timers.values()].map((timer) => timer.delay)).toEqual([200]);
-    agents = [snapshot()];
-    widget.refresh();
-    expect([...clock!.timers.values()].map((timer) => timer.delay)).toEqual([200, 80]);
-    const staleFrame = [...clock!.timers.values()].find((timer) => timer.delay === 80)!.callback;
-    agents = [];
-    counts = { ...counts, running: 0, completed: 1 };
-    widget.refresh();
-    expect(f.render()).toHaveLength(1);
-    expect(clock!.timers.size).toBe(0);
-    agents = [snapshot()];
-    counts = { ...counts, running: 1 };
-    widget.refresh();
-    const samples = source.mock.calls.length;
-    const redraws = f.requestRender.mock.calls.length;
-    staleFrame();
-    expect(source).toHaveBeenCalledTimes(samples);
-    expect(f.requestRender).toHaveBeenCalledTimes(redraws);
-    expect([...clock!.timers.values()].map((timer) => timer.delay)).toEqual([200, 80]);
-    widget.dispose();
-    expect(clock!.timers.size).toBe(0);
+  test('active heading-only totals share the animator, settle to dim, and reject stale callbacks after restart or disposal', () => {
+    const time = spyOn(performance, 'now').mockReturnValue(1000);
+    try {
+      let agents: AgentWidgetSnapshot[] = [];
+      let counts = { running: 1, completed: 0, failed: 0, interrupted: 0 };
+      const source = mock(() => agents);
+      const countSource = mock(() => counts);
+      const widget = controller(source, mock((_error: unknown) => {}), countSource);
+      const theme = nativeTheme('dark');
+      const f = host({ theme });
+      widget.attach(f.ctx);
+      expect(f.render()).toHaveLength(1);
+      expect([...clock!.timers.values()].map((timer) => timer.delay)).toEqual([200, 80]);
+      const handles = [...clock!.timers.keys()];
+      const staleTicks = [...clock!.timers.values()].map((timer) => timer.callback);
+      const initial = titleGradient(f.render()[0]);
+      time.mockReturnValue(1320);
+      clock!.tick(80);
+      expect(titleGradient(f.render()[0]).colors).not.toEqual(initial.colors);
+      expect(source).toHaveBeenCalledTimes(1);
+      expect(countSource).toHaveBeenCalledTimes(1);
+      agents = [snapshot()];
+      widget.refresh();
+      expect([...clock!.timers.keys()]).toEqual(handles);
+      expect(clock!.set).toHaveBeenCalledTimes(2);
+      agents = [];
+      counts = { ...counts, running: 0, completed: 1 };
+      widget.refresh();
+      const settled = f.render();
+      expect(settled).toHaveLength(1);
+      expect(settled[0]).toStartWith(theme.fg('dim', '○ Agents'));
+      expect(clock!.timers.size).toBe(0);
+      time.mockReturnValue(5000);
+      expect(f.render()).toEqual(settled);
+      let samples = source.mock.calls.length;
+      let statusSamples = countSource.mock.calls.length;
+      let redraws = f.requestRender.mock.calls.length;
+      for (const tick of staleTicks) tick();
+      expect(source).toHaveBeenCalledTimes(samples);
+      expect(countSource).toHaveBeenCalledTimes(statusSamples);
+      expect(f.requestRender).toHaveBeenCalledTimes(redraws);
+      agents = [snapshot()];
+      counts = { ...counts, running: 1 };
+      widget.refresh();
+      samples = source.mock.calls.length;
+      statusSamples = countSource.mock.calls.length;
+      redraws = f.requestRender.mock.calls.length;
+      for (const tick of staleTicks) tick();
+      expect(source).toHaveBeenCalledTimes(samples);
+      expect(countSource).toHaveBeenCalledTimes(statusSamples);
+      expect(f.requestRender).toHaveBeenCalledTimes(redraws);
+      expect([...clock!.timers.values()].map((timer) => timer.delay)).toEqual([200, 80]);
+      expect(f.setWidget).toHaveBeenCalledTimes(1);
+      const current = f.component;
+      const currentTicks = [...clock!.timers.values()].map((timer) => timer.callback);
+      widget.dispose();
+      expect(clock!.timers.size).toBe(0);
+      expect(current.render(140)).toEqual([]);
+      for (const tick of [...staleTicks, ...currentTicks]) tick();
+      expect(source).toHaveBeenCalledTimes(samples);
+      expect(countSource).toHaveBeenCalledTimes(statusSamples);
+      expect(f.requestRender).toHaveBeenCalledTimes(redraws);
+    } finally {
+      time.mockRestore();
+    }
   });
 
   test('a native animation allocation failure leaves sampling alive and retries without remounting', () => {

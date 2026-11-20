@@ -1,6 +1,9 @@
 import type { ExtensionContext, Theme } from '@earendil-works/pi-coding-agent';
 import {
+  foregroundAnsi,
   Loader,
+  mixColors,
+  parseColor,
   truncateToWidth,
   visibleWidth,
   type Component,
@@ -17,6 +20,10 @@ import {
 
 const WIDGET_KEY = 'pi-subagents';
 const MAX_LINES = 12;
+// Radius-style flowing bands, narrowed to fit the six-letter title.
+const TITLE_COLORS = ['#4d9abf', '#83ccd2', '#f1be57', '#f09082'].map((hex) => parseColor(hex));
+const TITLE_CHARS_PER_COLOR = 2;
+const TITLE_CHARS_PER_SECOND = 4;
 const SUMMARY_STATUSES = ['running', 'completed', 'failed', 'interrupted'] as const;
 export type AgentStatusCounts = Readonly<Record<(typeof SUMMARY_STATUSES)[number], number>>;
 const EMPTY_STATUS_COUNTS: AgentStatusCounts = {
@@ -190,6 +197,28 @@ function agentHeader(
   return renderAgentBadge(name, theme, color) + ' ' + paint(theme, 'dim', status);
 }
 
+function agentsTitle(active: boolean, theme?: Theme): string {
+  const mode = active ? theme?.getColorMode?.() : undefined;
+  if (!mode) return paint(theme, active ? 'accent' : 'dim', active ? '● Agents' : '○ Agents');
+  const cycle = TITLE_COLORS.length * TITLE_CHARS_PER_COLOR;
+  // Time, not render count, sets the phase; redraws share the existing spinner clock.
+  const offset = (performance.now() / 1000) * TITLE_CHARS_PER_SECOND;
+  let title = paint(theme, 'accent', '● ');
+  for (const [index, char] of [...'Agents'].entries()) {
+    const position = (((index - offset) % cycle) + cycle) % cycle;
+    const band = Math.floor(position / TITLE_CHARS_PER_COLOR);
+    const t = position / TITLE_CHARS_PER_COLOR - band;
+    const color = mixColors(
+      TITLE_COLORS[band],
+      TITLE_COLORS[(band + 1) % TITLE_COLORS.length],
+      t * t * (3 - 2 * t),
+      'srgb',
+    );
+    title += foregroundAnsi(color, mode) + char;
+  }
+  return title + '\x1b[39m';
+}
+
 function heading(width: number, counts: AgentStatusCounts, theme?: Theme): string {
   const active = counts.running > 0;
   const baseColor = active ? 'accent' : 'dim';
@@ -200,9 +229,7 @@ function heading(width: number, counts: AgentStatusCounts, theme?: Theme): strin
   const parts = SUMMARY_STATUSES.filter((status) => counts[status] > 0).map((status) =>
     paint(theme, agentStatusColor(status), `${counts[status]} ${status}`),
   );
-  const title = [paint(theme, baseColor, active ? '● Agents' : '○ Agents'), ...parts].join(
-    paint(theme, baseColor, ' · '),
-  );
+  const title = [agentsTitle(active, theme), ...parts].join(paint(theme, baseColor, ' · '));
   // Preserve each status's ANSI color while still reserving the command hint.
   return truncateToWidth(title, available, '…') + paint(theme, baseColor, suffix);
 }
@@ -395,7 +422,7 @@ export class AgentSummaryWidget {
 
   private syncSpinner(): void {
     if (
-      !this.snapshots.length ||
+      !(this.snapshots.length || this.statusCounts.running > 0) ||
       !this.mount?.tui ||
       this.timer === undefined ||
       this.ctx?.mode !== 'tui'
