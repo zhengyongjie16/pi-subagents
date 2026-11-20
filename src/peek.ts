@@ -55,7 +55,7 @@ const TOOL_DEFINITION_FACTORIES = new Map<string, (cwd: string) => ToolDefinitio
 
 const OSC133_PROMPT_MARKER_RE = /\x1b\]133;[ABC]\x07/g;
 
-function stripPromptMarkers(lines: string[]): string[] {
+function stripPromptMarkers(lines: readonly string[]): string[] {
   return lines.map((line) => line.replace(OSC133_PROMPT_MARKER_RE, ''));
 }
 

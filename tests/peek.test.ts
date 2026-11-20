@@ -611,7 +611,7 @@ describe('fixed native collapsed rendering', () => {
           isError: false,
         });
         const original = structuredClone(result);
-        const outputs: string[][] = [];
+        const outputs: Array<readonly string[]> = [];
         for (const options of [
           {},
           { showImages: false, imageWidthCells: 7, outputPad: 0 },
@@ -1715,6 +1715,22 @@ describe('overlay creation paths and native lifecycle', () => {
       }
     } finally {
       initTheme('dark', false);
+    }
+  });
+
+  test('strips prompt markers without modifying shared container output', () => {
+    const { overlay } = createOverlay();
+    const marker = '\x1b]133;A\x07';
+    const cachedLines = [`${marker}child transcript`];
+    Object.freeze(cachedLines);
+    const render = spyOn(overlay['chatContainer'], 'render').mockReturnValue(cachedLines);
+    try {
+      const view = overlay.render(82).join('\n');
+      expect(view).toContain('child transcript');
+      expect(view).not.toContain(marker);
+      expect(cachedLines).toEqual([`${marker}child transcript`]);
+    } finally {
+      render.mockRestore();
     }
   });
 

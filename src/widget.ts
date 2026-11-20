@@ -56,6 +56,7 @@ interface Mount {
   tui?: TUI;
   theme?: Theme;
   disposed: boolean;
+  renderFailed: boolean;
   component: WidgetComponent;
 }
 
@@ -246,7 +247,6 @@ export class AgentSummaryWidget {
   private spinner?: AgentSpinner;
   private disposed = false;
   private sampleFailed = false;
-  private renderFailed = false;
 
   constructor(
     private readonly getSnapshots: () => readonly AgentWidgetSnapshot[],
@@ -338,6 +338,7 @@ export class AgentSummaryWidget {
             tui,
             theme,
             disposed: false,
+            renderFailed: false,
             component: {
               render: (width) => this.render(mount, width),
               invalidate() {}, // Rendering is stateless and always uses the current theme.
@@ -389,7 +390,7 @@ export class AgentSummaryWidget {
       const lines = [heading(width, this.statusCounts, theme)];
       if (budget === 1 || width === 1) {
         const fitted = lines.map((line) => truncateToWidth(line, width, '…'));
-        this.renderFailed = false;
+        mount.renderFailed = false;
         return fitted;
       }
       const allFit = 1 + this.snapshots.length * 2 <= budget;
@@ -408,12 +409,15 @@ export class AgentSummaryWidget {
       }
       if (hidden) lines.push(paint(theme, 'dim', `└─ +${hidden} more · /subagents`));
       const fitted = lines.map((line) => truncateToWidth(line, width, '…'));
-      this.renderFailed = false;
+      mount.renderFailed = false;
       return fitted;
     } catch (error) {
-      if (!this.renderFailed) {
-        this.renderFailed = true; // notify() can immediately request another render.
-        this.report(error);
+      if (!mount.renderFailed) {
+        mount.renderFailed = true;
+        // notify() can mutate Pi's component tree. Report only after this frame finishes.
+        queueMicrotask(() => {
+          if (this.mount === mount && !mount.disposed) this.report(error);
+        });
       }
       // A bad getter/theme must not escape into the SDK render loop or poison future frames.
       return [truncateToWidth('/subagents', width, '…')];

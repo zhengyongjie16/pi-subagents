@@ -146,7 +146,7 @@ function usage(percent: number | null) {
   return { contextWindow: 100_000, tokens: percent === null ? null : percent * 1000, percent };
 }
 
-function expectFit(lines: string[], width: number) {
+function expectFit(lines: readonly string[], width: number) {
   for (const line of lines) {
     expect(visibleWidth(line)).toBeLessThanOrEqual(width);
     expect(stripVTControlCharacters(line)).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
@@ -1523,7 +1523,7 @@ describe('exception isolation and recovery', () => {
     expect(errors).toHaveBeenCalledTimes(2); // A successful cached render cannot reset sampling failure.
   });
 
-  test('render failures report once before synchronous notify/redraw reentry and rearm only after healthy rendering', () => {
+  test('render failures notify after the frame and rearm only after healthy rendering', async () => {
     const f = host();
     const errors = mock((_error: unknown) => {
       if (errors.mock.calls.length < 5) f.component.render(80);
@@ -1541,6 +1541,8 @@ describe('exception isolation and recovery', () => {
       f.component.invalidate();
       expect(f.render(80)).toEqual(['/subagents']);
     }
+    expect(errors).not.toHaveBeenCalled();
+    await Promise.resolve();
     expect(errors).toHaveBeenCalledTimes(1);
     f.ui.theme = plainTheme;
     expect(f.render()).toHaveLength(3);
@@ -1550,9 +1552,35 @@ describe('exception isolation and recovery', () => {
       },
     } as unknown as Theme;
     for (let i = 0; i < 5; i++) expect(f.render(80)).toEqual(['/subagents']);
+    await Promise.resolve();
     expect(errors).toHaveBeenCalledTimes(2);
     expect(f.setWidget).toHaveBeenCalledTimes(1);
   });
+
+  test.each(['replace', 'dispose'] as const)(
+    'drops deferred errors if the widget is no longer mounted (%s)',
+    async (action) => {
+      let failure = new Error('old render failure');
+      const theme = {
+        fg() {
+          throw failure;
+        },
+      } as unknown as Theme;
+      const f = host({ theme });
+      const errors = mock((_error: unknown) => {});
+      const widget = controller(() => [snapshot()], errors);
+      widget.attach(f.ctx);
+      expect(f.render()).toEqual(['/subagents']);
+      if (action === 'replace') {
+        const next = host({ parentId: 'next', theme });
+        widget.attach(next.ctx);
+        failure = new Error('new render failure');
+        expect(next.render()).toEqual(['/subagents']);
+      } else widget.dispose();
+      await Promise.resolve();
+      expect(errors.mock.calls).toEqual(action === 'replace' ? [[failure]] : []);
+    },
+  );
 
   test('a retry is not armed after diagnostics synchronously dispose the controller or switch mode', () => {
     for (const action of ['dispose', 'mode'] as const) {
@@ -1601,7 +1629,7 @@ describe('exception isolation and recovery', () => {
     expect(errors).toHaveBeenCalledTimes(2);
   });
 
-  test('bad theme and snapshot getters fall back to one safe line and recover without re-registering', () => {
+  test('bad theme and snapshot getters fall back to one safe line and recover without re-registering', async () => {
     let agent = snapshot();
     const errors = mock((_error: unknown) => {});
     const f = host();
@@ -1628,6 +1656,7 @@ describe('exception isolation and recovery', () => {
     clock!.tick();
     expect(f.text()).toContain('1.0k token');
     expect(f.setWidget).toHaveBeenCalledTimes(1);
+    await Promise.resolve();
     expect(errors).toHaveBeenCalledTimes(2);
   });
 
@@ -1657,7 +1686,7 @@ describe('exception isolation and recovery', () => {
     expect(errors.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
-  test('render and timer diagnostics can throw without escaping into SDK callbacks', () => {
+  test('render and timer diagnostics can throw without escaping into SDK callbacks', async () => {
     let fail = false;
     const errors = mock((_error: unknown) => {
       throw new Error('reporter failure');
@@ -1678,6 +1707,8 @@ describe('exception isolation and recovery', () => {
     expect(() => f.component.invalidate()).not.toThrow();
     expect(() => f.render(1)).not.toThrow();
     expectFit(f.render(1), 1);
+    await Promise.resolve();
+    expect(errors).toHaveBeenCalledTimes(2);
     f.ui.theme = plainTheme;
     fail = false;
     clock!.tick();
