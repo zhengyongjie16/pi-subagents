@@ -372,7 +372,10 @@ describe('summary content', () => {
     const widget = controller(() => [agent]);
     widget.attach(f.ctx);
     for (const [extra, expected] of [
-      [{ status: 'starting', activeTools: ['read'], responsePreview: 'not yet' }, 'initializing…'],
+      [
+        { status: 'pending_init', activeTools: ['read'], responsePreview: 'not yet' },
+        'initializing…',
+      ],
       [{ activeTools: ['bash', 'powershell', 'read', 'read'] }, 'running command, reading…'],
       [{ activeTools: ['\x1b[31mmcp__search\x1b[0m\x07\nname'] }, 'mcp__search name…'],
       [
@@ -389,6 +392,25 @@ describe('summary content', () => {
     }
     expect(f.setWidget).toHaveBeenCalledTimes(1);
     expect(clock!.timers.size).toBe(2);
+  });
+
+  test.each([
+    ['pending_init', 'initializing'],
+    ['running', 'running'],
+  ] as const)('shows %s as %s when a row is too narrow for stats', (status, label) => {
+    const f = host();
+    controller(() => [
+      snapshot({
+        taskName: 'a',
+        status,
+        thinking: 'max',
+        tokens: 1_000,
+        contextUsage: usage(62),
+        compactionCount: 12,
+        elapsedMs: 12_345,
+      }),
+    ]).attach(f.ctx);
+    expect(f.text(14).split('\n')[1]).toBe('a ' + label);
   });
 
   test('exact Pi built-in tool names, including native codemode, use short action labels', () => {
@@ -424,9 +446,9 @@ describe('summary content', () => {
       'spawn_agent',
       'wait_agent',
       'send_message',
-      'read_agent_response',
       'interrupt_agent',
       'list_agents',
+      'tool_search',
       'my_new_extension_tool',
       'mcp__github__search_issues',
       'mcp__files__read',
@@ -644,7 +666,7 @@ describe('summary content', () => {
 });
 
 describe('animated Agents title', () => {
-  for (const status of ['starting', 'running'] as const) {
+  for (const status of ['pending_init', 'running'] as const) {
     test.each(['truecolor', '256color'] as const)(
       `${status} changes only title colors with elapsed time and shares the native clock in %s`,
       (mode) => {
@@ -654,7 +676,7 @@ describe('animated Agents title', () => {
         try {
           const f = host({ theme: nativeTheme('dark', mode) });
           const source = mock(() => [snapshot({ status, elapsedMs: 12_345 })]);
-          const counts = mock(() => ({ running: 1, completed: 0, failed: 0, interrupted: 0 }));
+          const counts = mock(() => ({ running: 1, completed: 0, errored: 0, interrupted: 0 }));
           controller(
             source,
             mock((_error: unknown) => {}),
@@ -747,7 +769,7 @@ describe('session status summary', () => {
       (mode) => {
         const theme = nativeTheme(appearance, mode);
         let agents = [snapshot()];
-        let counts = { running: 2, completed: 3, failed: 1, interrupted: 1 };
+        let counts = { running: 2, completed: 3, errored: 1, interrupted: 1 };
         const source = mock(() => agents);
         const widget = controller(
           source,
@@ -771,7 +793,7 @@ describe('session status summary', () => {
           for (const [status, color] of [
             ['running', 'warning'],
             ['completed', 'success'],
-            ['failed', 'error'],
+            ['errored', 'error'],
             ['interrupted', 'warning'],
           ] as const) {
             if (counts[status])
@@ -835,9 +857,9 @@ describe('session status summary', () => {
     let agents = [
       snapshot(),
       snapshot({ taskName: 'second' }),
-      snapshot({ taskName: 'third', status: 'starting' }),
+      snapshot({ taskName: 'third', status: 'pending_init' }),
     ];
-    let counts = { running: 3, completed: 3, failed: 3, interrupted: 3 };
+    let counts = { running: 3, completed: 3, errored: 3, interrupted: 3 };
     const source = mock(() => agents);
     const f = host();
     const widget = controller(
@@ -847,16 +869,16 @@ describe('session status summary', () => {
     );
     widget.attach(f.ctx);
     expect(f.render()[0]).toBe(
-      '● Agents · 3 running · 3 completed · 3 failed · 3 interrupted · /subagents to view details',
+      '● Agents · 3 running · 3 completed · 3 errored · 3 interrupted · /subagents to view details',
     );
     expect(f.render()).toHaveLength(7);
     const component = f.component;
     const staleTick = [...clock!.timers.values()][0].callback;
     agents = [];
-    counts = { running: 0, completed: 6, failed: 3, interrupted: 3 };
+    counts = { running: 0, completed: 6, errored: 3, interrupted: 3 };
     widget.refresh();
     expect(f.render()).toEqual([
-      '○ Agents · 6 completed · 3 failed · 3 interrupted · /subagents to view details',
+      '○ Agents · 6 completed · 3 errored · 3 interrupted · /subagents to view details',
     ]);
     expect(f.component).toBe(component);
     expect(f.setWidget).toHaveBeenCalledTimes(1);
@@ -873,7 +895,7 @@ describe('session status summary', () => {
 
   test('mounts historical-only counts without a timer, hides zeros, and resumes active work', () => {
     let agents: AgentWidgetSnapshot[] = [];
-    let counts = { running: 0, completed: 2, failed: 0, interrupted: 0 };
+    let counts = { running: 0, completed: 2, errored: 0, interrupted: 0 };
     const f = host();
     const widget = controller(
       () => agents,
@@ -883,17 +905,17 @@ describe('session status summary', () => {
     widget.attach(f.ctx);
     expect(f.render()).toEqual(['○ Agents · 2 completed · /subagents to view details']);
     expect(clock!.set).not.toHaveBeenCalled();
-    counts = { running: 0, completed: 0, failed: 0, interrupted: 0 };
+    counts = { running: 0, completed: 0, errored: 0, interrupted: 0 };
     widget.refresh();
     expect(f.render()).toEqual([]);
     expect(clock!.timers.size).toBe(0);
     agents = [snapshot()];
-    counts = { running: 1, completed: 0, failed: 0, interrupted: 0 };
+    counts = { running: 1, completed: 0, errored: 0, interrupted: 0 };
     widget.refresh();
     expect(f.render()[0]).toBe('● Agents · 1 running · /subagents to view details');
     expect(f.render()).toHaveLength(3);
     expect(clock!.timers.size).toBe(2);
-    expect(f.text()).not.toMatch(/0 completed|0 failed|0 interrupted/);
+    expect(f.text()).not.toMatch(/0 completed|0 errored|0 interrupted/);
   });
 
   test('counts every active agent rather than just the visible overflow rows', () => {
@@ -901,11 +923,11 @@ describe('session status summary', () => {
     controller(
       () => Array.from({ length: 6 }, (_, i) => snapshot({ taskName: 'worker' + i })),
       mock((_error: unknown) => {}),
-      () => ({ running: 6, completed: 100, failed: 1, interrupted: 1 }),
+      () => ({ running: 6, completed: 100, errored: 1, interrupted: 1 }),
     ).attach(f.ctx);
     const lines = f.render(140);
     expect(lines[0]).toBe(
-      '● Agents · 6 running · 100 completed · 1 failed · 1 interrupted · /subagents to view details',
+      '● Agents · 6 running · 100 completed · 1 errored · 1 interrupted · /subagents to view details',
     );
     expect(lines).toHaveLength(12);
     expect(lines[11]).toContain('+1 more');
@@ -913,7 +935,7 @@ describe('session status summary', () => {
 
   test('failed count sampling is atomic and automatically recovers to an idle heading', () => {
     let agents = [snapshot()];
-    let counts = { running: 1, completed: 0, failed: 0, interrupted: 0 };
+    let counts = { running: 1, completed: 0, errored: 0, interrupted: 0 };
     let fail = false;
     const errors = mock((_error: unknown) => {});
     const f = host();
@@ -927,7 +949,7 @@ describe('session status summary', () => {
     );
     widget.attach(f.ctx);
     agents = [];
-    counts = { running: 0, completed: 1, failed: 0, interrupted: 0 };
+    counts = { running: 0, completed: 1, errored: 0, interrupted: 0 };
     fail = true;
     widget.refresh();
     clock!.tick();
@@ -948,7 +970,7 @@ describe('session status summary', () => {
       mock((_error: unknown) => {}),
       () => {
         if (fail) throw new Error('new parent unavailable');
-        return { running: 0, completed: 7, failed: 0, interrupted: 0 };
+        return { running: 0, completed: 7, errored: 0, interrupted: 0 };
       },
     );
     widget.attach(f.ctx);
@@ -1070,7 +1092,7 @@ describe('native spinner clock', () => {
     const time = spyOn(performance, 'now').mockReturnValue(1000);
     try {
       let agents: AgentWidgetSnapshot[] = [];
-      let counts = { running: 1, completed: 0, failed: 0, interrupted: 0 };
+      let counts = { running: 1, completed: 0, errored: 0, interrupted: 0 };
       const source = mock(() => agents);
       const countSource = mock(() => counts);
       const widget = controller(

@@ -40,7 +40,7 @@ const WHITE = parseColor('#FFFFFF');
 
 /** Shared by the browser, completion messages and summary status counts. */
 export function agentStatusColor(status: string | undefined): 'success' | 'error' | 'warning' {
-  return status === 'completed' ? 'success' : status === 'failed' ? 'error' : 'warning';
+  return status === 'completed' ? 'success' : status === 'errored' ? 'error' : 'warning';
 }
 
 /** Invalid configuration (including malformed old metadata) is always plain text. */

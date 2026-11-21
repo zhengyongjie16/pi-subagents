@@ -26,7 +26,6 @@ const TEMP_ROOT = path.join(
   PACKAGE_BASENAME,
   os.userInfo().username,
 );
-const LEGACY_RUNS_DIR = path.join(TEMP_ROOT, 'runs');
 const SOCKET_DIR = path.join(TEMP_ROOT, 'sockets');
 
 export const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
@@ -68,10 +67,13 @@ const ACTIVITY_PERSIST_INTERVAL_MS = 5_000;
 export const DEFAULT_THINKING = 'high';
 
 export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
-const FINAL_STATUSES = new Set<AgentRuntimeStatus>(['completed', 'failed', 'interrupted']);
+const FINAL_STATUSES = new Set<AgentRuntimeStatus>(['completed', 'errored', 'interrupted']);
 
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
-export type AgentRuntimeStatus = 'starting' | 'running' | 'completed' | 'failed' | 'interrupted';
+export type AgentRuntimeStatus =
+  'pending_init' | 'running' | 'completed' | 'errored' | 'interrupted';
+export type AgentStatus =
+  'pending_init' | 'running' | 'interrupted' | { completed: string | null } | { errored: string };
 
 export interface SubagentConfig {
   shortcut?: string;
@@ -156,7 +158,7 @@ export interface AgentInfo {
   messageCount: number;
   status: AgentRuntimeStatus;
   lastTaskMessage?: string;
-  finalResponse?: string;
+  finalResponse?: string | null;
   error?: string;
   contextUsage?: ContextUsage;
 }
@@ -165,7 +167,7 @@ export interface AgentInfo {
 export interface AgentWidgetSnapshot {
   readonly taskName: string;
   readonly color?: string;
-  readonly status: 'starting' | 'running';
+  readonly status: 'pending_init' | 'running';
   readonly provider?: string;
   readonly modelId?: string;
   readonly thinking?: ThinkingLevel;
@@ -177,18 +179,10 @@ export interface AgentWidgetSnapshot {
   readonly responsePreview?: string;
 }
 
-export interface AgentListEntry {
+export type AgentListEntry = {
   agent_name: string;
-  agent_status: AgentRuntimeStatus;
-}
-
-export interface AgentResponseEntry {
-  agent_name: string;
-  status: AgentRuntimeStatus;
-  finalResponse?: string;
-  error?: string;
-  last_task_message: string | null;
-}
+  agent_status: AgentStatus;
+};
 
 export interface SpawnAgentParams {
   task_name: string;
@@ -213,7 +207,7 @@ interface RunState {
   finalizedRun: boolean;
   awaitingPrompt: boolean;
   accepted: boolean;
-  candidateResponse: string;
+  candidateResponse: string | null;
   candidateError?: string;
   settledAborted: boolean;
   observerSettled: boolean;
@@ -245,20 +239,15 @@ interface LiveAgent {
   };
 }
 
-export interface AgentCompletionEvent {
+export type AgentCompletionEvent = {
   parentSessionId: string;
   taskName: string;
-  status: AgentRuntimeStatus;
-  finalResponse?: string;
-  error?: string;
-}
+} & ({ status: 'completed'; finalResponse: string | null } | { status: 'errored'; error: string });
 
 export interface AgentActivityEvent {
   parentSessionId: string;
   taskName: string;
-  active: boolean;
-  /** Exact latest status, including terminal states; active remains backward-compatible. */
-  status?: AgentRuntimeStatus;
+  status: AgentRuntimeStatus;
 }
 
 export interface AgentManagerOptions {
@@ -503,10 +492,11 @@ function pruneRunsRoot(root: string, cutoff: number): void {
 }
 
 function pruneExpiredRuns(): void {
-  const retentionDays = loadSubagentConfig().retentionDays ?? DEFAULT_RETENTION_DAYS;
+  const config = loadSubagentConfig();
+  const retentionDays = config.retentionDays ?? DEFAULT_RETENTION_DAYS;
   if (retentionDays === 0) return;
   const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
-  for (const root of runsRoots()) pruneRunsRoot(root, cutoff);
+  pruneRunsRoot(getRunsDir(config), cutoff);
 }
 
 export function parentScopeKey(parentSessionId: string): string {
@@ -517,17 +507,8 @@ export function taskStorageKey(taskName: string): string {
   return createHash('sha256').update(taskName).digest('hex').slice(0, 24);
 }
 
-function runsRoots(): string[] {
-  return [...new Set([getRunsDir(), LEGACY_RUNS_DIR])];
-}
-
 function scopeDir(parentSessionId: string): string {
   return path.join(getRunsDir(), parentScopeKey(parentSessionId));
-}
-
-function scopeDirs(parentSessionId: string): string[] {
-  const key = parentScopeKey(parentSessionId);
-  return runsRoots().map((root) => path.join(root, key));
 }
 
 export const TASK_PATH_PATTERN = '^[a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+)*$';
@@ -610,26 +591,28 @@ function saveInfo(info: AgentInfo): void {
 
 export function readInfoFile(file: string): AgentInfo | undefined {
   try {
-    const info = JSON.parse(fs.readFileSync(file, 'utf8')) as Omit<AgentInfo, 'status'> & {
-      status: AgentRuntimeStatus | 'closed';
-      closedAt?: number;
-    };
+    const info = JSON.parse(fs.readFileSync(file, 'utf8')) as AgentInfo;
     if (!info || typeof info !== 'object' || Array.isArray(info)) return undefined;
+    if (
+      info.status !== 'pending_init' &&
+      info.status !== 'running' &&
+      !FINAL_STATUSES.has(info.status)
+    )
+      return undefined;
+    if (info.status === 'errored' && typeof info.error !== 'string') return undefined;
+    if (
+      info.status === 'completed' &&
+      info.finalResponse != null &&
+      typeof info.finalResponse !== 'string'
+    )
+      return undefined;
     const color = resolveAgentColor(info.color);
     if (color) info.color = color;
     else delete info.color;
     const contextUsage = normalizeContextUsage(info.contextUsage);
     if (contextUsage) info.contextUsage = contextUsage;
     else delete info.contextUsage;
-    if (info.status === 'closed') {
-      info.status = info.error
-        ? 'failed'
-        : info.finalResponse !== undefined
-          ? 'completed'
-          : 'interrupted';
-      delete info.closedAt;
-    }
-    return info as AgentInfo;
+    return info;
   } catch {
     return undefined;
   }
@@ -655,17 +638,16 @@ function sortInfos(infos: AgentInfo[]): AgentInfo[] {
 }
 
 function readScopeInfos(parentSessionId: string): AgentInfo[] {
-  return sortInfos(scopeDirs(parentSessionId).flatMap(readInfos));
+  return sortInfos(readInfos(scopeDir(parentSessionId)));
 }
 
 function readAllInfos(): AgentInfo[] {
-  const directories = runsRoots().flatMap((root) => {
-    if (!fs.existsSync(root)) return [];
-    return fs
-      .readdirSync(root, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && SCOPE_DIR_PATTERN.test(entry.name))
-      .map((entry) => path.join(root, entry.name));
-  });
+  const root = getRunsDir();
+  if (!fs.existsSync(root)) return [];
+  const directories = fs
+    .readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && SCOPE_DIR_PATTERN.test(entry.name))
+    .map((entry) => path.join(root, entry.name));
   return sortInfos(directories.flatMap(readInfos));
 }
 
@@ -1292,14 +1274,14 @@ export class EventBroadcaster {
   }
 }
 
-function extractTextFromMessage(message: any): string {
-  const content = message?.content;
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  return content
-    .filter((part) => part?.type === 'text' && typeof part.text === 'string')
-    .map((part) => part.text)
-    .join('\n\n');
+function extractFinalResponse(message: AssistantMessage): string | null {
+  const text: string[] = [];
+  for (const part of message.content) {
+    // Tool-call preambles are not final answers, even if the tool terminates the turn.
+    if (part.type === 'toolCall') return null;
+    if (part.type === 'text') text.push(part.text);
+  }
+  return text.join('\n\n').trim() || null;
 }
 
 export function previewText(text: string | undefined, maxLength = 180): string | null {
@@ -1348,7 +1330,6 @@ export class AgentManager {
       this.options.onActivityChange?.({
         parentSessionId: info.parentSessionId,
         taskName: info.taskName,
-        active: info.status === 'starting' || info.status === 'running',
         status: info.status,
       });
     } catch (error) {
@@ -1386,7 +1367,7 @@ export class AgentManager {
 
   private async reconcileInactiveRuns(): Promise<void> {
     for (const info of readAllInfos()) {
-      if ((info.status === 'starting' || info.status === 'running') && !isRunActive(info.id)) {
+      if ((info.status === 'pending_init' || info.status === 'running') && !isRunActive(info.id)) {
         info.status = 'interrupted';
         info.completedAt = Date.now();
         info.lastActivity = Date.now();
@@ -1458,7 +1439,7 @@ export class AgentManager {
         startedAt: Date.now(),
         lastActivity: Date.now(),
         messageCount: 0,
-        status: 'starting',
+        status: 'pending_init',
         lastTaskMessage: params.message,
       };
       const prompt = [definition?.prompt, params.message].filter(Boolean).join('\n\n');
@@ -1533,7 +1514,7 @@ export class AgentManager {
         fs.closeSync(fs.openSync(info.sessionFile, 'wx', 0o600));
       } catch (error) {
         const message = formatAgentError(error);
-        info.status = 'failed';
+        info.status = 'errored';
         info.error = message;
         info.completedAt = Date.now();
         info.lastActivity = Date.now();
@@ -1546,7 +1527,7 @@ export class AgentManager {
         this.notifyCompletion({
           parentSessionId: info.parentSessionId,
           taskName: info.taskName,
-          status: 'failed',
+          status: 'errored',
           error: message,
         });
         throw error;
@@ -1577,7 +1558,7 @@ export class AgentManager {
       finalizedRun: false,
       awaitingPrompt: true,
       accepted: false,
-      candidateResponse: '',
+      candidateResponse: null,
       settledAborted: false,
       observerSettled: false,
       pendingSteers: new Set(),
@@ -1599,7 +1580,7 @@ export class AgentManager {
       const initializing = !live.session;
       if (initializing) {
         live.broadcaster.start();
-        live.info.status = 'starting';
+        live.info.status = 'pending_init';
         live.info.lastActivity = Date.now();
         saveInfo(live.info);
         this.notifyStatusChange(live.info);
@@ -1678,7 +1659,7 @@ export class AgentManager {
               (run.cancellation.signal.aborted && error !== timeout))
           )
             this.finalizeRun(live, run, 'interrupted');
-          else this.finalizeRun(live, run, 'failed', formatAgentError(live.eventError ?? error));
+          else this.finalizeRun(live, run, 'errored', live.eventError ?? error);
         }
       } catch (saveError) {
         live.closing = true;
@@ -1766,7 +1747,7 @@ export class AgentManager {
           error ??
           run.candidateError ??
           (run.settledAborted ? 'Agent ended with aborted.' : undefined);
-        if (failure !== undefined) this.finalizeRun(live, run, 'failed', formatAgentError(failure));
+        if (failure !== undefined) this.finalizeRun(live, run, 'errored', failure);
         else this.finalizeRun(live, run, 'completed');
       }
     } catch (error) {
@@ -1865,7 +1846,7 @@ export class AgentManager {
     if (!run) return;
     this.requestCancellation(live, run, live.eventError);
     try {
-      this.finalizeRun(live, run, 'failed', live.eventError.message);
+      this.finalizeRun(live, run, 'errored', live.eventError);
     } catch (saveError) {
       this.reportError(live, saveError);
     }
@@ -1917,7 +1898,7 @@ export class AgentManager {
       live.closing = true;
       this.requestCancellation(live, run, new Error(error));
       try {
-        this.finalizeRun(live, run, 'failed', error);
+        this.finalizeRun(live, run, 'errored', error);
       } catch (error) {
         this.reportError(live, error);
       } finally {
@@ -1981,7 +1962,7 @@ export class AgentManager {
       live.lastActivityPersistedAt = live.info.updatedAt;
     } else if (event.type === 'message_end' && event.message.role === 'assistant') {
       this.clearModelResponseTimer(run);
-      run.candidateResponse = extractTextFromMessage(event.message).trim();
+      run.candidateResponse = extractFinalResponse(event.message);
       run.candidateError =
         event.message.stopReason === 'error' || event.message.stopReason === 'aborted'
           ? event.message.errorMessage || `Agent ended with ${event.message.stopReason}.`
@@ -1994,17 +1975,22 @@ export class AgentManager {
   private finalizeRun(
     live: LiveAgent,
     run: RunState,
-    status: 'completed' | 'failed' | 'interrupted',
-    error?: string,
+    ...[status, error]: [status: 'completed' | 'interrupted'] | [status: 'errored', error: unknown]
   ): void {
     if (this.live.get(live.info.id) !== live || live.run !== run || run.finalizedRun) return;
     // Close only this run's admission before invoking reentrant callbacks.
     run.finalizedRun = true;
     this.clearModelResponseTimer(run);
+    const completion =
+      status === 'completed'
+        ? { status, finalResponse: run.candidateResponse }
+        : status === 'errored'
+          ? { status, error: formatAgentError(error) }
+          : undefined;
     live.info.status = status;
-    if (status === 'completed') live.info.finalResponse = run.candidateResponse;
+    if (completion?.status === 'completed') live.info.finalResponse = completion.finalResponse;
     else delete live.info.finalResponse;
-    if (error !== undefined) live.info.error = formatAgentError(error);
+    if (completion?.status === 'errored') live.info.error = completion.error;
     else delete live.info.error;
     live.info.completedAt = Date.now();
     live.info.lastActivity = Date.now();
@@ -2013,13 +1999,11 @@ export class AgentManager {
     } finally {
       // Publish status and completion even when persistence fails.
       this.notifyStatusChange(live.info);
-      if (status !== 'interrupted')
+      if (completion)
         this.notifyCompletion({
           parentSessionId: live.info.parentSessionId,
           taskName: live.info.taskName,
-          status,
-          ...(status === 'completed' ? { finalResponse: live.info.finalResponse } : {}),
-          ...(error !== undefined ? { error: live.info.error } : {}),
+          ...completion,
         });
     }
   }
@@ -2032,7 +2016,7 @@ export class AgentManager {
       const { info, session, run } = live;
       if (
         info.parentSessionId !== parentSessionId ||
-        (info.status !== 'starting' && info.status !== 'running')
+        (info.status !== 'pending_init' && info.status !== 'running')
       )
         continue;
 
@@ -2110,7 +2094,12 @@ export class AgentManager {
       );
     return sortInfos(infos).map((info) => ({
       agent_name: info.taskName,
-      agent_status: info.status,
+      agent_status:
+        info.status === 'completed'
+          ? { completed: info.finalResponse ?? null }
+          : info.status === 'errored'
+            ? { errored: info.error! } // Errored metadata always has a formatted cause.
+            : info.status,
     }));
   }
 
@@ -2118,17 +2107,6 @@ export class AgentManager {
     const info = getAgent(target, parentSessionId);
     if (!info) throw new Error(`Agent not found in this parent session: ${target}`);
     return info;
-  }
-
-  readAgentResponse(target: string, parentSessionId: string): AgentResponseEntry {
-    const info = this.getAgentInfo(target, parentSessionId);
-    return {
-      agent_name: info.taskName,
-      status: info.status,
-      ...(info.finalResponse !== undefined ? { finalResponse: info.finalResponse } : {}),
-      ...(info.error ? { error: info.error } : {}),
-      last_task_message: previewText(info.lastTaskMessage),
-    };
   }
 
   async sendMessage(
@@ -2174,7 +2152,9 @@ export class AgentManager {
     }
     const run = live.run;
     if (run?.awaitingPrompt)
-      throw new Error(`Agent ${info.taskName} is still starting. Retry after startup finishes.`);
+      throw new Error(
+        `Agent ${info.taskName} is still initializing. Retry after startup finishes.`,
+      );
     const current = live;
     const session = current.session!;
     if (!run || run.finalizedRun || !session.isStreaming)
@@ -2213,7 +2193,7 @@ export class AgentManager {
         current.closing = true;
         this.requestCancellation(current, run, timeout);
         try {
-          this.finalizeRun(current, run, 'failed', timeout.message);
+          this.finalizeRun(current, run, 'errored', timeout);
         } catch (saveError) {
           this.reportError(current, saveError);
         } finally {
@@ -2254,7 +2234,7 @@ export class AgentManager {
     const persisted = this.getAgentInfo(target, parentSessionId);
     const previous = persisted.status;
     const live = this.live.get(persisted.id);
-    if (previous !== 'starting' && previous !== 'running') {
+    if (previous !== 'pending_init' && previous !== 'running') {
       if (live?.closing) await this.waitForTermination(live);
       else if (live?.run?.finalizedRun) await this.waitForRunSettlement(live, live.run);
       return { previous_status: previous };

@@ -39,14 +39,7 @@ beforeEach(() => {
 const packageDir = path.resolve(import.meta.dir, '..');
 const entry = path.join(packageDir, 'src', 'index.ts');
 const sdkUrl = import.meta.resolve('@earendil-works/pi-coding-agent');
-const toolNames = [
-  'spawn_agent',
-  'wait_agent',
-  'list_agents',
-  'read_agent_response',
-  'send_message',
-  'interrupt_agent',
-];
+const toolNames = ['spawn_agent', 'wait_agent', 'list_agents', 'send_message', 'interrupt_agent'];
 
 function terminalFixture(columns: number, rows: number) {
   let input = (_data: string) => {};
@@ -234,18 +227,18 @@ test('uses the native render context for errors without changing successful tool
     await extension(f.pi);
     const success = {
       spawn_agent: "✓ worker · test/fake · high", wait_agent: "success-only",
-      list_agents: "✓ 0 agents", read_agent_response: "✓ worker",
-      send_message: "✓ steered", interrupt_agent: "↯ previous: running",
+      list_agents: "✓ 0 agents",
+      send_message: "✓ steered", interrupt_agent: "↯ previous: pending_init",
     };
     const failure = {
       spawn_agent: "✗ controlled failure", wait_agent: "✗ wait failed",
-      list_agents: "✗ list failed", read_agent_response: "✗ read failed",
+      list_agents: "✗ list failed",
       send_message: "✗ send failed", interrupt_agent: "✗ interrupt failed",
     };
     const details = {
       task_name: "worker", provider: "test", modelId: "fake", thinking: "high",
-      agent_name: "worker", message: "success-only", agents: [],
-      delivery: "steer", previous_status: "running", status: "failed",
+      message: "success-only", agentCount: 0,
+      delivery: "steer", previous_status: "pending_init",
     };
     for (const [name, definition] of f.tools) {
       const invocations = [];
@@ -309,15 +302,13 @@ test('keeps model-facing guidance compact without losing async contracts', () =>
     assert.ok(wait.description.includes("Use only when blocked"));
     assert.ok(wait.description.includes("does not stop agents"));
     assert.match(wait.description, /prefer.*waits.*minutes.*avoid.*polling/i);
-    const read = f.tools.get("read_agent_response");
-    assert.match(read.description, /non-blocking/i);
-    assert.match(read.description, /not a transcript/i);
-    assert.ok(read.description.includes("not polling"));
     assert.ok(f.tools.get("send_message").description.includes("input acceptance, not completion"));
     assert.ok(f.tools.get("interrupt_agent").description.includes("cooperative cancellation"));
     const list = f.tools.get("list_agents");
-    for (const term of ["resident", "initializing", "idle", "cleanup", "history"]) assert.ok(list.description.includes(term), term);
+    for (const term of ["resident", "session", "initializing", "idle"]) assert.ok(list.description.includes(term), term);
+    assert.match(list.description, /final text.*error/i);
     assert.deepEqual(Object.keys(list.parameters.properties), ["path_prefix"]);
+    assert.match(list.parameters.properties.path_prefix.description, /relative task-name prefix.*omit/i);
     const checkBudget = () => {
       let chars = 0;
       for (const tool of f.tools.values()) {
@@ -343,7 +334,7 @@ test('keeps model-facing guidance compact without losing async contracts', () =>
   );
 });
 
-test('preserves the six schemas, dynamic routing, tool arguments, and return wrappers', () => {
+test('preserves the five tool contracts, dynamic routing, arguments, and return wrappers', () => {
   probe(
     hostFixture +
       String.raw`
@@ -366,7 +357,7 @@ test('preserves the six schemas, dynamic routing, tool arguments, and return wra
     assert.deepEqual(plain(f.tools.get("list_agents").parameters), {
       ...object({ path_prefix: { ...string, pattern: "^[a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+)*$" } }), additionalProperties: false,
     });
-    for (const name of ["read_agent_response", "interrupt_agent"]) assert.deepEqual(plain(f.tools.get(name).parameters), object({ target: string }, ["target"]));
+    assert.deepEqual(plain(f.tools.get("interrupt_agent").parameters), object({ target: string }, ["target"]));
     assert.deepEqual(plain(f.tools.get("send_message").parameters), object({ target: string, message: string }, ["target", "message"]));
     const config = path.join(f.ctx.cwd, "pi-subagents", "config.json");
     fs.mkdirSync(path.dirname(config), { recursive: true });
@@ -410,30 +401,29 @@ test('preserves the six schemas, dynamic routing, tool arguments, and return wra
     assert.deepEqual(wait.details, expectedWait);
     assert.deepEqual(wait.structuredContent, expectedWait);
     let listed;
-    const agents = Array.from({ length: 12 }, (_, n) => ({ agent_name: String(n), agent_status: "completed" }));
+    const agents = Array.from({ length: 12 }, (_, n) => ({ agent_name: String(n), agent_status: { completed: null } }));
     AgentManager.prototype.listAgents = (...args) => { listed = args; return agents; };
     const list = await f.call("list_agents", {});
     assert.deepEqual(listed, [undefined, "parent"]);
-    assert.deepEqual(list, { content: [{ type: "text", text: JSON.stringify({ agents }, null, 2) }], details: { agents }, structuredContent: { agents } });
+    assert.deepEqual(list, { content: [{ type: "text", text: JSON.stringify({ agents }, null, 2) }], details: { agentCount: agents.length }, structuredContent: { agents } });
     const prefixed = await f.call("list_agents", { path_prefix: "review/auth" });
     assert.deepEqual(listed, ["review/auth", "parent"], "Validated path prefixes are passed without normalization");
     assert.deepEqual(prefixed.structuredContent, { agents });
     let scoped;
-    AgentManager.prototype.readAgentResponse = (...args) => { scoped = args; return { agent_name: "task", status: "completed", finalResponse: "answer" }; };
-    const read = await f.call("read_agent_response", { target: " task " });
-    assert.deepEqual(scoped, [" task ", "parent"], "Manager owns target trimming and validation");
-    assert.deepEqual(read.details, { agent_name: "task", status: "completed" });
-    assert.equal(JSON.parse(read.content[0].text).finalResponse, "answer");
     for (const delivery of ["steer", "prompt"]) {
-      AgentManager.prototype.sendMessage = async (...args) => { scoped = args; return { delivery, status: "running" }; };
-      const send = await f.call("send_message", { target: "task", message: "next" });
-      assert.deepEqual(scoped, ["parent", "task", "next"]);
-      assert.deepEqual(send.details, { target: "task", delivery, status: "running" });
+      AgentManager.prototype.sendMessage = async (...args) => { scoped = args; return { delivery }; };
+      const send = await f.call("send_message", { target: " task ", message: "next" });
+      assert.deepEqual(scoped, ["parent", " task ", "next"], "Manager owns target trimming and validation");
+      assert.deepEqual(send.details, { target: " task ", delivery });
     }
-    AgentManager.prototype.interruptAgent = async (...args) => { scoped = args; return { previous_status: "running" }; };
-    const interrupt = await f.call("interrupt_agent", { target: "task" });
-    assert.deepEqual(scoped, ["parent", "task"]);
-    assert.deepEqual(interrupt, { content: [{ type: "text", text: "Interrupt request handled." }], details: { previous_status: "running" } });
+    for (const previous_status of ["pending_init", "running", "completed", "errored", "interrupted"]) {
+      AgentManager.prototype.interruptAgent = async (...args) => { scoped = args; return { previous_status }; };
+      const interrupt = await f.call("interrupt_agent", { target: "task" });
+      assert.deepEqual(scoped, ["parent", "task"]);
+      assert.deepEqual(interrupt, { content: [{ type: "text", text: "Interrupt request handled." }], details: { previous_status } });
+    }
+    const interruptRenderer = f.tools.get("interrupt_agent").renderResult;
+    assert.equal(interruptRenderer({ details: {}, content: [] }, {}, { fg: (_c, s) => s }, { isError: false }).render(120).join("\n").trim(), "");
     await f.emit("session_shutdown", { reason: "quit" });
   `,
   );
@@ -470,7 +460,7 @@ test('keeps resident ordering and both render modes consistent with public list 
     const f = host();
     await extension(f.pi);
     AgentManager.prototype.listAgentInfos = () => { throw new Error("public lists must not read disk history"); };
-    const entries = ["completed", "starting", "failed", "running", "interrupted"].map((status, n) => ({
+    const entries = [{ completed: "answer" }, "pending_init", { errored: "child error" }, "running", "interrupted"].map((status, n) => ({
       agent_name: "resident-" + n, agent_status: status,
     }));
     AgentManager.prototype.listAgents = (...args) => {
@@ -479,7 +469,7 @@ test('keeps resident ordering and both render modes consistent with public list 
     };
     const expected = { agents: [entries[1], entries[3], entries[0], entries[2], entries[4]] };
     const result = await f.call("list_agents", {});
-    assert.deepEqual(result, { content: [{ type: "text", text: JSON.stringify(expected, null, 2) }], details: expected, structuredContent: expected });
+    assert.deepEqual(result, { content: [{ type: "text", text: JSON.stringify(expected, null, 2) }], details: { agentCount: 5 }, structuredContent: expected });
     const theme = { fg: (_color, text) => text };
     const render = expanded => f.tools.get("list_agents").renderResult(result, { expanded }, theme, { isError: false }).render(120).join("\n").trim();
     assert.equal(render(false), "✓ 5 agents");
@@ -489,7 +479,7 @@ test('keeps resident ordering and both render modes consistent with public list 
   );
 });
 
-test('exposes validated structured data and full resident lists without changing response truncation', () => {
+test('validates structured wait/list results and bounds only the list text preview', () => {
   probe(
     hostFixture +
       `const { Value } = await import(${JSON.stringify(import.meta.resolve('typebox/value'))});` +
@@ -504,10 +494,10 @@ test('exposes validated structured data and full resident lists without changing
     };
     for (const name of ["spawn_agent", "send_message", "interrupt_agent"])
       assert.equal(f.tools.get(name).outputSchema, undefined, name + " must stay text-only");
-    const statuses = ["starting", "running", "completed", "failed", "interrupted"];
+    const { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } = await import(${JSON.stringify(sdkUrl)});
     await f.emit("session_start");
-    for (const status of ["completed", "failed"]) {
-      options.onCompletion({ taskName: "worker", status, finalResponse: "private body", error: "private error", parentSessionId: "parent" });
+    for (const event of [{ status: "completed", finalResponse: "private body" }, { status: "errored", error: "private error" }]) {
+      options.onCompletion({ taskName: "worker", parentSessionId: "parent", ...event });
       const result = await f.call("wait_agent", {});
       const expected = { message: "Wait completed.", timed_out: false };
       assert.deepEqual(check("wait_agent", result), expected);
@@ -515,42 +505,74 @@ test('exposes validated structured data and full resident lists without changing
     }
     assert.equal(Value.Check(f.tools.get("wait_agent").outputSchema, { message: "Wait completed.", timed_out: false, agent_name: "worker" }), false);
     assert.equal(Value.Check(f.tools.get("wait_agent").outputSchema, { agent_name: "worker", status: "completed" }), false);
-    for (const status of statuses) {
-      AgentManager.prototype.listAgents = () => [{ agent_name: "worker", agent_status: status }];
-      const listed = check("list_agents", await f.call("list_agents", {}));
-      assert.deepEqual(listed, { agents: [{ agent_name: "worker", agent_status: status }] });
-      AgentManager.prototype.readAgentResponse = () => ({ agent_name: "worker", status, last_task_message: null });
-      const pending = check("read_agent_response", await f.call("read_agent_response", { target: "worker" }));
-      assert.equal(Object.hasOwn(pending, "finalResponse"), false);
-      assert.equal(Object.hasOwn(pending, "error"), false);
+    for (const agent_status of ["pending_init", "running", "interrupted", { completed: "answer" }, { completed: "" }, { completed: null }, { errored: "child failed" }, { errored: "" }]) {
+      const agents = [{ agent_name: "worker", agent_status }];
+      AgentManager.prototype.listAgents = () => agents;
+      const listed = await f.call("list_agents", {});
+      assert.deepEqual(check("list_agents", listed), { agents });
+      assert.deepEqual(listed.details, { agentCount: 1 });
     }
-    for (const count of [12, 101]) {
-      const agents = Array.from({ length: count }, (_, n) => ({ agent_name: "worker-" + n, agent_status: "completed" }));
+    const schema = f.tools.get("list_agents").outputSchema;
+    for (const agent_status of ["starting", "failed", "completed", "errored", null, {},
+      { completed: false }, { completed: "answer", error: "extra" },
+      { errored: null }, { errored: "failure", completed: null }]) {
+      assert.equal(Value.Check(schema, { agents: [{ agent_name: "worker", agent_status }] }), false, JSON.stringify(agent_status));
+    }
+    assert.equal(Value.Check(schema, { agents: [{ agent_name: "worker", agent_status: "running", color: "red" }] }), false);
+    assert.equal(Value.Check(schema, { agents: [], extra: true }), false);
+    const render = (result, expanded) => f.tools.get("list_agents").renderResult(result, { expanded }, { fg: (_c, s) => s }, { isError: false }).render(120).map(line => line.trimEnd()).join("\n").trim();
+    const makeAgents = count => Array.from({ length: count }, (_, n) => ({ agent_name: "worker-" + n, agent_status: { completed: null } }));
+    for (const count of [0, 12, 101]) {
+      const agents = makeAgents(count);
       AgentManager.prototype.listAgents = () => agents;
       const result = await f.call("list_agents", {});
       assert.deepEqual(check("list_agents", result), { agents }, count + " residents must all be returned");
-      assert.deepEqual(result.details, { agents });
-      const theme = { fg: (_color, text) => text };
-      assert.equal(f.tools.get("list_agents").renderResult(result, { expanded: false }, theme, { isError: false }).render(120).join("\n").trim(), "✓ " + count + " agents");
+      assert.deepEqual(result.details, { agentCount: count });
+      assert.equal(render(result, false), "✓ " + count + " agents");
     }
-    AgentManager.prototype.listAgents = () => [];
-    assert.deepEqual(check("list_agents", await f.call("list_agents", {})), { agents: [] });
-    for (const fields of [{ finalResponse: "" }, { finalResponse: "answer" }, { error: "child failed" }]) {
-      const expected = { agent_name: "worker", status: fields.error ? "failed" : "completed", last_task_message: "task", ...fields };
-      AgentManager.prototype.readAgentResponse = () => expected;
-      assert.deepEqual(check("read_agent_response", await f.call("read_agent_response", { target: "worker" })), expected);
+    const bigBody = { agents: [{ agent_name: "worker", agent_status: { completed: '中文🙂"\\\n'.repeat(10_000) } }] };
+    const many = { agents: makeAgents(450) };
+    assert.ok(JSON.stringify(many, null, 2).split("\n").length > DEFAULT_MAX_LINES);
+    assert.ok(Buffer.byteLength(JSON.stringify(many, null, 2)) < DEFAULT_MAX_BYTES);
+    let outputDir;
+    for (const expected of [bigBody, many]) {
+      AgentManager.prototype.listAgents = () => expected.agents;
+      const large = await f.call("list_agents", {});
+      assert.deepEqual(check("list_agents", large), expected);
+      const { agentCount, fullOutputPath } = large.details;
+      assert.deepEqual(large.details, { agentCount: expected.agents.length, truncated: true, fullOutputPath });
+      assert.equal(render(large, false), "✓ " + agentCount + " agents");
+      assert.ok(render(large, true).includes("Output truncated"));
+      const [preview, notice] = large.content[0].text.split("\n\n[Output truncated: ");
+      const full = JSON.stringify(expected, null, 2);
+      assert.ok(full.startsWith(preview) && preview.length < full.length, "the preview is a head excerpt of the same JSON");
+      assert.ok(Buffer.byteLength(preview) <= DEFAULT_MAX_BYTES);
+      assert.ok(preview.split("\n").length <= DEFAULT_MAX_LINES);
+      assert.ok(notice.endsWith("Full output saved to: " + fullOutputPath + "]"));
+      assert.equal(fs.readFileSync(fullOutputPath, "utf8"), full);
+      outputDir = path.dirname(fullOutputPath);
     }
-    const expected = { agent_name: "worker", status: "completed", last_task_message: null,
-      finalResponse: '中文🙂"\\\n'.repeat(10_000),
-    };
-    AgentManager.prototype.readAgentResponse = () => expected;
-    const large = await f.call("read_agent_response", { target: "worker" });
-    assert.deepEqual(check("read_agent_response", large), expected);
-    assert.equal(large.details.truncated, true);
-    assert.ok(large.content[0].text.includes("Output truncated"));
-    assert.ok(Buffer.byteLength(large.content[0].text) < Buffer.byteLength(JSON.stringify(expected)));
-    assert.deepEqual(JSON.parse(fs.readFileSync(large.details.fullOutputPath, "utf8")), expected);
-    assert.equal(Value.Check(f.tools.get("read_agent_response").outputSchema, { ...expected, last_task_message: undefined }), false);
+    fs.rmSync(outputDir, { recursive: true });
+    fs.writeFileSync(outputDir, "not a directory");
+    AgentManager.prototype.listAgents = () => bigBody.agents;
+    const blocked = await f.call("list_agents", {});
+    assert.deepEqual(check("list_agents", blocked), bigBody);
+    assert.deepEqual(blocked.details, { agentCount: 1, truncated: true });
+    assert.match(blocked.content[0].text, /Could not save full output/);
+    assert.doesNotMatch(blocked.content[0].text, /Full output saved to:/);
+
+    options.onCompletion({ parentSessionId: "parent", taskName: "large", status: "completed", finalResponse: bigBody.agents[0].agent_status.completed });
+    assert.match(f.messages.at(-1).message.content, /Could not save full output/);
+    assert.equal(f.messages.at(-1).message.details.status, "completed");
+    assert.deepEqual((await f.call("wait_agent", {})).structuredContent, { message: "Wait completed.", timed_out: false });
+
+    assert.equal(render({ details: {}, content: [] }, true), "");
+    assert.equal(render({ details: {}, content: [
+      { type: "image", data: "example", mimeType: "image/png" },
+      { type: "text", text: "retained by hook" },
+      { type: "text", text: "second block" },
+    ] }, true), "retained by hook\nsecond block");
+    assert.equal(render({ details: {}, content: [{ type: "text", text: "redacted" }] }, false), "redacted");
     await f.emit("session_shutdown", { reason: "quit" });
   `,
   );
@@ -569,7 +591,6 @@ test('preserves tool error prefixes, quota explanations, wait previews and cance
     assert.ok(preview({ timeout_ms: 15000 }).includes("15"));
     for (const [name, method, params] of [
       ["spawn_agent", "spawnAgent", { task_name: "task", message: "work" }],
-      ["read_agent_response", "readAgentResponse", { target: "task" }],
       ["send_message", "sendMessage", { target: "task", message: "next" }],
       ["interrupt_agent", "interruptAgent", { target: "task" }],
     ]) {
@@ -578,9 +599,7 @@ test('preserves tool error prefixes, quota explanations, wait previews and cance
         ["plain failure", "plain failure"],
         [Object.assign(new Error("write failed"), { code: "EDQUOT" }), "write failed\nCause: Disk quota exceeded (EDQUOT)."],
       ]) {
-        AgentManager.prototype[method] = method === "readAgentResponse"
-          ? () => { throw failure; }
-          : async () => { throw failure; };
+        AgentManager.prototype[method] = async () => { throw failure; };
         await assert.rejects(f.call(name, params), error => error.message === name + " failed: " + message);
       }
     }
@@ -734,7 +753,7 @@ test('activity waits keep notifications compact and preserve natural or idle con
     assert.equal(f.messages.at(-1).delivery.triggerTurn, true, "independent work keeps normal automatic delivery");
     options.onCompletion({ ...event, parentSessionId: "other" });
     assert.equal(f.messages.length, 3);
-    options.onCompletion({ ...event, finalResponse: "large answer".repeat(20_000), error: "large error".repeat(20_000) });
+    options.onCompletion({ ...event, finalResponse: "large answer".repeat(20_000) });
     const result = await f.call("wait_agent", {});
     assert.deepEqual(result.details, { message: "Wait completed.", timed_out: false });
     assert.ok(result.content[0].text.length < 100, "notification bodies must not leak into wait results");
@@ -849,9 +868,9 @@ test('broadcasts activity to concurrent waits without stealing messages or cance
     await rejection;
     assert.equal(getEventListeners(controller.signal, "abort").length, 0);
     assert.equal(interrupted, 0);
-    assert.equal((await f.call("list_agents", {})).details.agents[0].agent_status, "running");
-    options.onCompletion({ parentSessionId: "other", taskName: "ignored", status: "completed" });
-    options.onActivityChange({ parentSessionId: "parent", taskName: "worker", active: false, status: "interrupted" });
+    assert.equal((await f.call("list_agents", {})).structuredContent.agents[0].agent_status, "running");
+    options.onCompletion({ parentSessionId: "other", taskName: "ignored", status: "completed", finalResponse: null });
+    options.onActivityChange({ parentSessionId: "parent", taskName: "worker", status: "interrupted" });
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(finished, 0, "other sessions and status-only updates are not notification activity");
     const event = { parentSessionId: "parent", taskName: "worker", status: "completed", finalResponse: "original child output" };
@@ -987,7 +1006,7 @@ test('validates timeout-only arguments and clamps the minimum with a test-local 
       assert.equal(timers.size, 0, "canceling a wait clears its timeout");
       for (const activity of [
         () => f.emit("input", { text: "cleanup", source: "interactive" }),
-        () => options.onCompletion({ parentSessionId: "parent", taskName: "worker", status: "completed" }),
+        () => options.onCompletion({ parentSessionId: "parent", taskName: "worker", status: "completed", finalResponse: null }),
       ]) {
         const wait = f.call("wait_agent", {});
         await new Promise(resolve => setImmediate(resolve));
@@ -1078,8 +1097,8 @@ test('only native parent cancellation suppresses notification wakeups until a re
         await f.emit("session_start");
       }],
       ["child failure does not interrupt the parent", false, () => {
-        options.onActivityChange({ parentSessionId: "parent", taskName: "failed-child", active: false, status: "failed" });
-        options.onCompletion({ parentSessionId: "parent", taskName: "failed-child", status: "failed", error: "child budget exceeded" });
+        options.onActivityChange({ parentSessionId: "parent", taskName: "errored-child", status: "errored" });
+        options.onCompletion({ parentSessionId: "parent", taskName: "errored-child", status: "errored", error: "child budget exceeded" });
       }],
     ];
     for (const [label, interrupted, prepare] of cases) {
@@ -1092,7 +1111,7 @@ test('only native parent cancellation suppresses notification wakeups until a re
         await prepare(f, controller);
         const initial = f.messages.length;
         let sent = 0;
-        for (const status of ["completed", "failed", "interrupted"]) {
+        for (const outcome of [{ status: "completed", finalResponse: "retained result" }, { status: "errored", error: "retained error" }]) {
           for (const idle of [false, true]) {
             f.ctx.isIdle = () => idle;
             for (const waiting of [false, true]) {
@@ -1100,13 +1119,14 @@ test('only native parent cancellation suppresses notification wakeups until a re
               const wait = waiting ? f.call("wait_agent", {}) : undefined;
               await new Promise(resolve => setImmediate(resolve));
               const taskName = "child-" + sent++;
-              options.onCompletion({ parentSessionId: "parent", taskName, status, finalResponse: "retained result" });
+              options.onCompletion({ parentSessionId: "parent", taskName, ...outcome });
               await wait;
+              const { status } = outcome;
               assert.equal(f.messages.length, initial + sent, label + ": every notification is retained");
               const { message, delivery } = f.messages.at(-1);
               assert.equal(message.customType, "pi-subagent-completion", label);
               assert.equal(message.display, true, label);
-              assert.ok(message.content.includes("retained result"), label);
+              assert.ok(message.content.includes(outcome.finalResponse ?? outcome.error), label);
               assert.deepEqual(message.details, { agent_name: taskName, status }, label);
               assert.deepEqual(delivery, { deliverAs: "steer", triggerTurn: !interrupted && (!waiting || idle) },
                 label + ": " + JSON.stringify({ status, waiting, idle }));
@@ -1132,32 +1152,52 @@ test('keeps scoped notifications, bounded full output, and widget/shortcut integ
     await extension(f.pi);
     await f.emit("session_start");
     assert.deepEqual([...f.shortcuts.keys()], ["ctrl+shift+a"]);
-    options.onActivityChange({ parentSessionId: "other", taskName: "ignored", active: true });
-    options.onActivityChange({ parentSessionId: "parent", taskName: "task", active: true });
+    options.onActivityChange({ parentSessionId: "other", taskName: "ignored", status: "running" });
+    options.onActivityChange({ parentSessionId: "parent", taskName: "task", status: "pending_init" });
     const [key, widget] = f.widgets.at(-1);
     assert.equal(key, "pi-subagents");
     const theme = { fg: (_color, text) => text };
-    assert.ok(widget({}, theme).render(80).join("\n").includes("task"));
-    assert.ok(widget({}, theme).render(30).join("\n").includes("/subagents"));
-    options.onCompletion({ parentSessionId: "other", taskName: "ignored", status: "completed" });
+    const component = widget({}, theme);
+    assert.ok(component.render(80).join("\n").includes("task"));
+    assert.ok(component.render(30).join("\n").includes("/subagents"));
+    options.onCompletion({ parentSessionId: "other", taskName: "ignored", status: "completed", finalResponse: null });
     assert.equal(f.messages.length, 0);
-    const event = { parentSessionId: "parent", taskName: "task", status: "completed", finalResponse: "answer" };
+    const scope = { parentSessionId: "parent", taskName: "task" };
+    for (const [outcome, fields] of [
+      [{ status: "completed", finalResponse: "answer" }, { final_response: "answer" }],
+      [{ status: "completed", finalResponse: "" }, { final_response: "" }],
+      [{ status: "completed", finalResponse: null }, { final_response: null }],
+      [{ status: "errored", error: "child budget exceeded" }, { error: "child budget exceeded" }],
+      [{ status: "errored", error: "" }, { error: "" }],
+    ]) {
+      const { status } = outcome;
+      options.onCompletion({ ...scope, ...outcome });
+      const details = { agent_name: "task", status };
+      assert.deepEqual(f.messages.at(-1), { message: {
+        customType: "pi-subagent-completion",
+        content: "<subagent_notification>\n" + JSON.stringify({ ...details, ...fields }, null, 2) + "\n</subagent_notification>",
+        display: true, details,
+      }, delivery: { deliverAs: "steer", triggerTurn: true } });
+      const renderTheme = { fg: (color, text) => color + ":" + text };
+      const rendered = f.renderers.get("pi-subagent-completion")(f.messages.at(-1).message, { expanded: false }, renderTheme);
+      assert.equal(rendered.render(80).join("\n").trim(), status === "completed" ? "success:✓ task completed" : "error:✗ task errored");
+    }
+    const event = { ...scope, status: "completed", finalResponse: "x".repeat(100_000) };
     options.onCompletion(event);
-    assert.deepEqual(f.messages[0], { message: {
-      customType: "pi-subagent-completion",
-      content: "<subagent_notification>\n" + JSON.stringify({ agent_name: "task", status: "completed", final_response: "answer" }, null, 2) + "\n</subagent_notification>",
-      display: true, details: { agent_name: "task", status: "completed" },
-    }, delivery: { deliverAs: "steer", triggerTurn: true } });
-    options.onCompletion({ ...event, finalResponse: "x".repeat(100_000) });
     const large = f.messages.at(-1).message;
     assert.ok(Buffer.byteLength(large.content) <= 50 * 1024);
     assert.ok(large.content.includes("Output truncated"));
-    assert.ok(fs.readFileSync(large.details.fullOutputPath, "utf8").includes("x".repeat(100_000)));
-    options.onActivityChange({ parentSessionId: "parent", taskName: "task", active: false });
-    assert.equal(f.widgets.at(-1)[1], undefined);
+    assert.ok(large.content.startsWith("<subagent_notification>\n") && large.content.endsWith("\n</subagent_notification>"));
+    assert.deepEqual(JSON.parse(fs.readFileSync(large.details.fullOutputPath, "utf8")), {
+      agent_name: "task", status: "completed", final_response: event.finalResponse,
+    });
+    options.onActivityChange({ ...scope, status: "completed" });
+    assert.deepEqual(component.render(100), ["○ Agents · 1 completed · /subagents to view details"]);
+    const sent = f.messages.length;
     await f.emit("session_shutdown", { reason: "quit" });
+    assert.equal(f.widgets.at(-1)[1], undefined);
     options.onCompletion(event);
-    assert.equal(f.messages.length, 2, "no stale delivery after shutdown");
+    assert.equal(f.messages.length, sent, "no stale delivery after shutdown");
   `,
   );
 });
@@ -1206,15 +1246,15 @@ test('summarizes every current-session agent by latest status without polling hi
       String.raw`
     let listed = 0, sampled = 0;
     let entries = [
-      ...[0, 1, 2].map(n => ({ agent_name: "r" + n, agent_status: n ? "running" : "starting" })),
-      ...[0, 1, 2].map(n => ({ agent_name: "c" + n, agent_status: "completed" })),
-      ...[0, 1, 2].map(n => ({ agent_name: "f" + n, agent_status: "failed" })),
-      ...[0, 1, 2].map(n => ({ agent_name: "i" + n, agent_status: "interrupted" })),
+      ...[0, 1, 2].map(n => ({ taskName: "r" + n, status: n ? "running" : "pending_init" })),
+      ...[0, 1, 2].map(n => ({ taskName: "c" + n, status: "completed" })),
+      ...[0, 1, 2].map(n => ({ taskName: "f" + n, status: "errored" })),
+      ...[0, 1, 2].map(n => ({ taskName: "i" + n, status: "interrupted" })),
     ];
     let expectedParent = "parent";
     AgentManager.prototype.listAgentInfos = (prefix, parent) => {
       assert.equal(prefix, undefined); assert.equal(parent, expectedParent);
-      listed++; return entries.map(entry => ({ taskName: entry.agent_name, status: entry.agent_status }));
+      listed++; return entries;
     };
     AgentManager.prototype.getWidgetSnapshot = parent => {
       assert.equal(parent, expectedParent); sampled++; return [];
@@ -1226,24 +1266,23 @@ test('summarizes every current-session agent by latest status without polling hi
     const component = factory({ terminal: { rows: 50 }, requestRender() {} }, { fg: (_c, s) => s });
     const lines = () => component.render(140);
     const title = () => lines()[0];
-    assert.equal(title(), "● Agents · 3 running · 3 completed · 3 failed · 3 interrupted · /subagents to view details");
+    assert.equal(title(), "● Agents · 3 running · 3 completed · 3 errored · 3 interrupted · /subagents to view details");
     assert.equal(lines().length, 7);
     assert.ok(lines().slice(1).join("\n").includes("r0"));
     assert.ok(!lines().slice(1).join("\n").match(/\b[cfi][0-2]\b/));
     const update = (name, status) => options.onActivityChange({
       parentSessionId: "parent", taskName: name, status,
-      active: status === "starting" || status === "running",
     });
     update("r1", "running"); update("r1", "running"); update("r0", "running");
-    options.onActivityChange({ parentSessionId: "other", taskName: "ignored", active: false, status: "failed" });
-    assert.equal(title(), "● Agents · 3 running · 3 completed · 3 failed · 3 interrupted · /subagents to view details");
+    options.onActivityChange({ parentSessionId: "other", taskName: "ignored", status: "errored" });
+    assert.equal(title(), "● Agents · 3 running · 3 completed · 3 errored · 3 interrupted · /subagents to view details");
     update("r0", "completed");
-    assert.equal(title(), "● Agents · 2 running · 4 completed · 3 failed · 3 interrupted · /subagents to view details");
-    update("c0", "starting"); update("c0", "running");
-    update("f0", "failed"); update("i0", "interrupted");
-    assert.equal(title(), "● Agents · 3 running · 3 completed · 3 failed · 3 interrupted · /subagents to view details");
-    update("r1", "failed"); update("r2", "interrupted"); update("c0", "completed");
-    assert.deepEqual(lines(), ["○ Agents · 4 completed · 4 failed · 4 interrupted · /subagents to view details"]);
+    assert.equal(title(), "● Agents · 2 running · 4 completed · 3 errored · 3 interrupted · /subagents to view details");
+    update("c0", "pending_init"); update("c0", "running");
+    update("f0", "errored"); update("i0", "interrupted");
+    assert.equal(title(), "● Agents · 3 running · 3 completed · 3 errored · 3 interrupted · /subagents to view details");
+    update("r1", "errored"); update("r2", "interrupted"); update("c0", "completed");
+    assert.deepEqual(lines(), ["○ Agents · 4 completed · 4 errored · 4 interrupted · /subagents to view details"]);
     const stoppedAt = sampled;
     await new Promise(resolve => setTimeout(resolve, 450));
     assert.equal(sampled, stoppedAt, "settled heading must not keep sampling");
@@ -1255,9 +1294,9 @@ test('summarizes every current-session agent by latest status without polling hi
     await f.emit("session_start", {}, next);
     assert.equal(f.widgets.at(-1)[1], undefined);
     assert.deepEqual(component.render(140), []);
-    options.onActivityChange({ parentSessionId: "parent", taskName: "old", active: false, status: "completed" });
+    options.onActivityChange({ parentSessionId: "parent", taskName: "old", status: "completed" });
     assert.equal(f.widgets.at(-1)[1], undefined);
-    options.onActivityChange({ parentSessionId: expectedParent, taskName: "new", active: true, status: "running" });
+    options.onActivityChange({ parentSessionId: expectedParent, taskName: "new", status: "running" });
     const newFactory = f.widgets.filter(([, content]) => typeof content === "function").at(-1)[1];
     const fresh = newFactory({}, { fg: (_c, s) => s });
     assert.equal(fresh.render(140)[0], "● Agents · 1 running · /subagents to view details");
@@ -1275,7 +1314,7 @@ test('restores a settled-only session heading without starting periodic history 
     let lists = 0, samples = 0;
     AgentManager.prototype.listAgentInfos = () => { lists++; return [
       { taskName: "done", status: "completed" },
-      { taskName: "error", status: "failed" },
+      { taskName: "error", status: "errored" },
       { taskName: "stopped", status: "interrupted" },
     ]; };
     AgentManager.prototype.getWidgetSnapshot = () => { samples++; return []; };
@@ -1284,7 +1323,7 @@ test('restores a settled-only session heading without starting periodic history 
     await f.emit("session_start");
     const factory = f.widgets.at(-1)[1];
     const component = factory({}, { fg: (_c, s) => s });
-    assert.deepEqual(component.render(140), ["○ Agents · 1 completed · 1 failed · 1 interrupted · /subagents to view details"]);
+    assert.deepEqual(component.render(140), ["○ Agents · 1 completed · 1 errored · 1 interrupted · /subagents to view details"]);
     const idle = samples;
     await new Promise(resolve => setTimeout(resolve, 450));
     assert.equal(samples, idle);
@@ -1313,7 +1352,7 @@ test('updates live model summaries without messages, focus changes, or repeated 
       compactionCount: 1, elapsedMs: 12300, activeTools: ["read"],
       lastTaskMessage: "PRIVATE TASK DESCRIPTION", turnCount: 17, toolUses: 99,
     }];
-    options.onActivityChange({ parentSessionId: "parent", taskName: "review", active: true });
+    options.onActivityChange({ parentSessionId: "parent", taskName: "review", status: "running" });
     const factories = () => f.widgets.filter(([, content]) => typeof content === "function");
     const factory = factories().at(-1)[1];
     let renders = 0;
@@ -1337,8 +1376,8 @@ test('updates live model summaries without messages, focus changes, or repeated 
     assert.ok(scopes.length > 1 && scopes.every(scope => scope === "parent"));
     assert.equal(f.messages.length, 0);
     rows = [];
-    options.onActivityChange({ parentSessionId: "parent", taskName: "review", active: false });
-    assert.equal(f.widgets.at(-1)[1], undefined);
+    options.onActivityChange({ parentSessionId: "parent", taskName: "review", status: "completed" });
+    assert.deepEqual(component.render(140), ["○ Agents · 1 completed · /subagents to view details"]);
     await f.emit("session_shutdown", { reason: "quit" });
     component.dispose?.();
   `,
@@ -1355,7 +1394,7 @@ test('does not mount summary widgets in RPC, JSON, or print mode', () => {
       f.ctx.hasUI = mode === "rpc";
       await extension(f.pi);
       await f.emit("session_start");
-      options.onActivityChange({ parentSessionId: "parent", taskName: "task", active: true });
+      options.onActivityChange({ parentSessionId: "parent", taskName: "task", status: "running" });
       assert.equal(f.widgets.length, 0);
       await f.emit("session_shutdown", { reason: "quit" });
       assert.equal(f.widgets.length, 0);
@@ -1479,7 +1518,7 @@ test('reports persistence/cleanup errors on every shutdown reason even if widget
       await extension(f.pi);
       await f.emit("session_start");
       const count = shutdownCalls;
-      options.onActivityChange({ parentSessionId: "parent", taskName: "task", active: true });
+      options.onActivityChange({ parentSessionId: "parent", taskName: "task", status: "running" });
       AgentManager.prototype.shutdown = async function() {
         shutdownCalls++;
         throw new AggregateError([new Error("save failed"), new Error("dispose failed")], "shutdown failed");
@@ -1572,7 +1611,7 @@ test.each(runtimes)(
         assert.equal(parent.activeStreams, 0, cancellation);
         assert.equal(child.activeStreams, 1, cancellation + ": parent abort must not cancel the child");
         assert.ok(!child.events.includes("settled:aborted"), cancellation);
-        assert.equal((await call("list_agents", {})).details.agents[0].agent_status, "running", cancellation);
+        assert.equal((await call("list_agents", {})).structuredContent.agents[0].agent_status, "running", cancellation);
         releaseChild();
         await waitUntil(() => notifications().length === 1);
         await session.waitForIdle();
@@ -1851,22 +1890,21 @@ test.each(runtimes)(
       'await tools.spawn_agent({ task_name: "worker", message: "first" });',
       'const waited = await tools.wait_agent({});',
       'if (typeof waited !== "object" || typeof waited.message !== "string" || waited.timed_out !== false || Object.keys(waited).length !== 2) throw new Error("wait contract");',
-      'await tools.fixture_child_done({ expected: "child: first" });',
+      'await tools.fixture_resident_done({ expected: "child: first" });',
       'const listed = await tools.list_agents({});',
-      'if (listed === null || typeof listed !== "object" || Object.keys(listed).join() !== "agents" || !Array.isArray(listed.agents) || listed.agents.length !== 1 || Object.keys(listed.agents[0]).sort().join() !== "agent_name,agent_status" || listed.agents[0].agent_name !== "worker" || listed.agents[0].agent_status !== "completed") throw new Error("list contract");',
-      'const response = await tools.read_agent_response({ target: "worker" });',
-      'if (typeof response !== "object" || response.finalResponse !== "child: first") throw new Error("read contract");',
-      'const missing = await Promise.allSettled([tools.read_agent_response({ target: "missing" }), tools.wait_agent({ timeout_ms: 3600001 })]);',
-      'if (missing.some(result => result.status !== "rejected")) throw new Error("tool errors must reject");',
-      'const redacted = await tools.read_agent_response({ target: "worker" });',
+      'if (listed === null || typeof listed !== "object" || Object.keys(listed).join() !== "agents" || !Array.isArray(listed.agents) || listed.agents.length !== 1 || Object.keys(listed.agents[0]).sort().join() !== "agent_name,agent_status" || listed.agents[0].agent_name !== "worker" || listed.agents[0].agent_status?.completed !== "child: first") throw new Error("list contract");',
+      'const failures = await Promise.allSettled([tools.send_message({ target: "missing", message: "never delivered" }), tools.wait_agent({ timeout_ms: 3600001 })]);',
+      'if (failures.some(result => result.status !== "rejected")) throw new Error("tool errors must reject");',
+      'const redacted = await tools.list_agents({});',
       'if (redacted !== "redacted by test hook") throw new Error("native redaction must not leak structured data");',
       'await tools.send_message({ target: "worker", message: "x".repeat(100000) });',
       'const second = await tools.wait_agent({});',
       'if (typeof second.message !== "string" || second.timed_out !== false) throw new Error("second wait contract");',
-      'await tools.fixture_child_done({ expected: "child: " + "x".repeat(100000) });',
-      'const large = await tools.read_agent_response({ target: "worker" });',
-      'if (large.finalResponse !== "child: " + "x".repeat(100000)) throw new Error("large structured response");',
-      'text({ marker: "structured-codemode-ok", responseLength: large.finalResponse.length });',
+      'await tools.fixture_resident_done({ expected: "child: " + "x".repeat(100000) });',
+      'const large = await tools.list_agents({ path_prefix: "worker" });',
+      'const finalResponse = large.agents[0]?.agent_status?.completed;',
+      'if (finalResponse !== "child: " + "x".repeat(100000)) throw new Error("large structured response");',
+      'text({ marker: "structured-codemode-ok", responseLength: finalResponse.length });',
     ].join("\n");
     const parent = fixture("parent-provider", { codemodeScript: script });
     const configDir = path.join(agentDir, "pi-subagents");
@@ -1878,38 +1916,40 @@ test.each(runtimes)(
     });
     settingsManager.setProjectTrusted(false);
     const successful = [], failures = [];
-    let workerReads = 0;
+    let listCalls = 0;
     const services = await createAgentSessionServices({ cwd: agentDir, agentDir, settingsManager,
       resourceLoaderOptions: {
         noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
         additionalExtensionPaths: [process.argv[2], parent.extension],
         extensionFactories: [createCodemodeExtension(), pi => {
-          pi.registerTool({ name: "fixture_child_done", label: "Child gate", description: "Test-only terminal synchronizer",
+          pi.registerTool({ name: "fixture_resident_done", label: "Child gate", description: "Test-only resident completion synchronizer",
             parameters: { type: "object", properties: { expected: { type: "string" } }, required: ["expected"] },
             async execute(_id, { expected }, _signal, _update, ctx) {
               const { setTimeout: delay } = await import("node:timers/promises");
+              // This fixture retains its single idle worker, so it remains listable after completion.
               for (let attempt = 0; attempt < 250; attempt++) {
-                const { structuredContent: child } = await session.getToolDefinition("read_agent_response").execute(
-                  "child-gate", { target: "worker" }, undefined, undefined, ctx);
-                if (child.status === "completed" && child.finalResponse === expected)
+                const { structuredContent: { agents } } = await session.getToolDefinition("list_agents").execute(
+                  "child-gate", { path_prefix: "worker" }, undefined, undefined, ctx);
+                if (agents.some(agent => agent.agent_name === "worker" && agent.agent_status?.completed === expected))
                   return { content: [{ type: "text", text: "child settled" }], details: {} };
                 await delay(20);
               }
-              throw new Error("Timed out waiting for child response.");
+              throw new Error("Timed out waiting for the retained child response.");
             },
           });
           pi.on("tool_result", event => {
-            if (event.toolName === "read_agent_response" && event.input.target === "worker" && ++workerReads === 2)
+            if (event.toolName === "list_agents" && ++listCalls === 2)
               return { content: [{ type: "text", text: "redacted by test hook" }] };
           });
           pi.on("tool_execution_end", event => {
-            if (!["wait_agent", "list_agents", "read_agent_response"].includes(event.toolName)) return;
+            if (!["wait_agent", "list_agents", "send_message"].includes(event.toolName)) return;
             if (event.isError) { failures.push(event); return; }
-            if (event.toolName === "read_agent_response" && event.result.content[0]?.text === "redacted by test hook") {
+            const schema = schemas.get(event.toolName);
+            if (!schema) return;
+            if (event.toolName === "list_agents" && event.result.content[0]?.text === "redacted by test hook") {
               assert.equal(event.result.structuredContent, undefined);
               return;
             }
-            const schema = schemas.get(event.toolName);
             assert.ok(Value.Check(schema, event.result.structuredContent), event.toolName + " schema");
             successful.push(event);
           });
@@ -1919,7 +1959,7 @@ test.each(runtimes)(
     const model = (await services.modelRuntime.getAvailable("sdk-offline")).find(model => model.id === "exact/model");
     assert.ok(model);
     const { session } = await createAgentSessionFromServices({ services, model, sessionManager: SessionManager.inMemory(agentDir) });
-    const schemas = new Map(["wait_agent", "list_agents", "read_agent_response"].map(name => [name, session.getToolDefinition(name).outputSchema]));
+    const schemas = new Map(["wait_agent", "list_agents"].map(name => [name, session.getToolDefinition(name).outputSchema]));
     const errors = [];
     try {
       await session.bindExtensions({ mode: "print", onError: error => errors.push(error) });
@@ -1931,14 +1971,18 @@ test.each(runtimes)(
       assert.ok(output.includes("structured-codemode-ok"), output);
       assert.ok(output.includes("100007"), output);
       assert.ok(!output.includes("x".repeat(1000)), "codemode must only print the selected fields");
-      assert.equal(successful.length, 5, JSON.stringify({ names: successful.map(event => event.toolName), errors }));
-      assert.equal(failures.length, 2);
-      assert.equal(workerReads, 3, "only the second legal worker read is redacted");
+      assert.deepEqual(successful.map(event => event.toolName), ["wait_agent", "list_agents", "wait_agent", "list_agents"]);
+      assert.deepEqual(failures.map(event => event.toolName).sort(), ["send_message", "wait_agent"]);
+      assert.equal(listCalls, 3, "only the second native list is redacted");
       assert.ok(failures.every(event => event.result.structuredContent === undefined));
-      const large = successful.find(event => event.result.details?.truncated);
-      assert.ok(large);
-      assert.ok(large.result.content[0].text.includes("Output truncated"));
-      assert.equal(JSON.parse(fs.readFileSync(large.result.details.fullOutputPath, "utf8")).finalResponse.length, 100007);
+      const large = successful.at(-1).result;
+      const { fullOutputPath } = large.details;
+      const expected = { agents: [{ agent_name: "worker", agent_status: { completed: "child: " + "x".repeat(100000) } }] };
+      assert.deepEqual(large.structuredContent, expected);
+      assert.deepEqual(large.details, { agentCount: 1, truncated: true, fullOutputPath });
+      assert.ok(large.content[0].text.includes("Output truncated"));
+      assert.ok(!large.content[0].text.includes("x".repeat(1000)), "the oversized response line stays out of the text preview");
+      assert.deepEqual(JSON.parse(fs.readFileSync(fullOutputPath, "utf8")), expected);
       assert.equal(session.messages.filter(message => message.role === "custom" && message.customType === "pi-subagent-completion").length, 2);
       assert.deepEqual(errors, []);
     } finally {
@@ -2109,7 +2153,7 @@ test.each(runtimes)(
 );
 
 test.each(runtimes)(
-  'runs six registered tools with raw timeout validation and repeated child cleanup alongside an active SDK parent (%s)',
+  'runs the public tools with raw timeout validation and repeated child cleanup alongside an active SDK parent (%s)',
   (_name, executable) => {
     probe(
       String.raw`
@@ -2173,12 +2217,12 @@ test.each(runtimes)(
               return stream;
             },
           });
-          pi.registerTool({ name: "host_driver", label: "Host test", description: "Offline six-tool driver",
+          pi.registerTool({ name: "host_driver", label: "Host test", description: "Offline public-tool driver",
             parameters: { type: "object", properties: {} },
             async execute(_id, _args, _signal, _update, ctx) {
               try {
                 await drive(ctx);
-                return { content: [{ type: "text", text: "six tools verified" }], details: {} };
+                return { content: [{ type: "text", text: "public tools verified" }], details: {} };
               } catch (error) { driverError = error; throw error; }
               finally { finishDriver(); }
             },
@@ -2285,7 +2329,7 @@ test.each(runtimes)(
         const spawned = await call("spawn_agent", { task_name: "worker", message: "child work" });
         assert.equal(spawned.details.task_name, "worker");
         for (const target of ["/worker", "worker/"]) {
-          for (const name of ["read_agent_response", "send_message", "interrupt_agent"]) {
+          for (const name of ["send_message", "interrupt_agent"]) {
             const args = name === "send_message" ? { target, message: "must not deliver" } : { target };
             const rejected = await ctx.executeTool(name, args);
             assert.equal(rejected.isError, true, name + ": " + target);
@@ -2297,10 +2341,10 @@ test.each(runtimes)(
         }
         assert.equal(created, 1, "invalid names must not allocate children");
         assert.equal(disposed, 0, "invalid targets must not stop the existing worker");
-        assert.equal((await call("list_agents", {})).details.agents[0].agent_status, "running");
-        assert.deepEqual((await call("list_agents", { path_prefix: "worker" })).details.agents,
+        assert.equal((await call("list_agents", {})).structuredContent.agents[0].agent_status, "running");
+        assert.deepEqual((await call("list_agents", { path_prefix: "worker" })).structuredContent.agents,
           [{ agent_name: "worker", agent_status: "running" }]);
-        assert.deepEqual((await call("list_agents", { path_prefix: "work" })).details.agents, []);
+        assert.deepEqual((await call("list_agents", { path_prefix: "work" })).structuredContent.agents, []);
         // Spawn acceptance precedes the worker's assistant-response timer.
         const responseDeadline = Date.now() + 2_000;
         while (!timeouts.size && Date.now() < responseDeadline) await delay(5);
@@ -2309,7 +2353,7 @@ test.each(runtimes)(
         const blocked = await ctx.executeTool("spawn_agent", { task_name: "blocked", message: "over capacity" });
         assert.equal(blocked.isError, true);
         assert.match(JSON.stringify(blocked.result.content), /capacity/i);
-        assert.deepEqual((await call("list_agents", {})).details.agents.map(agent => [agent.agent_name, agent.agent_status]), [["worker", "running"]],
+        assert.deepEqual((await call("list_agents", {})).structuredContent.agents.map(agent => [agent.agent_name, agent.agent_status]), [["worker", "running"]],
           "capacity rejection must not leave an agent record");
         assert.deepEqual(counts(), activeResources, "capacity rejection must not allocate child resources");
         assert.equal(created, 1);
@@ -2321,15 +2365,15 @@ test.each(runtimes)(
         await delay(5);
         controller.abort(new Error("cancel only the wait"));
         assert.equal((await canceledWait).isError, true);
-        assert.equal((await call("list_agents", {})).details.agents[0].agent_status, "running");
+        assert.equal((await call("list_agents", {})).structuredContent.agents[0].agent_status, "running");
         const waiting = call("wait_agent", { timeout_ms: 10000 });
         await delay(5);
         fs.writeFileSync(path.join(childFixture.directory, "release-response"), "");
         const completion = JSON.parse((await waiting).content[0].text);
         assert.deepEqual(completion, { message: "Wait completed.", timed_out: false });
         await reclaimed("initial completion");
-        const read = JSON.parse((await call("read_agent_response", { target: "worker" })).content[0].text);
-        assert.equal(read.finalResponse, "child: steered work");
+        assert.deepEqual((await call("list_agents", {})).structuredContent, { agents: [] },
+          "a cold worker is not listed; its completion is delivered to the parent below");
         const finishWaiting = async () => {
           const waiting = call("wait_agent", { timeout_ms: null });
           await delay(5);
@@ -2354,7 +2398,7 @@ test.each(runtimes)(
         fs.rmSync(path.join(childFixture.directory, "release-response"));
         await call("spawn_agent", { task_name: "canceled", message: "cancel child work" });
         assert.equal((await call("interrupt_agent", { target: "canceled" })).details.previous_status, "running");
-        assert.equal((await call("list_agents", {})).details.agents.find(agent => agent.agent_name === "canceled").agent_status, "interrupted");
+        assert.equal((await call("list_agents", {})).structuredContent.agents.find(agent => agent.agent_name === "canceled").agent_status, "interrupted");
         await reclaimed("interruption");
         assert.deepEqual((await call("list_agents", {})).structuredContent, { agents: [] }, "terminated children leave only disk history");
         assert.equal(created, 11);
@@ -2374,8 +2418,9 @@ test.each(runtimes)(
       assert.deepEqual([...new Set(driverResult.nestedCalls.calls.map(call => call.name))].sort(), ${JSON.stringify([...toolNames].sort())});
       assert.equal(parentRequests.length, 2, "waiting completions must share the natural continuation");
       const textOf = message => typeof message.content === "string" ? message.content : (message.content ?? []).filter(part => part.type === "text").map(part => part.text).join("\n");
-      const notifications = messages => messages.map(textOf).filter(text => text.startsWith("<subagent_notification>"));
-      const delivered = notifications(parentRequests[1]).map(text => JSON.parse(text.replace("<subagent_notification>", "").replace("</subagent_notification>", "")));
+      const notifications = messages => messages.map(textOf).filter(text => text.startsWith("<subagent_notification>"))
+        .map(text => JSON.parse(text.replace("<subagent_notification>", "").replace("</subagent_notification>", "")));
+      const delivered = notifications(parentRequests[1]);
       assert.deepEqual(delivered.map(result => result.final_response), ["child: steered work", "child: resumed work", ...Array.from({ length: 8 }, (_, turn) => "child: repeat " + turn)]);
       const ctx = session.extensionRunner.createContext();
       const direct = (name, args) => session.getToolDefinition(name).execute("idle-test", args, undefined, undefined, ctx);
@@ -2386,7 +2431,9 @@ test.each(runtimes)(
       await session.waitForIdle();
       await reclaimed("idle automatic completion");
       assert.equal(parentRequests.length, 3, "an idle parent must still wake automatically");
-      assert.equal(notifications(parentRequests[2]).length, 11);
+      const idleNotifications = notifications(parentRequests[2]);
+      assert.equal(idleNotifications.length, 11);
+      assert.deepEqual(idleNotifications.at(-1), { agent_name: "idle", status: "completed", final_response: "child: idle result" });
       for (let attempt = 0; attempt < 2; attempt++) {
         const controller = new AbortController();
         const waiting = session.getToolDefinition("wait_agent").execute("late-wait", {}, controller.signal, undefined, ctx);
@@ -2397,7 +2444,6 @@ test.each(runtimes)(
       }
       await delay(10);
       assert.equal(parentRequests.length, 3, "late/repeated waits must not trigger another notification or turn");
-      assert.equal(JSON.parse((await direct("read_agent_response", { target: "idle" })).content[0].text).finalResponse, "child: idle result");
       assert.deepEqual(errors, []);
     } finally {
       releaseParent();
@@ -2623,14 +2669,7 @@ describe('extension completion delivery and TUI', () => {
         renderResult: definition.renderResult,
       };
       expect([...native.tools.keys()]).toEqual(['codemode']);
-      expect([...subagents.tools.keys()]).toEqual([
-        'spawn_agent',
-        'wait_agent',
-        'list_agents',
-        'read_agent_response',
-        'send_message',
-        'interrupt_agent',
-      ]);
+      expect([...subagents.tools.keys()]).toEqual(toolNames);
       expect(() => loaded.runtime.getActiveTools()).toThrow('Extension runtime not initialized');
 
       const parentId = 'renderer-contract-parent';
@@ -2958,7 +2997,7 @@ describe('extension completion delivery and TUI', () => {
         .render(120)
         .map(stripVTControlCharacters)
         .filter((line: string) =>
-          /^[› ] \S+\s+(?:starting|running|completed|failed|interrupted)\s/.test(line),
+          /^[› ] \S+\s+(?:pending_init|running|completed|errored|interrupted)\s/.test(line),
         )
         .map((line: string) => line.trim().replace(/^› /, '').split(/\s+/)[0]);
 
@@ -2967,14 +3006,19 @@ describe('extension completion delivery and TUI', () => {
         await f.open(async (browser: any) => {
           // Seed after manager initialization so recovery does not interrupt display fixtures.
           f.put('running', { status: 'running', createdAt: 100, lastActivity: 9999 });
-          f.put('starting', { status: 'starting', createdAt: 200, completedAt: 99999 });
+          f.put('initializing', { status: 'pending_init', createdAt: 200, completedAt: 99999 });
           f.put('completed', { createdAt: 30, completedAt: 300 });
-          f.put('failed', { status: 'failed', createdAt: 20, completedAt: 500 });
+          f.put('errored', {
+            status: 'errored',
+            error: 'fixture error',
+            createdAt: 20,
+            completedAt: 500,
+          });
           f.put('interrupted', { status: 'interrupted', createdAt: 10, completedAt: 400 });
           expect(browserNames(browser)).toEqual([
-            'starting',
+            'initializing',
             'running',
-            'failed',
+            'errored',
             'interrupted',
             'completed',
           ]);
@@ -2982,15 +3026,15 @@ describe('extension completion delivery and TUI', () => {
           expect(lines).toContain(' Active (2)');
           expect(lines).toContain(' Done (3)');
           expect(lines.join('\n')).toContain('2 Active · 3 Done');
-          expect(selectedRow(browser)).toContain('starting');
+          expect(selectedRow(browser)).toMatch(/initializing\s+pending_init\s/);
           browser.handleInput('j');
           expect(selectedRow(browser)).toContain('running');
           browser.handleInput('j');
-          expect(selectedRow(browser)).toContain('failed'); // The group heading is not selectable.
+          expect(selectedRow(browser)).toContain('errored'); // The group heading is not selectable.
           const tool = await f.tools
             .get('list_agents')
             .execute('list', {}, undefined, undefined, f.ctx);
-          expect(tool.details).toEqual({ agents: [] });
+          expect(tool.details).toEqual({ agentCount: 0 });
           expect(tool.structuredContent).toEqual({ agents: [] });
           expect(JSON.parse(tool.content[0].text)).toEqual({ agents: [] });
           browser.handleInput('q');
@@ -3018,7 +3062,7 @@ describe('extension completion delivery and TUI', () => {
               });
               f.put('newer', {
                 id: 'c',
-                status: 'starting',
+                status: 'pending_init',
                 createdAt: 200,
                 infoFile: path.join(scope, 'c.info.json'),
               });
@@ -3082,8 +3126,8 @@ describe('extension completion delivery and TUI', () => {
       async (kind) => {
         await withBrowser(async (f) => {
           await f.open((browser: any) => {
-            if (kind !== 'empty')
-              f.put('only', { status: kind === 'active' ? 'running' : 'failed' });
+            if (kind === 'active') f.put('only', { status: 'running' });
+            if (kind === 'done') f.put('only', { status: 'errored', error: 'fixture error' });
             const lines = browser.render(120);
             const titleIndex = lines.findIndex((line: string) => line.includes('Subagents'));
             expect(lines[titleIndex + 1]).toBe(
@@ -3182,7 +3226,7 @@ describe('extension completion delivery and TUI', () => {
           expect(browserNames(browser)).toEqual(['other', 'worker']);
           expect(browser.render(120).join('\n')).not.toMatch(/^\s*Active \(/m);
           expect(browser.render(120)).toContain(' Done (2)');
-          f.put('worker', { status: 'starting' }); // A stale prior completion does not make it Done.
+          f.put('worker', { status: 'pending_init' }); // A stale prior completion does not make it Done.
           browser.handleInput('r');
           expect(browser.render(120)).toContain(' Active (1)');
           expect(browser.render(120)).toContain(' Done (1)');
@@ -3202,26 +3246,26 @@ describe('extension completion delivery and TUI', () => {
         await f.open(
           (browser: any) => {
             f.put('running', { status: 'running', createdAt: 100 });
-            f.put('starting', { status: 'starting', createdAt: 200 });
+            f.put('initializing', { status: 'pending_init', createdAt: 200 });
             f.put('late', { createdAt: 1, completedAt: 600 });
             f.put('early', { createdAt: 999, completedAt: 500 });
             f.put('late', { completedAt: 99999 }, f.otherId);
-            expect(browserNames(browser)).toEqual(['starting', 'running', 'late', 'early']);
+            expect(browserNames(browser)).toEqual(['initializing', 'running', 'late', 'early']);
             browser.handleInput('\r');
           },
           (overlay: any, index: number) => {
             f.ctx.sessionManager.getSessionId = () => f.otherId;
             // The selected agent can finish while its details remain open.
-            if (index === 0) f.put('starting', { status: 'completed', completedAt: 700 });
+            if (index === 0) f.put('initializing', { status: 'completed', completedAt: 700 });
             overlay.handleInput(['\x1b[C', '\x1b[D', '\x1b[D', '\x1b[C', 'q'][index]);
           },
         );
         expect(f.opened.map((info: AgentInfo) => info.taskName)).toEqual([
-          'starting',
+          'initializing',
           'late',
-          'starting',
+          'initializing',
           'running',
-          'starting',
+          'initializing',
         ]);
         expect(f.opened.every((info: AgentInfo) => info.parentSessionId === f.parentId)).toBe(true);
       });
@@ -3236,7 +3280,8 @@ describe('extension completion delivery and TUI', () => {
             color: 'red',
             agentType: 'reviewer',
             createdAt: now + 500,
-            status: 'failed',
+            status: 'errored',
+            error: 'fixture error',
             lastTaskMessage: 'review preview 中文😀 '.repeat(20),
           });
           f.put('tests', {
@@ -3294,7 +3339,7 @@ describe('extension completion delivery and TUI', () => {
                 return lines;
               };
               const first = checkRow('review', 'red', true);
-              expect(first.join('')).toContain(theme.fg('error', 'failed'.padEnd(11)));
+              expect(first.join('')).toContain(theme.fg('error', 'errored'.padEnd(12)));
               checkRow('tests', 'red', false);
               checkRow('plain', undefined, false);
               checkRow('invalid', undefined, false);
@@ -3325,7 +3370,7 @@ describe('extension completion delivery and TUI', () => {
               browser.handleInput('q');
             });
           }
-          expect(JSON.parse(fs.readFileSync(review.infoFile, 'utf8')).status).toBe('failed');
+          expect(JSON.parse(fs.readFileSync(review.infoFile, 'utf8')).status).toBe('errored');
         });
       },
     );
@@ -3772,7 +3817,11 @@ describe('extension completion delivery and TUI', () => {
     test('browser and detail navigation stay session-scoped and read-only', async () => {
       await withBrowser(async (f) => {
         const own = f.put('same', { modelId: 'own-model', createdAt: 200 });
-        const second = f.put('second', { status: 'failed', createdAt: 100 });
+        const second = f.put('second', {
+          status: 'errored',
+          error: 'fixture error',
+          createdAt: 100,
+        });
         const other = f.put('same', { modelId: 'other-model' }, f.otherId);
         const records = [own, second, other];
         const before = records.map((info) => fs.readFileSync(info.infoFile, 'utf8'));
@@ -3833,7 +3882,7 @@ describe('extension completion delivery and TUI', () => {
           const createdAt = Date.now();
           for (let index = 0; index < 12; index++) {
             f.put('history/' + index, {
-              status: index === 0 ? 'running' : 'completed',
+              status: index === 0 ? 'pending_init' : 'completed',
               lastTaskMessage: 'private task context ' + index,
               modelId: index === 0 ? 'MiniMax-M3' : 'a-model-name-that-is-longer-than-the-column',
               thinking: index === 0 ? 'high' : 'medium',
@@ -3847,7 +3896,7 @@ describe('extension completion delivery and TUI', () => {
           const firstIndex = lines.findIndex((line: string) => line.includes('history/0'));
           const first = lines[firstIndex];
           const second = lines.find((line: string) => line.includes('history/1 '));
-          expect(first).toMatch(/history\/0\s+running\s+\S+\s+MiniMax-M3\s+high/);
+          expect(first).toMatch(/history\/0\s+pending_init\s+\S+\s+MiniMax-M3\s+high/);
           expect(lines[firstIndex + 1]).toContain('private task context 0');
           expect(second.indexOf('a-model-name')).toBe(first.indexOf('MiniMax-M3'));
           expect(visibleWidth(second.slice(0, second.indexOf('medium')))).toBe(
@@ -3871,7 +3920,7 @@ describe('extension completion delivery and TUI', () => {
           .get('list_agents')
           .execute('list', {}, undefined, undefined, f.ctx);
         expect(JSON.parse(listed.content[0].text)).toEqual({ agents: [] });
-        expect(listed.details).toEqual({ agents: [] });
+        expect(listed.details).toEqual({ agentCount: 0 });
         expect(listed.structuredContent).toEqual({ agents: [] });
       });
     });
@@ -4382,7 +4431,7 @@ describe('extension completion delivery and TUI', () => {
   });
 });
 
-test('six public tools carry native usage through metadata and the detail footer without consuming reads', async () => {
+test('public tools carry native usage through metadata and the detail footer without side effects from listing', async () => {
   codingAgent.initTheme('dark', false);
   configureCoreFixture({
     tokens: (text) => (text.includes('fourteen') ? 70000 : text.includes('twelve') ? 60000 : 50000),
@@ -4440,24 +4489,23 @@ test('six public tools carry native usage through metadata and the detail footer
         .text,
     ).toBe('Spawned worker.');
     await done(10);
-    const beforeRead = sent.length;
-    const read = await execute('read_agent_response', { target: 'worker' });
-    expect(read.content[0].text).toContain('response:sample ten');
-    expect(await execute('read_agent_response', { target: 'worker' })).toEqual(read);
-    expect(sent).toHaveLength(beforeRead);
+    const beforeList = sent.length;
+    const listed = await execute('list_agents', {});
+    const resident = {
+      agents: [{ agent_name: 'worker', agent_status: { completed: 'response:sample ten' } }],
+    };
+    expect(JSON.parse(listed.content[0].text)).toEqual(resident);
+    expect(listed.details).toEqual({ agentCount: 1 });
+    expect(listed.structuredContent).toEqual(resident);
+    expect(JSON.stringify(listed)).not.toContain('contextUsage');
+    expect(await execute('list_agents', {})).toEqual(listed);
+    expect(sent).toHaveLength(beforeList);
     const wait = await execute('wait_agent', {});
     expect(JSON.parse(wait.content[0].text)).toEqual({
       message: 'Wait completed.',
       timed_out: false,
     });
-    expect(sent).toHaveLength(beforeRead);
-    const listed = await execute('list_agents', {});
-    const resident = { agents: [{ agent_name: 'worker', agent_status: 'completed' }] };
-    expect(JSON.parse(listed.content[0].text)).toEqual(resident);
-    expect(listed.details).toEqual(resident);
-    expect(listed.structuredContent).toEqual(resident);
-    expect(JSON.stringify(listed)).not.toContain('contextUsage');
-    expect(JSON.stringify(listed)).not.toContain('response:sample ten');
+    expect(sent).toHaveLength(beforeList);
     let detailOpened = 0;
     let detailClosed = Promise.resolve();
     let detailError: unknown;
@@ -4519,9 +4567,8 @@ test('six public tools carry native usage through metadata and the detail footer
     expect(detailOpened).toBe(1);
     const resumed = JSON.parse((await execute('wait_agent', {})).content[0].text);
     expect(resumed).toEqual({ message: 'Wait completed.', timed_out: false });
-    expect((await execute('read_agent_response', { target: 'worker' })).content[0].text).toContain(
-      'response:sample fourteen',
-    );
+    expect(sent.at(-1).details).toEqual({ agent_name: 'worker', status: 'completed' });
+    expect(sent.at(-1).content).toContain('response:sample fourteen');
     const saved = getAgent('worker', parent)!;
     expect(saved.contextUsage).toMatchObject({ tokens: 70000, contextWindow: 500000 });
     expect(saved.contextUsage!.percent!).toBeCloseTo(14);

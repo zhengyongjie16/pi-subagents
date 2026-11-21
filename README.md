@@ -19,18 +19,18 @@ pi install git:github.com/zhengyongjie16/pi-subagents@main
 A summary above the editor shows agent counts and active work:
 
 ```text
-● Agents · 2 running · 3 completed · 1 failed · 1 interrupted · /subagents to view details
+● Agents · 2 running · 3 completed · 1 errored · 1 interrupted · /subagents to view details
 ├─ ⠹ review-auth · openai-codex/gpt-6.1-sol/max · 33.8k token (62% · ↓1) · 12s
 │    └─ reading…
 └─ ⠹ tests · anthropic/claude-sonnet-4-6/high · 8.2k token (12%) · 4s
      └─ thinking…
 ```
 
-Each active row shows the model, thinking level, elapsed time, and current activity. Counts reflect each agent's latest run. `token` is cumulative assistant usage (`input + output + cacheWrite`), not current context size or a billing total; the percentage shows context occupancy, and `↓1` means one compaction.
+Each active row shows the model, thinking level, elapsed time, and current activity. Counts reflect each agent's latest run. Agents in `pending_init` count as `running` and show `initializing…` as their activity. `token` is cumulative assistant usage (`input + output + cacheWrite`), not current context size or a billing total; the percentage shows context occupancy, and `↓1` means one compaction.
 
 ### Browser and live overlay
 
-`/subagents` groups current-session agents into **Active** (`starting`, `running`) first, then **Done** (`completed`, `failed`, `interrupted`). The Active group is hidden when empty; Done is always shown. Active agents are newest-created first; Done agents are latest-finished first, using the latest run's `completedAt` (older records fall back to `updatedAt`, then `createdAt`). Each row shows status, elapsed time, model, thinking level, and a task preview. Visible group headings stay aligned with the browser title while scrolling through a shared ten-agent window; an empty Done group shows an empty-state message. Press `r` to refresh saved statuses and ordering.
+`/subagents` groups current-session agents, including unloaded history, into **Active** (`pending_init`, `running`) first, then **Done** (`completed`, `errored`, `interrupted`). The Active group is hidden when empty; Done is always shown. Active agents are newest-created first; Done agents are latest-finished first, using the latest run's `completedAt`, falling back to `updatedAt` and then `createdAt`. Each row shows status, elapsed time, model, thinking level, and a task preview. Visible group headings stay aligned with the browser title while scrolling through a shared ten-agent window; an empty Done group shows an empty-state message. Press `r` to refresh saved statuses and ordering.
 
 Enter opens details over the existing browser without closing it. Esc or q in details closes only the overlay and returns focus to the same list and selected agent; Esc or q in the browser exits it. The live overlay shows conversation and tool activity, including output already streaming when opened. Tool results use Pi's native collapsed previews and the child's working directory. These views are available in interactive TUI mode.
 
@@ -50,8 +50,7 @@ An optional `shortcut` setting opens the browser directly; no shortcut is assign
 | --- | --- |
 | `spawn_agent` | Start fresh-context background work |
 | `wait_agent` | Wait for new input, an agent notification, or a timeout; return a message and `timed_out` |
-| `list_agents` | List all current-session resident subagents, optionally filtered by a task-name prefix |
-| `read_agent_response` | Read the latest run status and available response/error without waiting |
+| `list_agents` | List current-session resident subagents and their latest run results without waiting |
 | `send_message` | Steer active work or continue a saved session |
 | `interrupt_agent` | Request cooperative cancellation while preserving history |
 
@@ -145,12 +144,12 @@ Unavailable allowlist entries produce warnings. A selected model is validated ag
 
 ## Behavior and limits
 
-- **Automatic results:** completed and failed runs notify the parent, including during a wait; an uninterrupted idle parent starts a continuation turn. Notifications during an active wait share the parent's natural continuation rather than starting an extra turn. Canceling a wait does not stop agents.
-- **Activity waits:** use `wait_agent` only when blocked, with `{}` or an optional `timeout_ms` integer/null. Omitted/null defaults to 30,000 ms; values below 10,000 ms (including zero and negatives) are raised to 10,000 ms, and values above 3,600,000 ms are rejected. Clamped waits append an explanation to the message. There are no `targets`: a wait observes parent input from every source (including extension and follow-up input), agent notifications, or timeout—not a particular child's terminal status. It returns only `{ "message": "...", "timed_out": false }`: `Wait completed.` for a notification, `Wait interrupted by new input.` for input, or `Wait timed out.` with `timed_out: true`. Original input and notification content still reaches Pi normally; read a specific child with `read_agent_response`. The latest activity before a wait can satisfy it immediately and is consumed once; old pending activity is cleared before preparing the next model context. Session changes cancel waits and clear pending activity.
-- **Capacity:** Within one `AgentManager`, initializing, active, idle, and closing sessions (until cleanup completes) share `maxAgents`. A spawn or cold resume at capacity reclaims the least-recently-used safely idle session and waits for cleanup before starting; without a safe candidate, it fails with a capacity error rather than queuing. Hot continuations reuse their slot. Completion does not trigger idle-only trimming. Cold history occupies no slot and is omitted from `list_agents`; it remains available in `/subagents`.
+- **Automatic results:** the parent receives a notification with `agent_name` and `status`. A `completed` notification carries `final_response` (`null` if there is no final text); an `errored` notification carries `error`. Interrupted runs do not send a result notification. A notification starts a continuation turn when the parent is idle and has not been interrupted. During an active wait, the notification wakes the wait without starting an extra turn.
+- **Activity waits:** use `wait_agent` only when blocked, with `{}` or an optional `timeout_ms` integer/null. Omitted/null defaults to 30,000 ms; values below 10,000 ms (including zero and negatives) are raised to 10,000 ms, and values above 3,600,000 ms are rejected. Clamped waits append an explanation to the message. There are no `targets`: a wait observes parent input from every source (including extension and follow-up input), agent notifications, or timeout—not a particular child's terminal status. It returns only `{ "message": "...", "timed_out": false }`: `Wait completed.` for a notification, `Wait interrupted by new input.` for input, or `Wait timed out.` with `timed_out: true`. The input and notification still reach Pi separately; use `list_agents` for a non-blocking reread while the child is resident. The latest activity before a wait can satisfy it immediately and is consumed once; old pending activity is cleared before preparing the next model context. Canceling a wait does not stop agents. Session changes cancel waits and clear pending activity.
+- **Capacity:** Within one `AgentManager`, initializing, active, idle, and closing sessions (until cleanup completes) share `maxAgents`. A spawn or cold resume at capacity reclaims the least-recently-used safely idle session and waits for cleanup before starting; without a safe candidate, it fails with a capacity error rather than queuing. Hot continuations reuse their slot. Completion does not trigger idle-only trimming.
 - **Session reuse:** completion, ordinary model errors, and interruption leave sessions reusable once pending work drains. Reclaimed sessions reopen saved history; missing history is an error. Template edits do not change existing agents' saved configuration. Reused sessions keep loaded resources; rebuilt sessions reread both prompt files and rediscover skills.
 - **Shared process:** cancellation is cooperative and does not undo completed tool actions. Child extensions run headlessly and share the host's event loop and module state; unresponsive tools or extensions can affect the parent.
-- **Output:** notifications and response text use a 50 KB / 2,000-line truncation budget. Full output is saved under `storageDir/_outputs`, with a readable path in the notice. Structured response data remains complete even when the text preview is truncated.
+- **Output:** completion notifications and the `list_agents` text preview cap the preview body at 50 KB / 2,000 lines. The truncation notice gives the full output path under `storageDir/_outputs` or reports the write error. The complete `list_agents` result remains available in `structuredContent`.
 
 ## License
 

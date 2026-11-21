@@ -93,10 +93,10 @@ function luminance({ r, g, b }: { r: number; g: number; b: number }) {
 
 test('lifecycle status colors retain the original browser mapping', () => {
   for (const [status, color] of [
-    ['starting', 'warning'],
+    ['pending_init', 'warning'],
     ['running', 'warning'],
     ['completed', 'success'],
-    ['failed', 'error'],
+    ['errored', 'error'],
     ['interrupted', 'warning'],
     [undefined, 'warning'],
   ] as const)

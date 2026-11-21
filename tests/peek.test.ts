@@ -250,6 +250,7 @@ function createOverlay(
         modelId: 'fake',
         model: 'test:fake',
         thinking: 'off',
+        status: 'running',
         cwd,
         sessionFile: sessionFile ?? join(tmpdir(), 'peek-absent-' + randomUUID() + '.jsonl'),
         infoFile: join(tmpdir(), 'peek-absent-' + randomUUID() + '.info.json'),

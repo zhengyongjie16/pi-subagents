@@ -24,12 +24,12 @@ const MAX_LINES = 12;
 const TITLE_COLORS = ['#4d9abf', '#83ccd2', '#f1be57', '#f09082'].map((hex) => parseColor(hex));
 const TITLE_CHARS_PER_COLOR = 2;
 const TITLE_CHARS_PER_SECOND = 4;
-const SUMMARY_STATUSES = ['running', 'completed', 'failed', 'interrupted'] as const;
+const SUMMARY_STATUSES = ['running', 'completed', 'errored', 'interrupted'] as const;
 export type AgentStatusCounts = Readonly<Record<(typeof SUMMARY_STATUSES)[number], number>>;
 const EMPTY_STATUS_COUNTS: AgentStatusCounts = {
   running: 0,
   completed: 0,
-  failed: 0,
+  errored: 0,
   interrupted: 0,
 };
 // Use the same frames and animation clock as Pi's WorkingStatusIndicator.
@@ -70,7 +70,7 @@ function preview(value: string | undefined): string | undefined {
 }
 
 function activity(snapshot: AgentWidgetSnapshot): string {
-  if (snapshot.status === 'starting') return 'initializing…';
+  if (snapshot.status === 'pending_init') return 'initializing…';
   if (snapshot.activeTools.length) {
     const actions = snapshot.activeTools.map((name) => {
       const cleanName = sanitize(name);
@@ -194,7 +194,7 @@ function agentHeader(
       .filter(Boolean)
       .join(' ');
   }
-  const status = snapshot.status === 'starting' ? 'initializing' : 'running';
+  const status = snapshot.status === 'pending_init' ? 'initializing' : 'running';
   return renderAgentBadge(name, theme, color) + ' ' + paint(theme, 'dim', status);
 }
 

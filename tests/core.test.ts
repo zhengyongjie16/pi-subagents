@@ -9,7 +9,7 @@ import {
   waitUntil,
   type CoreFixtureState,
 } from './fixtures/core-sdk-fixture.js';
-import type { AgentInfo, AgentResponseEntry } from '../src/core.js';
+import type { AgentActivityEvent, AgentCompletionEvent, AgentInfo } from '../src/core.js';
 import {
   getCurrentSystemMessage,
   parseStreamingJson,
@@ -953,7 +953,7 @@ describe('run storage', () => {
     fs.rmSync(configFile, { force: true });
   });
 
-  test('keeps legacy temporary runs discoverable', () => {
+  test('does not discover or reconcile runs in the old temporary directory', async () => {
     fs.rmSync(configFile, { force: true });
     const parentSessionId = 'legacy-parent';
     const id = '11111111-1111-4111-8111-111111111111';
@@ -964,25 +964,65 @@ describe('run storage', () => {
       'runs',
     );
     const legacyScope = path.join(legacyRoot, parentScopeKey(parentSessionId));
+    const infoFile = path.join(legacyScope, `${id}.info.json`);
     fs.mkdirSync(legacyScope, { recursive: true });
-    fs.writeFileSync(
-      path.join(legacyScope, `${id}.info.json`),
-      JSON.stringify({
+    const saved = JSON.stringify({
+      id,
+      taskName: 'legacy',
+      parentSessionId,
+      infoFile,
+      status: 'pending_init',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    fs.writeFileSync(infoFile, saved);
+
+    const manager = new AgentManager();
+    try {
+      await manager.ready();
+      expect(getAgent('legacy', parentSessionId)).toBeNull();
+      expect(manager.listAgentInfos(undefined, parentSessionId)).toEqual([]);
+      expect(fs.readFileSync(infoFile, 'utf8')).toBe(saved);
+    } finally {
+      await manager.shutdown();
+      fs.rmSync(legacyScope, { recursive: true, force: true });
+    }
+  });
+
+  test('does not infer, migrate or reconcile old business status labels', async () => {
+    const parentSessionId = 'legacy-statuses-' + randomUUID();
+    const scope = path.join(getRunsDir(), parentScopeKey(parentSessionId));
+    fs.mkdirSync(scope, { recursive: true });
+    const histories = ['closed', 'starting', 'failed'].map((status) => {
+      const id = randomUUID();
+      const infoFile = path.join(scope, `${id}.info.json`);
+      const saved = JSON.stringify({
         id,
-        taskName: 'legacy',
-        status: 'closed',
+        taskName: status,
+        parentSessionId,
+        infoFile,
+        status,
         finalResponse: 'legacy response',
+        error: 'legacy error',
         createdAt: Date.now(),
         updatedAt: Date.now(),
-      }),
-    );
-
-    expect(getAgent('legacy', parentSessionId)).toMatchObject({
-      id,
-      status: 'completed',
-      finalResponse: 'legacy response',
+        closedAt: Date.now(),
+      });
+      fs.writeFileSync(infoFile, saved);
+      return { infoFile, saved };
     });
-    fs.rmSync(legacyScope, { recursive: true, force: true });
+    const manager = new AgentManager();
+    try {
+      await manager.ready();
+      expect(manager.listAgentInfos(undefined, parentSessionId)).toEqual([]);
+      for (const { infoFile, saved } of histories) {
+        expect(readInfoFile(infoFile)).toBeUndefined();
+        expect(fs.readFileSync(infoFile, 'utf8')).toBe(saved);
+      }
+    } finally {
+      await manager.shutdown();
+      fs.rmSync(scope, { recursive: true, force: true });
+    }
   });
 
   test('reads metadata directly without filtering properties or rewriting the file', () => {
@@ -1424,10 +1464,10 @@ describe('task names', () => {
       expect(await manager.sendMessage(parent, input, 'hold steer')).toEqual({ delivery: 'steer' });
       await manager.interruptAgent(parent, input);
       await settled(manager, info);
-      expect(manager.readAgentResponse(input, parent)).toMatchObject({
-        agent_name: taskName,
+      expect(manager.getAgentInfo(input, parent)).toMatchObject({
+        taskName,
         status: 'interrupted',
-        last_task_message: 'hold steer',
+        lastTaskMessage: 'hold steer',
       });
       expect(new Set(activity)).toEqual(new Set([taskName]));
     } finally {
@@ -1458,7 +1498,6 @@ describe('task names', () => {
       ).rejects.toThrow('task_name must use');
       expect(() => getAgent(taskName, parent)).toThrow('task_name must use');
       expect(() => manager.getAgentInfo(taskName, parent)).toThrow('task_name must use');
-      expect(() => manager.readAgentResponse(taskName, parent)).toThrow('task_name must use');
       await expect(manager.sendMessage(parent, taskName, 'must not run')).rejects.toThrow(
         'task_name must use',
       );
@@ -1488,7 +1527,7 @@ describe('resident agent lists', () => {
       | undefined;
     const manager = new AgentManager({
       onActivityChange(event) {
-        if (event.parentSessionId !== parent || event.status !== 'starting') return;
+        if (event.parentSessionId !== parent || event.status !== 'pending_init') return;
         const live = [...manager['live'].values()].find(
           (entry) => entry.info.taskName === event.taskName,
         );
@@ -1506,11 +1545,11 @@ describe('resident agent lists', () => {
       expect(initialState).toEqual({
         resident: true,
         hasSession: false,
-        agents: [{ agent_name: 'worker', agent_status: 'starting' }],
+        agents: [{ agent_name: 'worker', agent_status: 'pending_init' }],
       });
       const info = manager.getAgentInfo('worker', parent);
       expect(manager.listAgents(undefined, parent)).toEqual([
-        { agent_name: 'worker', agent_status: 'starting' },
+        { agent_name: 'worker', agent_status: 'pending_init' },
       ]);
       startup.resolve();
       await spawning;
@@ -1562,7 +1601,7 @@ describe('resident agent lists', () => {
       try {
         for (let read = 0; read < 5; read++) {
           expect(manager.listAgents('old', parent)).toEqual([
-            { agent_name: 'old', agent_status: 'completed' },
+            { agent_name: 'old', agent_status: { completed: 'response:finished old' } },
           ]);
           expect(manager.listAgents(undefined, parent)).toHaveLength(2);
           expect(manager.listAgents(undefined, 'other-parent')).toEqual([]);
@@ -1604,8 +1643,8 @@ describe('resident agent lists', () => {
       await coldDispose(manager, cold);
       expect(manager.listAgents(undefined, parent)).toEqual([]);
       for (const [task, message, status] of [
-        ['review/done', 'finished', 'completed'],
-        ['review/failed', 'fail request', 'failed'],
+        ['review/done', 'large response', 'completed'],
+        ['review/failed', 'fail request', 'errored'],
         ['review/stopped', 'hold until interrupted', 'interrupted'],
       ] as const) {
         await manager.spawnAgent(spawnParams(parent, task, message));
@@ -1620,8 +1659,8 @@ describe('resident agent lists', () => {
       const entries = manager.listAgents(undefined, parent);
       expect([...entries].sort((a, b) => a.agent_name.localeCompare(b.agent_name))).toEqual([
         { agent_name: 'review/api', agent_status: 'running' },
-        { agent_name: 'review/done', agent_status: 'completed' },
-        { agent_name: 'review/failed', agent_status: 'failed' },
+        { agent_name: 'review/done', agent_status: { completed: 'x'.repeat(60 * 1024) } },
+        { agent_name: 'review/failed', agent_status: { errored: 'fixture failure' } },
         { agent_name: 'review/stopped', agent_status: 'interrupted' },
         { agent_name: 'review2', agent_status: 'running' },
       ]);
@@ -1675,12 +1714,11 @@ describe('resident agent lists', () => {
         infos[index].updatedAt = infos[index].lastActivity = 1000 - index;
       }
       const ties = [infos[2], infos[3]].sort((a, b) => a.id.localeCompare(b.id));
-      expect(manager.listAgents(undefined, parent)).toEqual(
-        [infos[1], ...ties, infos[0]].map((info) => ({
-          agent_name: info.taskName,
-          agent_status: info.status,
-        })),
-      );
+      expect(manager.listAgents(undefined, parent).map((entry) => entry.agent_name)).toEqual([
+        'newer',
+        ...ties.map((info) => info.taskName),
+        'old',
+      ]);
       expect([...manager['live'].keys()]).toEqual(infos.map((info) => info.id));
     } finally {
       await manager.shutdown();
@@ -1888,7 +1926,9 @@ describe('widget snapshots', () => {
               manager.getWidgetSnapshot(parent).find((snapshot) => snapshot.taskName === name)
                 ?.color,
             ).toBe(color);
-            expect(manager.readAgentResponse(name, parent)).not.toHaveProperty('color');
+            expect(manager.listAgents(name, parent)).toEqual([
+              { agent_name: name, agent_status: 'running' },
+            ]);
           }
           expect(
             readsOnResume.mock.calls.some(([file]) =>
@@ -1950,7 +1990,7 @@ describe('widget snapshots', () => {
 
   test('lifecycle notifications expose exact statuses, including interrupted without a completion notification', async () => {
     const parent = 'widget-statuses-' + randomUUID();
-    const activity: Array<{ taskName: string; active: boolean; status?: AgentInfo['status'] }> = [];
+    const activity: AgentActivityEvent[] = [];
     const completions: string[] = [];
     const manager = new AgentManager({
       onActivityChange: (event) => activity.push(event),
@@ -1965,19 +2005,17 @@ describe('widget snapshots', () => {
       await waitUntil(() => fixture.instances.at(-1)!.activeStreams === 1);
       await manager.interruptAgent(parent, 'cancelled');
       expect(new Set(activity.map((event) => event.status))).toEqual(
-        new Set(['starting', 'running', 'completed', 'failed', 'interrupted']),
+        new Set(['pending_init', 'running', 'completed', 'errored', 'interrupted']),
       );
-      for (const event of activity)
-        expect(event.active).toBe(event.status === 'starting' || event.status === 'running');
       expect(
-        activity.filter((event) => !event.active).map((event) => [event.taskName, event.status]),
+        activity.filter(({ status }) => status !== 'pending_init' && status !== 'running'),
       ).toEqual([
-        ['success', 'completed'],
-        ['failure', 'failed'],
-        ['cancelled', 'interrupted'],
+        { parentSessionId: parent, taskName: 'success', status: 'completed' },
+        { parentSessionId: parent, taskName: 'failure', status: 'errored' },
+        { parentSessionId: parent, taskName: 'cancelled', status: 'interrupted' },
       ]);
       expect(completions).toEqual(['success', 'failure']);
-      expect(manager.readAgentResponse('cancelled', parent).status).toBe('interrupted');
+      expect(manager.getAgentInfo('cancelled', parent).status).toBe('interrupted');
     } finally {
       await manager.shutdown();
     }
@@ -2231,7 +2269,7 @@ describe('widget snapshots', () => {
       expect(live.run!.displayStartedAt).toBe(started);
       await settled(manager, info);
       expect(fixture.instances[0].requests).toHaveLength(3);
-      expect(manager.getAgentInfo('worker', parent).status).toBe('failed');
+      expect(manager.getAgentInfo('worker', parent).status).toBe('errored');
     } finally {
       gate.resolve();
       await manager.shutdown();
@@ -2249,7 +2287,7 @@ describe('widget snapshots', () => {
       await manager.spawnAgent(spawnParams(foreign, 'worker', 'hold foreign'));
       for (const [task, command, status] of [
         ['done', 'done', 'completed'],
-        ['failed', 'fail now', 'failed'],
+        ['failed', 'fail now', 'errored'],
         ['stopped', 'hold interrupted', 'interrupted'],
       ]) {
         await manager.spawnAgent(spawnParams(parent, task, command));
@@ -2270,7 +2308,7 @@ describe('widget snapshots', () => {
         manager.getWidgetSnapshot(parent).map(({ taskName, status }) => [taskName, status]),
       ).toEqual([
         ['worker', 'running'],
-        ['starting', 'starting'],
+        ['starting', 'pending_init'],
       ]);
       expect(manager.getWidgetSnapshot(foreign).map(({ taskName }) => taskName)).toEqual([
         'worker',
@@ -2326,7 +2364,7 @@ describe('widget snapshots', () => {
     }
   });
 
-  test.each(['completed', 'failed'] as const)(
+  test.each(['completed', 'errored'] as const)(
     'display getter failures cannot change %s results, completion delivery or cleanup',
     async (status) => {
       const gate = Promise.withResolvers<void>();
@@ -2341,7 +2379,7 @@ describe('widget snapshots', () => {
       const spies: Array<ReturnType<typeof spyOn>> = [];
       fixture.onLoad = (pi) => {
         pi.on('message_end', (event) => {
-          if (event.message.role === 'assistant' && status === 'failed') {
+          if (event.message.role === 'assistant' && status === 'errored') {
             event.message.stopReason = 'error';
             event.message.errorMessage = 'original model failure';
           }
@@ -2474,7 +2512,7 @@ describe('spawn model and thinking resolution', () => {
       ).rejects.toThrow('test/unavailable-user-model');
       expect(manager.getAgentInfo('named-general', parent)).toMatchObject({
         agentType: 'general',
-        status: 'failed',
+        status: 'errored',
         modelId: 'unavailable-user-model',
       });
       expect(fixture.instances.flatMap((instance) => instance.inputs)).toHaveLength(1);
@@ -2613,13 +2651,13 @@ describe('SDK model validation', () => {
           }),
         ).rejects.toThrow(provider + '/' + modelId);
         const info = manager.getAgentInfo('worker', parent);
-        expect(info).toMatchObject({ provider, modelId, status: 'failed', messageCount: 0 });
+        expect(info).toMatchObject({ provider, modelId, status: 'errored', messageCount: 0 });
         expect(info.finalResponse).toBeUndefined();
         await settled(manager, info);
         expect(fixture.instances.flatMap((instance) => instance.inputs)).toEqual([]);
         expect(sessionMessages(info)).toEqual([]);
         expect(completions).toEqual([
-          expect.objectContaining({ status: 'failed', error: info.error }),
+          expect.objectContaining({ status: 'errored', error: info.error }),
         ]);
         expect(fs.existsSync(activeMarker(info.id))).toBe(false);
       } finally {
@@ -2642,7 +2680,7 @@ describe('SDK model validation', () => {
         manager.spawnAgent(spawnParams(parent, 'worker', 'must not run')),
       ).rejects.toThrow('explicit fixture load failure');
       const info = manager.getAgentInfo('worker', parent);
-      expect(info.status).toBe('failed');
+      expect(info.status).toBe('errored');
       expect(sessionMessages(info)).toEqual([]);
       await settled(manager, info);
     } finally {
@@ -2684,7 +2722,7 @@ describe('SDK model validation', () => {
         'fireworks/' + id,
       );
       expect(manager.getAgentInfo('worker', parent)).toMatchObject({
-        status: 'failed',
+        status: 'errored',
         messageCount: 2,
         provider: 'fireworks',
         modelId: id,
@@ -2696,7 +2734,7 @@ describe('SDK model validation', () => {
     }
   });
 
-  test.each(['failed', 'interrupted'] as const)(
+  test.each(['errored', 'interrupted'] as const)(
     'records distinct startup failures after a previous %s run',
     async (prior) => {
       const parent = 'retry-' + randomUUID();
@@ -2706,7 +2744,7 @@ describe('SDK model validation', () => {
       });
       try {
         await manager.spawnAgent(
-          spawnParams(parent, 'worker', prior === 'failed' ? 'fail old' : 'hold old'),
+          spawnParams(parent, 'worker', prior === 'errored' ? 'fail old' : 'hold old'),
         );
         if (prior === 'interrupted') await manager.interruptAgent(parent, 'worker');
         const initial = manager.getAgentInfo('worker', parent);
@@ -2720,10 +2758,10 @@ describe('SDK model validation', () => {
           );
           const info = manager.getAgentInfo('worker', parent);
           await coldDispose(manager, info);
-          expect(info).toMatchObject({ status: 'failed', messageCount: 1 });
+          expect(info).toMatchObject({ status: 'errored', messageCount: 1 });
           expect(info.finalResponse).toBeUndefined();
           expect(completions.slice(before)).toEqual([
-            expect.objectContaining({ status: 'failed', error: info.error }),
+            expect.objectContaining({ status: 'errored', error: info.error }),
           ]);
         }
         expect(fixture.instances.flatMap((instance) => instance.inputs)).toEqual([]);
@@ -2820,14 +2858,14 @@ describe('native hot session lifecycle', () => {
             expect(notices).toHaveLength(0);
           } else {
             await settled(manager, info);
-            expect(manager.readAgentResponse('worker', parent).status).toBe(
+            expect(manager.getAgentInfo('worker', parent).status).toBe(
               action === 'interrupt' ? 'interrupted' : 'completed',
             );
             await manager.sendMessage(parent, 'worker', 'clean continuation');
             await settled(manager, info);
             expect(manager['live'].get(info.id)!.session).toBe(session);
             expect(fixture.instances).toHaveLength(1);
-            expect(manager.readAgentResponse('worker', parent).finalResponse).toBe(
+            expect(manager.getAgentInfo('worker', parent).finalResponse).toBe(
               'response:clean continuation',
             );
             expect(notices).toHaveLength(action === 'interrupt' ? 1 : 2);
@@ -2985,7 +3023,7 @@ describe('native hot session lifecycle', () => {
       expect(manager.getAgentInfo('worker', parent)).toMatchObject({
         provider: 'test',
         modelId: 'fake',
-        status: 'failed',
+        status: 'errored',
       });
       expect(fixture.instances).toHaveLength(2);
       expect(fixture.instances[0].shutdowns).toBe(1);
@@ -3076,7 +3114,7 @@ describe('native hot session lifecycle', () => {
         await settled(manager, a);
         const live = manager['live'].get(a.id)!;
         const lastUsedAt = live.lastUsedAt;
-        const before = manager.readAgentResponse('a', parent);
+        const before = manager.getAgentInfo('a', parent);
         const session = live.session!;
         session.settingsManager.applyOverrides({
           compaction: { enabled: false, keepRecentTokens: 0, reserveTokens: 0 },
@@ -3116,7 +3154,13 @@ describe('native hot session lifecycle', () => {
         expect(manager['live'].size).toBe(1);
         expect(fixture.instances.map((i) => i.shutdowns)).toEqual([1, 0]);
         expect(live.lastUsedAt).toBe(lastUsedAt);
-        expect(manager.readAgentResponse('a', parent)).toEqual(before);
+        expect(manager.getAgentInfo('a', parent)).toMatchObject({
+          status: before.status,
+          finalResponse: before.finalResponse,
+          lastTaskMessage: before.lastTaskMessage,
+          completedAt: before.completedAt,
+        });
+        expect(manager.getAgentInfo('a', parent).error).toBeUndefined();
         expect(notices).toHaveLength(2);
       } finally {
         gate.resolve();
@@ -3171,7 +3215,15 @@ describe('native hot session lifecycle', () => {
           await manager.spawnAgent(spawnParams(parent, 'a', 'seed'));
           const a = manager.getAgentInfo('a', parent);
           await settled(manager, a);
-          const before = manager.readAgentResponse('a', parent);
+          const expectPreviousResult = () => {
+            const current = manager.getAgentInfo('a', parent);
+            expect(current).toMatchObject({
+              status: 'completed',
+              finalResponse: 'response:seed',
+              lastTaskMessage: 'seed',
+            });
+            expect(current.error).toBeUndefined();
+          };
           const live = manager['live'].get(a.id)!;
           const session = live.session!;
           const dispose = spyOn(session, 'dispose');
@@ -3226,7 +3278,7 @@ describe('native hot session lifecycle', () => {
           expect(fixture.instances[0].shutdowns).toBe(0);
           expect(dispose).not.toHaveBeenCalled();
           expect(fs.existsSync(activeMarker(a.id))).toBe(true);
-          expect(manager.readAgentResponse('a', parent)).toEqual(before);
+          expectPreviousResult();
           expect(notices).toHaveLength(1);
           failedGate.resolve();
           const result = await callback.promise;
@@ -3244,17 +3296,17 @@ describe('native hot session lifecycle', () => {
             await released(manager, a);
             expect(dispose).toHaveBeenCalledTimes(1);
             expect(manager['live'].size).toBe(action === 'capacity' ? 1 : 0);
-            expect(manager.readAgentResponse('a', parent)).toEqual(before);
+            expectPreviousResult();
             expect(notices).toHaveLength(action === 'capacity' ? 2 : 1);
           } else {
-            expect(manager.readAgentResponse('a', parent)).toEqual(before);
+            expectPreviousResult();
             expect(notices).toHaveLength(1);
             expect(await manager.sendMessage(parent, 'a', 'after failed hook exit')).toEqual({
               delivery: 'prompt',
             });
             await settled(manager, a);
             expect(manager['live'].get(a.id)!.session).toBe(session);
-            expect(manager.readAgentResponse('a', parent).finalResponse).toBe(
+            expect(manager.getAgentInfo('a', parent).finalResponse).toBe(
               'response:after failed hook exit',
             );
             expect(fixture.instances).toHaveLength(1);
@@ -3302,7 +3354,6 @@ describe('native hot session lifecycle', () => {
       const a = manager.getAgentInfo('a', parent);
       await settled(manager, a);
       const live = manager['live'].get(a.id)!;
-      const before = manager.readAgentResponse('a', parent);
       const session = live.session!;
       const ctx = fixture.instances[0].ctx!;
       session.settingsManager.applyOverrides({
@@ -3338,7 +3389,13 @@ describe('native hot session lifecycle', () => {
       await released(manager, a);
       expect(live.pendingCompactions.size).toBe(0);
       expect(manager['live'].size).toBe(1);
-      expect(manager.readAgentResponse('a', parent)).toEqual(before);
+      const result = manager.getAgentInfo('a', parent);
+      expect(result).toMatchObject({
+        status: 'completed',
+        finalResponse: 'response:seed',
+        lastTaskMessage: 'seed',
+      });
+      expect(result.error).toBeUndefined();
       expect(notices).toHaveLength(2);
       expect(errors).toEqual([]);
     } finally {
@@ -3384,7 +3441,6 @@ describe('native hot session lifecycle', () => {
       await manager.spawnAgent(spawnParams(parent, 'a', 'seed'));
       const a = manager.getAgentInfo('a', parent);
       await settled(manager, a);
-      const before = manager.readAgentResponse('a', parent);
       const live = manager['live'].get(a.id)!;
       const session = live.session!;
       session.settingsManager.applyOverrides({
@@ -3429,7 +3485,13 @@ describe('native hot session lifecycle', () => {
       await settled(manager, manager.getAgentInfo('b', parent));
       await released(manager, a);
       expect(manager['live'].size).toBe(1);
-      expect(manager.readAgentResponse('a', parent)).toEqual(before);
+      const result = manager.getAgentInfo('a', parent);
+      expect(result).toMatchObject({
+        status: 'completed',
+        finalResponse: 'response:seed',
+        lastTaskMessage: 'seed',
+      });
+      expect(result.error).toBeUndefined();
       expect(notices).toHaveLength(2);
       expect(errors).toEqual([]);
     } finally {
@@ -3480,7 +3542,7 @@ describe('native hot session lifecycle', () => {
           scenario === 'interrupt'
             ? 'interrupted'
             : scenario === 'model-error'
-              ? 'failed'
+              ? 'errored'
               : 'completed',
         );
         expect(manager['live'].get(info.id)).toBe(live);
@@ -3494,7 +3556,7 @@ describe('native hot session lifecycle', () => {
         expect(
           fixture.instances[0].events.filter((e) => e === 'factory' || e === 'session_start'),
         ).toEqual(['factory', 'session_start']);
-        expect(manager.readAgentResponse('worker', parent)).toMatchObject({
+        expect(manager.getAgentInfo('worker', parent)).toMatchObject({
           status: 'completed',
           finalResponse: 'response:second',
         });
@@ -3797,7 +3859,7 @@ describe('native hot session lifecycle', () => {
     }
   });
 
-  test.each(['completed', 'failed', 'interrupted'] as const)(
+  test.each(['completed', 'errored', 'interrupted'] as const)(
     'cold capacity rejection preserves %s history, results and completion state',
     async (prior) => {
       writeConfig({ maxAgents: 1 });
@@ -3813,7 +3875,7 @@ describe('native hot session lifecycle', () => {
           spawnParams(
             parent,
             'cold',
-            prior === 'completed' ? 'first' : prior === 'failed' ? 'fail first' : 'hold first',
+            prior === 'completed' ? 'first' : prior === 'errored' ? 'fail first' : 'hold first',
           ),
         );
         const info = manager.getAgentInfo('cold', parent);
@@ -3821,7 +3883,6 @@ describe('native hot session lifecycle', () => {
         await coldDispose(manager, info);
         expect(manager.listAgents(undefined, parent)).toEqual([]);
         const before = manager.getAgentInfo('cold', parent);
-        const response = manager.readAgentResponse('cold', parent);
         const savedInfo = fs.readFileSync(info.infoFile, 'utf8');
         const history = fs.readFileSync(info.sessionFile, 'utf8');
         await manager.spawnAgent(spawnParams(parent, 'busy', 'hold capacity'));
@@ -3832,8 +3893,6 @@ describe('native hot session lifecycle', () => {
             /capacity|maxAgents|limit/i,
           );
         expect(manager.getAgentInfo('cold', parent)).toEqual(before);
-        expect(manager.readAgentResponse('cold', parent)).toEqual(response);
-        expect(manager.readAgentResponse('cold', parent)).toEqual(response);
         expect(fs.readFileSync(info.infoFile, 'utf8')).toBe(savedInfo);
         expect(fs.readFileSync(info.sessionFile, 'utf8')).toBe(history);
         expect(notices).toHaveLength(noticesBefore);
@@ -3848,9 +3907,9 @@ describe('native hot session lifecycle', () => {
           delivery: 'prompt',
         });
         await settled(manager, info);
-        expect(manager.readAgentResponse('cold', parent).finalResponse).toBe('response:recovered');
+        expect(manager.getAgentInfo('cold', parent).finalResponse).toBe('response:recovered');
         expect(manager.listAgents(undefined, parent)).toEqual([
-          { agent_name: 'cold', agent_status: 'completed' },
+          { agent_name: 'cold', agent_status: { completed: 'response:recovered' } },
         ]);
         expect(fixture.instances).toHaveLength(3);
       } finally {
@@ -3881,7 +3940,10 @@ describe('native hot session lifecycle', () => {
         'broken',
       ]);
       expect(manager.listAgents(undefined, parent)).toEqual([
-        { agent_name: 'broken', agent_status: 'failed' },
+        {
+          agent_name: 'broken',
+          agent_status: { errored: manager.getAgentInfo('broken', parent).error! },
+        },
       ]);
       gate.resolve();
       expect((await pending).message).toContain('capacity startup failure');
@@ -3932,7 +3994,7 @@ describe('native hot session lifecycle', () => {
         'old',
       ]);
       expect(manager.listAgents(undefined, parent)).toEqual([
-        { agent_name: 'old', agent_status: 'completed' },
+        { agent_name: 'old', agent_status: { completed: 'response:first' } },
       ]);
       gate.resolve();
       await released(manager, old);
@@ -4106,9 +4168,7 @@ describe('native hot session lifecycle', () => {
             lastTaskMessage: latest.lastTaskMessage,
             completedAt: latest.completedAt,
           });
-          expect(manager.readAgentResponse('cold', parent).finalResponse).toBe(
-            latest.finalResponse,
-          );
+          expect(manager.getAgentInfo('cold', parent).finalResponse).toBe(latest.finalResponse);
           expect(fs.readFileSync(cold.sessionFile, 'utf8')).toBe(history);
           expect(notices).toHaveLength(noticesBefore);
         }
@@ -4193,7 +4253,7 @@ describe('native hot session lifecycle', () => {
       };
       first = manager.sendMessage(parent, 'worker', 'new round');
       const second = manager.sendMessage(parent, 'worker', 'concurrent duplicate');
-      await expect(second).rejects.toThrow(/starting/);
+      await expect(second).rejects.toThrow(/still initializing/);
       await waitUntil(() => fixture.instances[0].inputs.length === 2);
       expect(fixture.instances).toHaveLength(1);
       expect(manager['live'].get(info.id)!.run!.awaitingPrompt).toBe(true);
@@ -4220,7 +4280,7 @@ describe('native hot session lifecycle', () => {
       const sending = manager.sendMessage(parent, 'worker', 'hold new run').catch((e) => e);
       const interrupted = await manager.interruptAgent(parent, 'worker');
       await sending;
-      expect(interrupted.previous_status).toBe('running');
+      expect(interrupted).toEqual({ previous_status: 'running' });
       await settled(manager, info);
       expect(manager.getAgentInfo('worker', parent).status).toBe('interrupted');
       expect(manager['live'].get(info.id)!.session).toBe(session);
@@ -4228,7 +4288,7 @@ describe('native hot session lifecycle', () => {
       await settled(manager, info);
       expect(manager['live'].get(info.id)!.session).toBe(session);
       expect(fixture.instances).toHaveLength(1);
-      expect(manager.readAgentResponse('worker', parent).finalResponse).toBe('response:recovered');
+      expect(manager.getAgentInfo('worker', parent).finalResponse).toBe('response:recovered');
     } finally {
       await manager.shutdown();
     }
@@ -4242,11 +4302,16 @@ describe('native hot session lifecycle', () => {
       await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
       const info = manager.getAgentInfo('worker', parent);
       await settled(manager, info);
-      const before = manager.readAgentResponse('worker', parent);
       fixture.instances[0].ctx!.shutdown();
       expect(manager['live'].get(info.id)!.closing).toBe(true);
       await released(manager, info);
-      expect(manager.readAgentResponse('worker', parent)).toEqual(before);
+      const result = manager.getAgentInfo('worker', parent);
+      expect(result).toMatchObject({
+        status: 'completed',
+        finalResponse: 'response:first',
+        lastTaskMessage: 'first',
+      });
+      expect(result.error).toBeUndefined();
       expect(notices).toHaveLength(1);
       expect(fixture.instances[0].shutdowns).toBe(1);
     } finally {
@@ -4316,7 +4381,7 @@ describe('native hot session lifecycle', () => {
       expect(manager.getAgentInfo('worker', parent).status).toBe('running');
       gate.resolve();
       await settled(manager, info);
-      expect(manager.readAgentResponse('worker', parent)).toMatchObject({
+      expect(manager.getAgentInfo('worker', parent)).toMatchObject({
         status: 'completed',
         finalResponse: 'response:hold second',
       });
@@ -4525,7 +4590,7 @@ describe('native hot session lifecycle', () => {
       );
       await manager.sendMessage(parent, 'worker', 'second');
       await coldDispose(manager, info);
-      expect(manager.readAgentResponse('worker', parent).finalResponse).toBe('response:second');
+      expect(manager.getAgentInfo('worker', parent).finalResponse).toBe('response:second');
       expect(fixture.instances.map((i) => i.shutdowns)).toEqual([1, 1]);
     } finally {
       await manager.shutdown();
@@ -4593,7 +4658,7 @@ describe('native hot session lifecycle', () => {
       await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
       const info = manager.getAgentInfo('worker', parent);
       await settled(manager, info);
-      const before = manager.readAgentResponse('worker', parent);
+      const before = manager.getAgentInfo('worker', parent);
       fixture.input = async (event) => {
         if (event.text === 'unaccepted') await gate.promise;
       };
@@ -4605,12 +4670,15 @@ describe('native hot session lifecycle', () => {
       gate.resolve();
       expect(await pending).toBeInstanceOf(Error);
       await released(manager, info);
-      expect(manager.readAgentResponse('worker', parent)).toEqual(before);
-      expect(manager.getAgentInfo('worker', parent)).toMatchObject({
+      const after = manager.getAgentInfo('worker', parent);
+      expect(after).toMatchObject({
         status: 'completed',
         messageCount: 1,
         finalResponse: 'response:first',
+        lastTaskMessage: before.lastTaskMessage,
+        completedAt: before.completedAt,
       });
+      expect(after.error).toBeUndefined();
       expect(notices).toHaveLength(1);
       expect(fixture.instances).toHaveLength(1);
       expect(fixture.instances[0].requests).toHaveLength(1);
@@ -4658,7 +4726,7 @@ describe('native hot session lifecycle', () => {
         'first',
         'recovered',
       ]);
-      expect(manager.readAgentResponse('worker', parent).finalResponse).toBe('response:recovered');
+      expect(manager.getAgentInfo('worker', parent).finalResponse).toBe('response:recovered');
     } finally {
       timers?.mockRestore();
       gate.resolve();
@@ -4684,14 +4752,14 @@ describe('SDK lifecycle and cancellation races', () => {
       await waitUntil(() => fixture.instances[0].activeStreams === 1);
       gate.resolve();
       await settled(manager, info);
-      expect(manager.readAgentResponse('worker', parent).finalResponse).toBe('response:hold first');
+      expect(manager.getAgentInfo('worker', parent).finalResponse).toBe('response:hold first');
       expect(fixture.instances[0].shutdowns).toBe(0);
       expect(await manager.sendMessage(parent, 'worker', 'second')).toEqual({ delivery: 'prompt' });
       const secondSession = manager['live'].get(info.id)?.session;
       expect(secondSession).toBe(firstSession);
       expect(secondSession?.modelRuntime).toBe(firstSession.modelRuntime);
       await settled(manager, info);
-      expect(manager.readAgentResponse('worker', parent).finalResponse).toBe('response:second');
+      expect(manager.getAgentInfo('worker', parent).finalResponse).toBe('response:second');
       expect(
         sessionMessages(info)
           .filter((entry) => entry.role !== 'system')
@@ -4739,7 +4807,7 @@ describe('SDK lifecycle and cancellation races', () => {
       gate.resolve();
       const info = manager.getAgentInfo('worker', parent);
       await settled(manager, info);
-      expect(manager.readAgentResponse('worker', parent).finalResponse).toBe(
+      expect(manager.getAgentInfo('worker', parent).finalResponse).toBe(
         'response:next instruction',
       );
       expect(info.sessionFile).toBe(manager.getAgentInfo('worker', parent).sessionFile);
@@ -4763,8 +4831,8 @@ describe('SDK lifecycle and cancellation races', () => {
         await manager.spawnAgent(spawnParams(parent, 'worker', command + ' now'));
         const info = manager.getAgentInfo('worker', parent);
         await settled(manager, info);
-        expect(manager.getAgentInfo('worker', parent).status).toBe('failed');
-        expect(manager.readAgentResponse('worker', parent).error).toContain(
+        expect(manager.getAgentInfo('worker', parent).status).toBe('errored');
+        expect(manager.getAgentInfo('worker', parent).error).toContain(
           command === 'fail' ? 'fixture failure' : 'aborted',
         );
         expect(completions).toHaveLength(1);
@@ -4775,32 +4843,118 @@ describe('SDK lifecycle and cancellation races', () => {
     },
   );
 
-  test("handled input ends with this run's empty response, never the previous answer", async () => {
-    const parent = 'handled-' + randomUUID();
-    const completions: any[] = [];
-    const manager = new AgentManager({ onCompletion: (event) => completions.push(event) });
-    try {
-      await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
-      const info = manager.getAgentInfo('worker', parent);
-      await settled(manager, info);
-      expect(manager.readAgentResponse('worker', parent).finalResponse).toBe('response:first');
-      await manager.sendMessage(parent, 'worker', 'handled empty');
-      await settled(manager, info);
-      const after = manager.getAgentInfo('worker', parent);
-      expect(after.status).toBe('completed');
-      expect(after.finalResponse ?? '').toBe('');
-      expect(after.messageCount).toBe(2);
-      expect(fixture.instances).toHaveLength(1);
-      expect(fixture.instances[0].requests).toHaveLength(1);
-      expect(manager['live'].get(info.id)!.broadcaster['status']).toBe('done');
-      expect(completions).toHaveLength(2);
-      expect(completions[1].finalResponse ?? '').toBe('');
-      await new Promise((resolve) => setTimeout(resolve, 30));
-      expect(manager.getAgentInfo('worker', parent).status).toBe('completed');
-    } finally {
-      await manager.shutdown();
-    }
-  });
+  test.each(['handled input', 'blank assistant text'] as const)(
+    'publishes and persists null for %s, never the previous answer',
+    async (mode) => {
+      if (mode === 'blank assistant text') {
+        fixture.onLoad = (pi) => {
+          pi.on('message_end', ({ message }) => {
+            if (message.role !== 'assistant') return;
+            const text = message.content.find((part) => part.type === 'text');
+            if (text?.text === 'response:blank answer') text.text = ' \n\t ';
+          });
+        };
+      }
+      const parent = 'no-response-' + randomUUID();
+      const completions: AgentCompletionEvent[] = [];
+      const manager = new AgentManager({ onCompletion: (event) => completions.push(event) });
+      try {
+        await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
+        const info = manager.getAgentInfo('worker', parent);
+        await settled(manager, info);
+        expect(manager.listAgents(undefined, parent)).toEqual([
+          { agent_name: 'worker', agent_status: { completed: 'response:first' } },
+        ]);
+        await manager.sendMessage(
+          parent,
+          'worker',
+          mode === 'handled input' ? 'handled empty' : 'blank answer',
+        );
+        await settled(manager, info);
+        expect(manager.getAgentInfo('worker', parent)).toMatchObject({
+          status: 'completed',
+          finalResponse: null,
+          messageCount: 2,
+        });
+        expect(manager.listAgents(undefined, parent)).toEqual([
+          { agent_name: 'worker', agent_status: { completed: null } },
+        ]);
+        expect(fixture.instances).toHaveLength(1);
+        expect(fixture.instances[0].requests).toHaveLength(mode === 'handled input' ? 1 : 2);
+        expect(manager['live'].get(info.id)!.broadcaster['status']).toBe('done');
+        expect(completions).toHaveLength(2);
+        expect(completions[1]).toEqual({
+          parentSessionId: parent,
+          taskName: 'worker',
+          status: 'completed',
+          finalResponse: null,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(manager.getAgentInfo('worker', parent).status).toBe('completed');
+      } finally {
+        await manager.shutdown();
+      }
+    },
+  );
+
+  test.each([
+    ['terminating', true],
+    ['continuing', false],
+  ] as const)(
+    'excludes assistant preambles from the final response after a %s tool call',
+    async (_label, terminate) => {
+      const preamble = { type: 'text', text: 'I will use a tool first.' } as const;
+      fixture.onLoad = (pi) => {
+        pi.on('message_end', ({ message }) => {
+          if (
+            message.role === 'assistant' &&
+            message.content.some((part) => part.type === 'toolCall')
+          )
+            message.content.unshift(preamble);
+        });
+        pi.on('tool_call', (event) => {
+          if (event.toolName === 'fixture_hold')
+            return { block: true, reason: 'offline fixture tool result', terminate };
+        });
+      };
+      const parent = 'tool-preamble-' + randomUUID();
+      const completions: AgentCompletionEvent[] = [];
+      const manager = new AgentManager({ onCompletion: (event) => completions.push(event) });
+      try {
+        await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
+        const info = manager.getAgentInfo('worker', parent);
+        await settled(manager, info);
+        await manager.sendMessage(parent, 'worker', 'tool hold result');
+        await settled(manager, info);
+        const messages = sessionMessages(info);
+        expect(messages.find((message) => message.role === 'toolResult')).toBeDefined();
+        const toolRequest = messages.find(
+          (message) =>
+            message.role === 'assistant' &&
+            message.content.some((part: any) => part.type === 'toolCall'),
+        );
+        expect(toolRequest?.content).toContainEqual(preamble);
+        expect(fixture.instances[0].requests).toHaveLength(terminate ? 2 : 3);
+        const finalResponse = terminate ? null : 'response:tool hold result';
+        expect(manager.getAgentInfo('worker', parent)).toMatchObject({
+          status: 'completed',
+          finalResponse,
+        });
+        expect(manager.listAgents(undefined, parent)).toEqual([
+          { agent_name: 'worker', agent_status: { completed: finalResponse } },
+        ]);
+        expect(completions).toHaveLength(2);
+        expect(completions[1]).toEqual({
+          parentSessionId: parent,
+          taskName: 'worker',
+          status: 'completed',
+          finalResponse,
+        });
+      } finally {
+        await manager.shutdown();
+      }
+    },
+  );
 
   test('handled input that starts native work is not finalized or disposed before native idle', async () => {
     const gate = Promise.withResolvers<void>();
@@ -4816,7 +4970,7 @@ describe('SDK lifecycle and cancellation races', () => {
       expect(info.status).toBe('running');
       gate.resolve();
       await settled(manager, info);
-      expect(manager.readAgentResponse('worker', parent).finalResponse).toBe(
+      expect(manager.getAgentInfo('worker', parent).finalResponse).toBe(
         'response:hold handled-owned-work',
       );
       expect(fixture.instances[0].shutdowns).toBe(0);
@@ -4860,12 +5014,13 @@ describe('SDK lifecycle and cancellation races', () => {
         expect(manager['live'].has(info.id)).toBe(true);
         expect(fixture.instances[0].shutdowns).toBe(0);
         gate.resolve();
-        await interruption;
+        expect(await interruption).toEqual({
+          previous_status: phase === 'initialization' ? 'pending_init' : 'running',
+        });
         expect(await pending).toBeInstanceOf(Error);
         await coldDispose(manager, info);
         expect(manager.getAgentInfo('worker', parent).status).toBe('interrupted');
         expect(completions).toEqual([]);
-        expect(manager.readAgentResponse('worker', parent).status).toBe('interrupted');
         expect(fixture.instances[0].shutdowns).toBe(1);
         expect(fixture.instances[0].activeStreams).toBe(0);
         if (phase === 'initialization') expect(fixture.instances[0].inputs).toEqual([]);
@@ -4911,13 +5066,13 @@ describe('SDK lifecycle and cancellation races', () => {
         expect(error).toBeInstanceOf(Error);
         expect(error.message).toMatch(/timed out|timeout/i);
         const info = manager.getAgentInfo('worker', parent);
-        expect(info.status).toBe('failed');
+        expect(info.status).toBe('errored');
         expect(manager['live'].has(info.id)).toBe(true);
         expect(fixture.instances[0].shutdowns).toBe(0);
         gate.resolve();
         await settled(manager, info);
         expect(completions).toHaveLength(1);
-        expect(manager.getAgentInfo('worker', parent).status).toBe('failed');
+        expect(manager.getAgentInfo('worker', parent).status).toBe('errored');
         expect(fixture.instances[0].shutdowns).toBe(1);
         expect(fixture.instances[0].activeStreams).toBe(0);
       } finally {
@@ -4961,7 +5116,7 @@ describe('SDK lifecycle and cancellation races', () => {
       await manager.sendMessage(parent, 'worker', 'recovered');
       await settled(manager, info);
       expect(fixture.instances).toHaveLength(2);
-      expect(manager.readAgentResponse('worker', parent).finalResponse).toBe('response:recovered');
+      expect(manager.getAgentInfo('worker', parent).finalResponse).toBe('response:recovered');
       expect(errors.length).toBeGreaterThan(0);
     } finally {
       gate.resolve();
@@ -5030,9 +5185,7 @@ describe('SDK lifecycle and cancellation races', () => {
       await settled(manager, info);
       expect(fixture.instances[0].requests).toHaveLength(1);
       expect(fixture.instances[0].shutdowns).toBe(0);
-      expect(manager.readAgentResponse('worker', parent).finalResponse).toBe(
-        'response:hold initial',
-      );
+      expect(manager.getAgentInfo('worker', parent).finalResponse).toBe('response:hold initial');
       await manager.sendMessage(parent, 'worker', 'clean next round');
       await settled(manager, info);
       expect(fixture.instances).toHaveLength(1);
@@ -5091,7 +5244,7 @@ describe('SDK lifecycle and cancellation races', () => {
         expect(live.closing).toBe(true);
         expect(live.run!.cancellation.signal.aborted).toBe(true);
         expect(live.run!.pendingSteers.size).toBe(1);
-        expect(manager.getAgentInfo('worker', parent).status).toBe('failed');
+        expect(manager.getAgentInfo('worker', parent).status).toBe('errored');
         expect(completions).toHaveLength(1);
         expect(completions[0].error).toMatch(/steering acceptance/);
         expect(fs.existsSync(activeMarker(info.id))).toBe(true);
@@ -5114,7 +5267,7 @@ describe('SDK lifecycle and cancellation races', () => {
         ]);
         expect(fixture.instances[0].shutdowns).toBe(1);
         expect(completions).toHaveLength(1);
-        expect(manager.getAgentInfo('worker', parent).status).toBe('failed');
+        expect(manager.getAgentInfo('worker', parent).status).toBe('errored');
         expect(fs.existsSync(activeMarker(info.id))).toBe(false);
         expect(
           sessionMessages(info).some((message) =>
@@ -5125,7 +5278,7 @@ describe('SDK lifecycle and cancellation races', () => {
         await manager.sendMessage(parent, 'worker', 'clean recovery');
         await coldDispose(manager, info);
         expect(manager.getAgentInfo('worker', parent).sessionFile).toBe(info.sessionFile);
-        expect(manager.readAgentResponse('worker', parent).finalResponse).toBe(
+        expect(manager.getAgentInfo('worker', parent).finalResponse).toBe(
           'response:clean recovery',
         );
         expect(fixture.instances.map((instance) => instance.shutdowns)).toEqual([1, 1]);
@@ -5161,9 +5314,7 @@ describe('SDK lifecycle and cancellation races', () => {
       steer.mockRestore();
       response.resolve();
       await settled(manager, info);
-      expect(manager.readAgentResponse('worker', parent).finalResponse).toBe(
-        'response:hold original',
-      );
+      expect(manager.getAgentInfo('worker', parent).finalResponse).toBe('response:hold original');
     } finally {
       steer?.mockRestore();
       response.resolve();
@@ -5239,7 +5390,7 @@ describe('SDK lifecycle and cancellation races', () => {
         fixture = configureCoreFixture();
         await manager.spawnAgent(spawnParams(parent, 'sibling', 'parent still alive'));
         await settled(manager, manager.getAgentInfo('sibling', parent));
-        expect(manager.readAgentResponse('sibling', parent).status).toBe('completed');
+        expect(manager.getAgentInfo('sibling', parent).status).toBe('completed');
       } finally {
         await manager.shutdown();
       }
@@ -5334,10 +5485,10 @@ describe('SDK lifecycle and cancellation races', () => {
       await manager.spawnAgent(spawnParams(parent, 'worker', 'stream forever'));
       const info = manager.getAgentInfo('worker', parent);
       await settled(manager, info);
-      expect(manager.readAgentResponse('worker', parent).error).toContain(
+      expect(manager.getAgentInfo('worker', parent).error).toContain(
         'Model response exceeded 80 ms',
       );
-      expect(manager.getAgentInfo('worker', parent).status).toBe('failed');
+      expect(manager.getAgentInfo('worker', parent).status).toBe('errored');
       expect(completions).toHaveLength(1);
       expect(fixture.instances[0].activeStreams).toBe(0);
       expect(fixture.instances[0].shutdowns).toBe(1);
@@ -5457,11 +5608,11 @@ describe('startup storage failures', () => {
       }
       expect(returnedError).toContain('EEXIST');
       const failed = manager.getAgentInfo('worker', parentSessionId);
-      expect(failed.status).toBe('failed');
+      expect(failed.status).toBe('errored');
       expect(failed.error).toBe(returnedError);
       expect(manager['live'].has(failed.id)).toBe(false);
       expect(completions).toEqual([
-        expect.objectContaining({ taskName: 'worker', status: 'failed', error: failed.error }),
+        expect.objectContaining({ taskName: 'worker', status: 'errored', error: failed.error }),
       ]);
 
       fs.rmSync(socketDir, { force: true });
@@ -5502,7 +5653,7 @@ describe('startup storage failures', () => {
         updatedAt: Date.now(),
         lastActivity: Date.now(),
         messageCount: 0,
-        status: 'starting',
+        status: 'pending_init',
       }),
     );
     const manager = new AgentManager();
@@ -5543,7 +5694,7 @@ describe('startup storage failures', () => {
         expect(message.sections!.rules).toContain(
           'You are a subagent working for a main agent. Work only on the assigned task and follow its scope precisely.',
         );
-        expect(manager.readAgentResponse('worker', parent).status).toBe('completed');
+        expect(manager.getAgentInfo('worker', parent).status).toBe('completed');
         expect(fs.existsSync(system)).toBe(state !== 'missing');
       } finally {
         await manager.shutdown();
@@ -5555,15 +5706,15 @@ describe('startup storage failures', () => {
     },
   );
 
-  test('a first-spawn JSONL creation failure publishes a failed completion and inactive status', async () => {
+  test('a first-spawn JSONL creation failure publishes an errored completion and status', async () => {
     const parentSessionId = 'lifecycle-jsonl-creation-' + randomUUID();
     const scope = path.join(getRunsDir(), parentScopeKey(parentSessionId));
     fs.rmSync(scope, { recursive: true, force: true });
     const completions: any[] = [];
-    const activity: boolean[] = [];
+    const activity: AgentActivityEvent['status'][] = [];
     const manager = new AgentManager({
       onCompletion: (event) => completions.push(event),
-      onActivityChange: (event) => activity.push(event.active),
+      onActivityChange: (event) => activity.push(event.status),
     });
     const original = fs.openSync;
     const open = spyOn(fs, 'openSync').mockImplementation(((
@@ -5589,13 +5740,13 @@ describe('startup storage failures', () => {
       }
       expect(returnedError).toContain('EACCES');
       const failed = manager.getAgentInfo('worker', parentSessionId);
-      expect(failed.status).toBe('failed');
+      expect(failed.status).toBe('errored');
       expect(failed.error).toBe(returnedError);
       expect(manager['live'].has(failed.id)).toBe(false);
       expect(fs.existsSync(activeMarker(failed.id))).toBe(false);
-      expect(activity.at(-1)).toBe(false);
+      expect(activity).toEqual(['errored']);
       expect(completions).toEqual([
-        expect.objectContaining({ taskName: 'worker', status: 'failed', error: returnedError }),
+        expect.objectContaining({ taskName: 'worker', status: 'errored', error: returnedError }),
       ]);
     } finally {
       open.mockRestore();
@@ -5606,11 +5757,11 @@ describe('startup storage failures', () => {
 });
 
 describe('completion delivery', () => {
-  test.each(['completed', 'failed'] as const)(
+  test.each(['completed', 'errored'] as const)(
     'publishes %s content once before settlement using a single event argument',
     async (status) => {
       const parentSessionId = 'completion-settlement-' + randomUUID();
-      const completions: any[] = [];
+      const completions: AgentCompletionEvent[][] = [];
       const order: string[] = [];
       const manager = new AgentManager({
         onCompletion: (...events) => {
@@ -5620,26 +5771,27 @@ describe('completion delivery', () => {
       });
       try {
         await manager.spawnAgent(
-          spawnParams(parentSessionId, 'one', status === 'failed' ? 'fail now' : 'first'),
+          spawnParams(parentSessionId, 'one', status === 'errored' ? 'fail now' : 'first'),
         );
         await settled(manager, manager.getAgentInfo('one', parentSessionId));
         order.push('settlement');
         expect(completions).toEqual([
           [
-            expect.objectContaining({
-              parentSessionId,
-              taskName: 'one',
-              status,
-            }),
+            status === 'completed'
+              ? { parentSessionId, taskName: 'one', status, finalResponse: 'response:first' }
+              : { parentSessionId, taskName: 'one', status, error: 'fixture failure' },
           ],
         ]);
         expect(order).toEqual(['notification', 'settlement']);
-        const [event] = completions[0];
-        if (status === 'completed') expect(event.finalResponse).toBe('response:first');
-        else expect(event.error).toContain('fixture failure');
-        const response = manager.readAgentResponse('one', parentSessionId);
-        expect(response).toMatchObject({ status });
-        expect(manager.readAgentResponse('one', parentSessionId)).toEqual(response);
+        const before = manager.getAgentInfo('one', parentSessionId);
+        expect(before.status).toBe(status);
+        expect(await manager.interruptAgent(parentSessionId, 'one')).toEqual({
+          previous_status: status,
+        });
+        const after = manager.getAgentInfo('one', parentSessionId);
+        expect(after).toMatchObject({ status, lastTaskMessage: before.lastTaskMessage });
+        expect(after.finalResponse).toBe(before.finalResponse);
+        expect(after.error).toBe(before.error);
         expect(completions).toHaveLength(1);
       } finally {
         await manager.shutdown();
@@ -5660,7 +5812,7 @@ describe('completion delivery', () => {
       await manager.spawnAgent(spawnParams(parent, 'one', 'first'));
       const info = manager.getAgentInfo('one', parent);
       await coldDispose(manager, info);
-      expect(manager.readAgentResponse('one', parent)).toMatchObject({
+      expect(manager.getAgentInfo('one', parent)).toMatchObject({
         status: 'completed',
         finalResponse: 'response:first',
       });
@@ -5673,21 +5825,22 @@ describe('completion delivery', () => {
     }
   });
 
-  test('reports active and inactive lifecycle transitions', async () => {
+  test('reports lifecycle transitions across initial completion, rollback and interruption', async () => {
     const parentSessionId = 'status-transitions';
     const scope = path.join(getRunsDir(), parentScopeKey(parentSessionId));
     fs.rmSync(scope, { recursive: true, force: true });
-    const activity: boolean[] = [];
+    const activity: AgentActivityEvent['status'][] = [];
     const manager = new AgentManager({
-      onActivityChange: (event: any) => {
-        if (event.parentSessionId === parentSessionId) activity.push(event.active);
+      onActivityChange: (event) => {
+        if (event.parentSessionId === parentSessionId) activity.push(event.status);
       },
     });
     try {
       await manager.spawnAgent(spawnParams(parentSessionId, 'worker', 'first'));
       await waitUntil(() => manager.getAgentInfo('worker', parentSessionId).status === 'completed');
-      expect(activity).toContain(true);
-      expect(activity.at(-1)).toBe(false);
+      expect(activity[0]).toBe('pending_init');
+      expect(activity).toContain('running');
+      expect(activity.at(-1)).toBe('completed');
 
       const settled = manager.getAgentInfo('worker', parentSessionId);
       const rejectedAt = activity.length;
@@ -5707,14 +5860,15 @@ describe('completion delivery', () => {
         completedAt: settled.completedAt,
       });
       expect(manager['live'].has(settled.id)).toBe(false);
-      expect(activity.slice(rejectedAt)).toContain(true);
-      expect(activity.at(-1)).toBe(false);
+      expect(activity.slice(rejectedAt)).toContain('running');
+      expect(activity.at(-1)).toBe('completed');
 
       const restartAt = activity.length;
       await manager.sendMessage(parentSessionId, 'worker', 'hold restart');
-      expect(activity.slice(restartAt)).toContain(true);
+      expect(activity[restartAt]).toBe('pending_init');
+      expect(activity.slice(restartAt)).toContain('running');
       await manager.interruptAgent(parentSessionId, 'worker');
-      expect(activity.at(-1)).toBe(false);
+      expect(activity.at(-1)).toBe('interrupted');
     } finally {
       await manager.shutdown();
       fs.rmSync(scope, { recursive: true, force: true });
@@ -6227,10 +6381,18 @@ describe('context usage formatting', () => {
         '{"status":"completed","contextUsage":{"contextWindow":500000,"tokens":-1,"percent":10}}',
       );
       expect(formatContextUsage(readInfoFile(file)?.contextUsage)).toBe('?%/500k');
-      fs.writeFileSync(file, 'null');
-      expect(readInfoFile(file)).toBeUndefined();
-      fs.writeFileSync(file, '{');
-      expect(readInfoFile(file)).toBeUndefined();
+      for (const invalid of [
+        'null',
+        '{',
+        '{}',
+        '{"status":"unexpected"}',
+        '{"status":"errored"}',
+        '{"status":"errored","error":42}',
+        '{"status":"completed","finalResponse":false}',
+      ]) {
+        fs.writeFileSync(file, invalid);
+        expect(readInfoFile(file)).toBeUndefined();
+      }
       fs.rmSync(file);
       expect(readInfoFile(file)).toBeUndefined();
     } finally {
@@ -6317,7 +6479,7 @@ describe('SDK business scope and resources', () => {
       ).rejects.toThrow(/already exists/);
       await manager.interruptAgent(parentA, 'review/api');
       expect(manager.getAgentInfo('review/api', parentB).status).toBe('running');
-      expect(manager.readAgentResponse('review/api', parentA).status).toBe('interrupted');
+      expect(manager.getAgentInfo('review/api', parentA).status).toBe('interrupted');
       expect(fixture.instances[1].shutdowns).toBe(0);
     } finally {
       await manager.shutdown();
@@ -6333,20 +6495,20 @@ describe('SDK business scope and resources', () => {
       await manager.spawnAgent(spawnParams(parent, 'one', 'first'));
       const info = manager.getAgentInfo('one', parent);
       await settled(manager, info);
-      const first = manager.readAgentResponse('one', parent);
-      expect(manager.readAgentResponse('one', parent)).toEqual(first);
+      const first = manager.listAgents('one', parent);
+      expect(first).toEqual([{ agent_name: 'one', agent_status: { completed: 'response:first' } }]);
+      expect(manager.listAgents('one', parent)).toEqual(first);
       expect(completions).toHaveLength(1);
       await manager.spawnAgent(spawnParams(parent, 'two', 'hold active'));
       await manager.spawnAgent(spawnParams(other, 'foreign', 'hold other'));
-      const running = manager.readAgentResponse('two', parent);
-      expect(manager.readAgentResponse('two', parent)).toEqual(running);
-      expect(manager.getAgentInfo('two', parent).status).toBe('running');
+      const running = manager.listAgents('two', parent);
+      expect(running).toEqual([{ agent_name: 'two', agent_status: 'running' }]);
+      expect(manager.listAgents('two', parent)).toEqual(running);
       expect(manager.getAgentInfo('foreign', other).status).toBe('running');
       await manager.interruptAgent(parent, 'two');
-      expect(manager.readAgentResponse('two', parent)).toMatchObject({
-        agent_name: 'two',
-        status: 'interrupted',
-      });
+      expect(manager.listAgents('two', parent)).toEqual([
+        { agent_name: 'two', agent_status: 'interrupted' },
+      ]);
       expect(manager.getAgentInfo('foreign', other).status).toBe('running');
       expect(completions).toHaveLength(1);
     } finally {
@@ -6362,7 +6524,7 @@ describe('SDK business scope and resources', () => {
       await owner.spawnAgent(spawnParams(parent, 'worker', 'hold owner'));
       const info = owner.getAgentInfo('worker', parent);
       await observer.ready();
-      expect(observer.readAgentResponse('worker', parent).status).toBe('running');
+      expect(observer.getAgentInfo('worker', parent).status).toBe('running');
       await expect(observer.sendMessage(parent, 'worker', 'must not reopen')).rejects.toThrow(
         /active in another host/,
       );
@@ -6729,7 +6891,7 @@ describe('SDK native context usage and failure cleanup', () => {
       });
       gate.resolve();
       await coldDispose(manager, info);
-      expect(manager.readAgentResponse('worker', parent).status).toBe('completed');
+      expect(manager.getAgentInfo('worker', parent).status).toBe('completed');
       expect(completions).toHaveLength(1);
       expect(errors.some((error) => error.message.includes('native sample fixture failure'))).toBe(
         true,
@@ -6818,7 +6980,7 @@ describe('SDK native context usage and failure cleanup', () => {
 });
 
 describe('SDK acceptance and observer edge cases', () => {
-  test.each(['completed', 'failed', 'interrupted'] as const)(
+  test.each(['completed', 'errored', 'interrupted'] as const)(
     'a submitted but unaccepted prompt rejection restores the previous %s snapshot',
     async (status) => {
       const parent = 'unaccepted-' + randomUUID();
@@ -6832,7 +6994,7 @@ describe('SDK acceptance and observer edge cases', () => {
           spawnParams(
             parent,
             'worker',
-            status === 'completed' ? 'first' : status === 'failed' ? 'fail first' : 'hold first',
+            status === 'completed' ? 'first' : status === 'errored' ? 'fail first' : 'hold first',
           ),
         );
         if (status === 'interrupted') await manager.interruptAgent(parent, 'worker');
@@ -6895,7 +7057,7 @@ describe('SDK acceptance and observer edge cases', () => {
       await interruption;
       expect(await pending).toBeInstanceOf(Error);
       await settled(manager, info);
-      expect(manager.readAgentResponse('worker', parent)).toMatchObject({ status: 'interrupted' });
+      expect(manager.getAgentInfo('worker', parent)).toMatchObject({ status: 'interrupted' });
       expect(manager.getAgentInfo('worker', parent).finalResponse).toBeUndefined();
     } finally {
       gate.resolve();
@@ -6928,7 +7090,7 @@ describe('SDK acceptance and observer edge cases', () => {
       gate.resolve();
       await settled(manager, info);
       expect(manager.getAgentInfo('worker', parent)).toMatchObject({
-        status: 'failed',
+        status: 'errored',
         messageCount: 2,
         error: 'accepted run fixture failure',
       });
@@ -6963,7 +7125,7 @@ describe('SDK acceptance and observer edge cases', () => {
       await manager.sendMessage(parent, 'worker', 'handled aborted');
       await settled(manager, info);
       expect(manager.getAgentInfo('worker', parent)).toMatchObject({
-        status: 'failed',
+        status: 'errored',
         error: 'Agent ended with aborted.',
       });
       expect(manager.getAgentInfo('worker', parent).finalResponse).toBeUndefined();
@@ -6997,7 +7159,7 @@ describe('SDK acceptance and observer edge cases', () => {
       await manager.sendMessage(parent, 'worker', 'handled sync settled');
       await settled(manager, info);
       expect(manager.getAgentInfo('worker', parent)).toMatchObject({
-        status: 'failed',
+        status: 'errored',
         error: 'Agent ended with aborted.',
       });
       expect(manager.getAgentInfo('worker', parent).finalResponse).toBeUndefined();
@@ -7048,9 +7210,7 @@ describe('SDK acceptance and observer edge cases', () => {
       expect(completions).toEqual([
         expect.objectContaining({ status: 'completed', finalResponse: 'response:hold nested' }),
       ]);
-      expect(manager.readAgentResponse('worker', parent).finalResponse).toBe(
-        'response:hold nested',
-      );
+      expect(manager.getAgentInfo('worker', parent).finalResponse).toBe('response:hold nested');
     } finally {
       gate.resolve();
       await manager.shutdown();
@@ -7094,12 +7254,16 @@ describe('reviewed SDK lifecycle regressions', () => {
     fixture = configureCoreFixture({ responseGate: gate.promise });
     const parent = 'failed-final-save-' + randomUUID();
     const errors: Error[] = [];
-    const activity: Array<{ active: boolean; status?: string }> = [];
-    const notifications: any[] = [];
+    const activity: AgentActivityEvent[] = [];
+    const notifications: AgentCompletionEvent[] = [];
+    let residentResult: ReturnType<InstanceType<typeof AgentManager>['listAgents']> | undefined;
     const manager = new AgentManager({
       onError: (error) => errors.push(error),
       onActivityChange: (event) => activity.push(event),
-      onCompletion: (event) => notifications.push(event),
+      onCompletion(event) {
+        notifications.push(event);
+        residentResult = manager.listAgents(undefined, parent);
+      },
     });
     let save: ReturnType<typeof spyOn> | undefined;
     try {
@@ -7117,17 +7281,24 @@ describe('reviewed SDK lifecycle regressions', () => {
       });
       gate.resolve();
       await settled(manager, info);
-      expect(activity.at(-1)).toMatchObject({ active: false, status: 'completed' });
+      expect(activity.at(-1)).toEqual({
+        parentSessionId: parent,
+        taskName: 'worker',
+        status: 'completed',
+      });
       expect(notifications).toEqual([
         expect.objectContaining({ status: 'completed', finalResponse: 'response:hold final save' }),
       ]);
       expect(
         errors.some((error) => error.message.includes('final status fixture save failure')),
       ).toBe(true);
+      expect(residentResult).toEqual([
+        { agent_name: 'worker', agent_status: { completed: 'response:hold final save' } },
+      ]);
       expect(manager.getAgentInfo('worker', parent).status).toBe('running');
+      expect(manager.listAgents(undefined, parent)).toEqual([]);
       expect(manager['live'].size).toBe(0);
       expect(fs.existsSync(activeMarker(info.id))).toBe(false);
-      expect(manager.readAgentResponse('worker', parent)).toMatchObject({ status: 'running' });
       expect(fixture.instances[0].shutdowns).toBe(1);
     } finally {
       save?.mockRestore();
@@ -7168,12 +7339,8 @@ describe('reviewed SDK lifecycle regressions', () => {
       expect(error).toBeInstanceOf(Error);
       expect(error.message).toMatch(/API key|authentication/i);
       await settled(manager, info);
-      expect(manager.readAgentResponse('worker', parent)).toMatchObject({
-        agent_name: 'worker',
-        status: 'completed',
-        finalResponse: 'response:first',
-      });
       expect(manager.getAgentInfo('worker', parent)).toMatchObject({
+        taskName: 'worker',
         status: 'completed',
         messageCount: 1,
         finalResponse: 'response:first',
@@ -7221,12 +7388,18 @@ describe('reviewed SDK lifecycle regressions', () => {
       const parent = 'rollback-activity-read-' + randomUUID();
       const notifications: any[] = [];
       let observeRollback = false;
-      let callbackResponse: AgentResponseEntry | undefined;
+      let callbackResponse: AgentInfo | undefined;
       const manager = new AgentManager({
         onCompletion: (event) => notifications.push(event),
         onActivityChange(event) {
-          if (!observeRollback || event.parentSessionId !== parent || event.active) return;
-          callbackResponse = manager.readAgentResponse('worker', parent);
+          if (
+            !observeRollback ||
+            event.parentSessionId !== parent ||
+            event.status === 'pending_init' ||
+            event.status === 'running'
+          )
+            return;
+          callbackResponse = manager.getAgentInfo('worker', parent);
         },
       });
       let resuming: Promise<unknown> | undefined;
@@ -7234,7 +7407,7 @@ describe('reviewed SDK lifecycle regressions', () => {
         await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
         const info = manager.getAgentInfo('worker', parent);
         await coldDispose(manager, info);
-        const original = manager.readAgentResponse('worker', parent);
+        const original = manager.getAgentInfo('worker', parent);
         const rejected = rejectAfterInput(manager, info, gate);
         resuming = rejected.resuming;
         await rejected.entered;
@@ -7242,11 +7415,14 @@ describe('reviewed SDK lifecycle regressions', () => {
         gate.resolve();
         expect(await resuming).toBeInstanceOf(Error);
         await settled(manager, info);
-        expect(callbackResponse).toEqual(original);
         expect(callbackResponse).toMatchObject({
           status: 'completed',
           finalResponse: 'response:first',
+          lastTaskMessage: original.lastTaskMessage,
+          completedAt: original.completedAt,
+          messageCount: original.messageCount,
         });
+        expect(callbackResponse?.error).toBeUndefined();
         expect(notifications).toHaveLength(1);
         expect(rejected.state.instances[0].requests).toEqual([]);
       } finally {
@@ -7269,8 +7445,6 @@ describe('reviewed SDK lifecycle regressions', () => {
         await manager.spawnAgent(spawnParams(parent, 'worker', 'first'));
         const info = manager.getAgentInfo('worker', parent);
         await coldDispose(manager, info);
-        const original = manager.readAgentResponse('worker', parent);
-        expect(manager.readAgentResponse('worker', parent)).toEqual(original);
         const rejected = rejectAfterInput(manager, info, gate);
         resuming = rejected.resuming;
         await rejected.entered;
@@ -7279,7 +7453,7 @@ describe('reviewed SDK lifecycle regressions', () => {
         await settled(manager, info);
         expect(rejected.state.instances[0].requests).toEqual([]);
         expect(notifications).toHaveLength(1);
-        expect(manager.readAgentResponse('worker', parent).finalResponse).toBe('response:first');
+        expect(manager.getAgentInfo('worker', parent).finalResponse).toBe('response:first');
 
         fixture = configureCoreFixture();
         await manager.sendMessage(parent, 'worker', 'second');
@@ -7289,7 +7463,7 @@ describe('reviewed SDK lifecycle regressions', () => {
           status: 'completed',
           finalResponse: 'response:second',
         });
-        expect(manager.readAgentResponse('worker', parent)).toMatchObject({
+        expect(manager.getAgentInfo('worker', parent)).toMatchObject({
           status: 'completed',
           finalResponse: 'response:second',
         });
@@ -7381,7 +7555,7 @@ describe('reviewed SDK lifecycle regressions', () => {
         'settled:aborted',
         'settled:success',
       ]);
-      expect(manager.readAgentResponse('worker', parent)).toMatchObject({
+      expect(manager.getAgentInfo('worker', parent)).toMatchObject({
         status: 'completed',
         finalResponse: 'response:recovered successfully',
       });
@@ -7734,7 +7908,7 @@ describe('SDK cleanup ownership regressions', () => {
         await waitUntil(() => original.closed);
         expect(dispose).toHaveBeenCalledTimes(1);
         expect(fixture.instances[0].shutdowns).toBe(1);
-        expect(manager.readAgentResponse('worker', parent).status).toBe('completed');
+        expect(manager.getAgentInfo('worker', parent).status).toBe('completed');
         expect(fs.existsSync(activeMarker(info.id))).toBe(false);
         expect({
           createdStreams: tracked.streams.length,
@@ -7818,13 +7992,11 @@ describe('SDK cleanup ownership regressions', () => {
       await waitUntil(() =>
         hostErrors.some((message) => message.includes('Failed to cleanup session resources')),
       );
-      expect(manager.readAgentResponse('worker', parent).status).toBe('completed');
+      expect(manager.getAgentInfo('worker', parent).status).toBe('completed');
       fixture = configureCoreFixture();
       await manager.sendMessage(parent, 'worker', 'after recovery');
       await coldDispose(manager, info);
-      expect(manager.readAgentResponse('worker', parent).finalResponse).toBe(
-        'response:after recovery',
-      );
+      expect(manager.getAgentInfo('worker', parent).finalResponse).toBe('response:after recovery');
       // The reopened session derives the same sessionId from its JSONL and is disposed
       // exactly once on its own close; the throwing callback fires only for the first call.
       expect(cleanups).toBe(2);

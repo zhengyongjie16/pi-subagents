@@ -55,9 +55,16 @@ const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 const MIN_WAIT_TIMEOUT_MS = 10_000;
 const MAX_WAIT_TIMEOUT_MS = 3_600_000;
 
-const agentStatusSchema = Type.Unsafe<AgentInfo['status']>(
-  StringEnum(['starting', 'running', 'completed', 'failed', 'interrupted']),
-);
+const agentStatusSchema = Type.Union([
+  Type.Literal('pending_init'),
+  Type.Literal('running'),
+  Type.Literal('interrupted'),
+  Type.Object(
+    { completed: Type.Union([Type.String(), Type.Null()]) },
+    { additionalProperties: false },
+  ),
+  Type.Object({ errored: Type.String() }, { additionalProperties: false }),
+]);
 
 function textResult(text: string, details?: any) {
   return { content: [{ type: 'text' as const, text }], details };
@@ -76,19 +83,20 @@ function boundedText(
 ): BoundedText {
   const truncation = truncateHead(text, { maxBytes, maxLines });
   if (!truncation.truncated) return { text };
-  const fullOutputPath = writeFullToolOutput(text);
-  const notice = `\n\n[Output truncated: ${truncation.outputLines} of ${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}). Full output saved to: ${fullOutputPath}]`;
-  return { text: truncation.content + notice, fullOutputPath, truncated: true };
-}
-
-function boundedTextResult(text: string, details?: any) {
-  const bounded = boundedText(text);
-  if (!bounded.truncated) return textResult(bounded.text, details);
-  return textResult(bounded.text, {
-    ...details,
-    fullOutputPath: bounded.fullOutputPath,
-    truncated: true,
-  });
+  const preview = `${truncation.content}\n\n[Output truncated: ${truncation.outputLines} of ${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}).`;
+  try {
+    const fullOutputPath = writeFullToolOutput(text);
+    return {
+      text: `${preview} Full output saved to: ${fullOutputPath}]`,
+      fullOutputPath,
+      truncated: true,
+    };
+  } catch (error) {
+    return {
+      text: `${preview} Could not save full output: ${formatAgentError(error)}]`,
+      truncated: true,
+    };
+  }
 }
 
 function parentSessionId(ctx: any): string {
@@ -114,7 +122,7 @@ function formatColumn(text: string, width: number): string {
 
 function runtimeLabel(info: AgentInfo): string {
   const start = info.startedAt || info.createdAt;
-  const final = ['completed', 'failed', 'interrupted'].includes(info.status);
+  const final = ['completed', 'errored', 'interrupted'].includes(info.status);
   const end = final ? info.completedAt || info.updatedAt || Date.now() : Date.now();
   return formatDuration(end - start);
 }
@@ -126,12 +134,16 @@ function browserTimestamp(...values: (number | undefined)[]): number {
 /** Presentation-only grouping; keep the public list tool's ordering unchanged. */
 function listBrowserAgents(manager: AgentManager, scopeId: string) {
   const infos = manager.listAgentInfos(undefined, scopeId);
-  const active = infos.filter((info) => info.status === 'starting' || info.status === 'running');
+  const active = infos.filter(
+    (info) => info.status === 'pending_init' || info.status === 'running',
+  );
   active.sort(
     (a, b) =>
       browserTimestamp(b.createdAt) - browserTimestamp(a.createdAt) || a.id.localeCompare(b.id),
   );
-  const done = infos.filter((info) => ['completed', 'failed', 'interrupted'].includes(info.status));
+  const done = infos.filter((info) =>
+    ['completed', 'errored', 'interrupted'].includes(info.status),
+  );
   done.sort(
     (a, b) =>
       browserTimestamp(b.completedAt, b.updatedAt, b.createdAt) -
@@ -222,7 +234,7 @@ export default async function index_(pi: ExtensionAPI) {
   let widgetStatusCounts: AgentStatusCounts = {
     running: 0,
     completed: 0,
-    failed: 0,
+    errored: 0,
     interrupted: 0,
   };
 
@@ -286,9 +298,9 @@ export default async function index_(pi: ExtensionAPI) {
   const refreshAgentWidget = () => {
     if (activeContext?.mode !== 'tui') return;
     // Recount only on lifecycle events, never on the 200ms rendering ticks.
-    const counts = { running: 0, completed: 0, failed: 0, interrupted: 0 };
+    const counts = { running: 0, completed: 0, errored: 0, interrupted: 0 };
     for (const status of agentStatuses.values())
-      counts[status === 'starting' ? 'running' : status]++;
+      counts[status === 'pending_init' ? 'running' : status]++;
     widgetStatusCounts = counts;
     widgetContext = activeContext;
     agentWidget.attach(activeContext);
@@ -301,8 +313,9 @@ export default async function index_(pi: ExtensionAPI) {
       {
         agent_name: event.taskName,
         status: event.status,
-        ...(event.finalResponse !== undefined ? { final_response: event.finalResponse } : {}),
-        ...(event.error ? { error: event.error } : {}),
+        ...(event.status === 'completed'
+          ? { final_response: event.finalResponse }
+          : { error: event.error }),
       },
       null,
       2,
@@ -354,7 +367,7 @@ export default async function index_(pi: ExtensionAPI) {
       // Preserve early-start and external-host indicators without polling storage.
       const fallback: AgentWidgetSnapshot[] = [];
       for (const [taskName, status] of agentStatuses) {
-        if ((status === 'starting' || status === 'running') && !names.has(taskName))
+        if ((status === 'pending_init' || status === 'running') && !names.has(taskName))
           fallback.push({
             taskName,
             color: agentColors.get(taskName),
@@ -381,14 +394,7 @@ export default async function index_(pi: ExtensionAPI) {
       onError: reportError,
       onActivityChange: (event) => {
         if (!isCurrentSession(event.parentSessionId)) return;
-        if (event.status) agentStatuses.set(event.taskName, event.status);
-        else if (event.active) agentStatuses.set(event.taskName, 'running');
-        else {
-          // A legacy notification cannot invent a terminal status or erase a known one.
-          const previous = agentStatuses.get(event.taskName);
-          if (previous === 'starting' || previous === 'running')
-            agentStatuses.delete(event.taskName);
-        }
+        agentStatuses.set(event.taskName, event.status);
         refreshAgentWidget();
       },
       onCompletion: deliverCompletion,
@@ -413,12 +419,9 @@ export default async function index_(pi: ExtensionAPI) {
   pi.registerMessageRenderer(
     completionMessageType,
     (message: any, { expanded }: any, theme: Theme) => {
-      const status = message.details?.status;
+      const { agent_name, status } = message.details;
       const color = agentStatusColor(status);
-      let text = theme.fg(
-        color,
-        `${status === 'completed' ? '✓' : '✗'} ${message.details?.agent_name || 'subagent'} ${status || 'finished'}`,
-      );
+      let text = theme.fg(color, `${status === 'completed' ? '✓' : '✗'} ${agent_name} ${status}`);
       if (expanded && typeof message.content === 'string')
         text += `\n${theme.fg('dim', message.content)}`;
       return new Text(text, 0, 0);
@@ -590,7 +593,7 @@ ${getAgentDefinitionsDescription()}`;
     parentInterrupted = false;
     agentStatuses.clear();
     agentColors.clear();
-    widgetStatusCounts = { running: 0, completed: 0, failed: 0, interrupted: 0 };
+    widgetStatusCounts = { running: 0, completed: 0, errored: 0, interrupted: 0 };
     try {
       spawnModels = resolveSpawnModels(ctx);
     } catch (error: any) {
@@ -619,7 +622,7 @@ ${getAgentDefinitionsDescription()}`;
     activeContext = undefined;
     agentStatuses.clear();
     agentColors.clear();
-    widgetStatusCounts = { running: 0, completed: 0, failed: 0, interrupted: 0 };
+    widgetStatusCounts = { running: 0, completed: 0, errored: 0, interrupted: 0 };
     try {
       agentWidget.dispose();
     } catch (error) {
@@ -703,14 +706,14 @@ ${getAgentDefinitionsDescription()}`;
     name: 'list_agents',
     label: 'List Agents',
     description:
-      'List all current-session resident subagents held by this manager, including initializing and retained idle sessions until cleanup completes. Unloaded history is omitted. Active first, then newest-created within each group.',
+      'List resident subagents in this session, including initializing and idle ones, with their latest status and any final text or error.',
     parameters: Type.Object(
       {
         path_prefix: Type.Optional(
           Type.String({
             pattern: TASK_PATH_PATTERN,
             description:
-              'Relative task path: matches itself and descendants. No whitespace or leading/trailing slash; omit for all.',
+              'Relative task-name prefix (no trailing slash). Matches whole segments; omit for all.',
           }),
         ),
       },
@@ -744,83 +747,26 @@ ${getAgentDefinitionsDescription()}`;
       ctx: any,
     ) {
       const listed = ensureManager(ctx).listAgents(params.path_prefix, parentSessionId(ctx));
-      const agents = [
-        ...listed.filter(
-          (agent) => agent.agent_status === 'starting' || agent.agent_status === 'running',
-        ),
-        ...listed.filter(
-          (agent) => agent.agent_status !== 'starting' && agent.agent_status !== 'running',
-        ),
-      ];
+      const isActive = (agent: (typeof listed)[number]) =>
+        agent.agent_status === 'pending_init' || agent.agent_status === 'running';
+      const agents = [...listed.filter(isActive), ...listed.filter((agent) => !isActive(agent))];
       const result = { agents };
+      const { text, ...preview } = boundedText(JSON.stringify(result, null, 2));
       return {
-        ...textResult(JSON.stringify(result, null, 2), result),
+        ...textResult(text, { agentCount: agents.length, ...preview }),
         structuredContent: result,
       };
     },
     renderCall(_args: any, theme: Theme) {
       return new Text(theme.fg('toolTitle', theme.bold('list_agents')), 0, 0);
     },
-    renderResult(result: any, options: any, theme: Theme, context: ToolRenderContext) {
+    renderResult(result, { expanded }, theme, context) {
       if (context.isError) return new Text(theme.fg('error', '✗ list failed'), 0, 0);
-      const agents = result.details?.agents ?? [];
-      if (!options.expanded)
-        return new Text(theme.fg('success', `✓ ${agents.length} agents`), 0, 0);
-      return new Text(result.content?.[0]?.text || JSON.stringify(result.details, null, 2), 0, 0);
-    },
-  });
-
-  pi.registerTool({
-    name: 'read_agent_response',
-    label: 'Read Agent Response',
-    description:
-      "Read an agent's latest run status and available final text/error, not a transcript. Non-blocking; use for rereads or programmatic access, not polling.",
-    parameters: Type.Object({
-      target: Type.String({ description: 'Current-session agent name, e.g. review.' }),
-    }),
-    outputSchema: Type.Object(
-      {
-        agent_name: Type.String(),
-        status: agentStatusSchema,
-        finalResponse: Type.Optional(Type.String()),
-        error: Type.Optional(Type.String()),
-        last_task_message: Type.Union([Type.String(), Type.Null()], {
-          description: 'Latest task/steering message preview, not full text.',
-        }),
-      },
-      { additionalProperties: false },
-    ),
-    async execute(
-      _id: string,
-      params: any,
-      _signal: AbortSignal | undefined,
-      _onUpdate: any,
-      ctx: any,
-    ) {
-      try {
-        const result = ensureManager(ctx).readAgentResponse(params.target, parentSessionId(ctx));
-        return {
-          ...boundedTextResult(JSON.stringify(result, null, 2), {
-            agent_name: result.agent_name,
-            status: result.status,
-          }),
-          structuredContent: { ...result },
-        };
-      } catch (error) {
-        throw new Error(`read_agent_response failed: ${formatAgentError(error)}`);
-      }
-    },
-    renderCall(args: any, theme: Theme) {
-      return new Text(
-        theme.fg('toolTitle', theme.bold('read_agent_response ')) +
-          theme.fg('accent', args.target || '?'),
-        0,
-        0,
-      );
-    },
-    renderResult(result: any, _options: any, theme: Theme, context: ToolRenderContext) {
-      if (context.isError) return new Text(theme.fg('error', '✗ read failed'), 0, 0);
-      return new Text(theme.fg('success', `✓ ${result.details?.agent_name || 'response'}`), 0, 0);
+      const count = result.details?.agentCount;
+      if (!expanded && typeof count === 'number')
+        return new Text(theme.fg('success', `✓ ${count} agents`), 0, 0);
+      const text = result.content.flatMap((part) => (part.type === 'text' ? [part.text] : []));
+      return new Text(text.join('\n'), 0, 0);
     },
   });
 
@@ -905,11 +851,9 @@ ${getAgentDefinitionsDescription()}`;
     },
     renderResult(result: any, _options: any, theme: Theme, context: ToolRenderContext) {
       if (context.isError) return new Text(theme.fg('error', '✗ interrupt failed'), 0, 0);
-      return new Text(
-        theme.fg('warning', `↯ previous: ${result.details?.previous_status || 'unknown'}`),
-        0,
-        0,
-      );
+      const previous = result.details?.previous_status;
+      const text = typeof previous === 'string' ? `↯ previous: ${previous}` : '';
+      return new Text(theme.fg('warning', text), 0, 0);
     },
   });
 
@@ -1048,7 +992,7 @@ ${getAgentDefinitionsDescription()}`;
                 )
               : 0;
           const viewEnd = Math.min(viewStart + pageSize, entries.length);
-          const statusWidth = 11;
+          const statusWidth = 12;
           const durationWidth = 6;
           const thinkingWidth = 7;
           const fixedWidth = 2 + statusWidth + durationWidth + thinkingWidth + 4;
