@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import type { Theme } from '@earendil-works/pi-coding-agent';
 import {
   backgroundAnsi,
@@ -14,6 +14,7 @@ import { stripVTControlCharacters } from 'node:util';
 import {
   agentStatusColor,
   paintAgentLine,
+  pickRandomAgentColor,
   renderAgentBadge,
   resolveAgentColor,
 } from '../src/color.js';
@@ -103,6 +104,19 @@ test('lifecycle status colors retain the original browser mapping', () => {
     expect(agentStatusColor(status)).toBe(color);
 });
 
+test('automatic colors sample the existing palette with replacement', () => {
+  const random = spyOn(Math, 'random');
+  try {
+    random.mockReturnValue(0);
+    expect(pickRandomAgentColor()).toBe(palette.red);
+    expect(pickRandomAgentColor()).toBe(palette.red);
+    random.mockReturnValue(1 - Number.EPSILON);
+    expect(pickRandomAgentColor()).toBe(palette.navy);
+  } finally {
+    random.mockRestore();
+  }
+});
+
 describe('configured agent colors', () => {
   test.each(Object.entries(palette))('normalizes %s and its explicit hex', (name, hex) => {
     expect(resolveAgentColor(name)).toBe(hex);
@@ -110,7 +124,7 @@ describe('configured agent colors', () => {
     expect(resolveAgentColor('  ' + hex.toLowerCase() + '  ')).toBe(hex);
   });
 
-  test('invalid/missing values never throw or allocate an automatic color', () => {
+  test('normalization and rendering do not assign colors to invalid or missing values', () => {
     const theme = nativeTheme('dark');
     for (const value of invalid) {
       expect(resolveAgentColor(value)).toBeUndefined();

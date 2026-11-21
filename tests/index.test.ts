@@ -15,7 +15,7 @@ import {
   visibleWidth,
   type Terminal,
 } from '@earendil-works/pi-tui';
-import { renderAgentBadge, resolveAgentColor } from '../src/color.js';
+import { resolveAgentColor } from '../src/color.js';
 import { nativeTheme } from './fixtures/ui-theme.js';
 import { AgentSummaryWidget } from '../src/widget.js';
 import type { AgentInfo } from '../src/core.js';
@@ -3375,7 +3375,25 @@ describe('extension completion delivery and TUI', () => {
       },
     );
 
-    test('template colors flow through real spawn metadata and snapshots to the widget and browser without template IO', async () => {
+    test('drops badge padding before clipping task names in narrow browser rows', async () => {
+      await withBrowser(async (f) => {
+        const theme = nativeTheme('dark');
+        f.theme = f.ctx.ui.theme = theme;
+        const names = ['review-a', 'review-b'];
+        for (const name of names) f.put(name, { color: 'red' });
+
+        await f.open((browser: any) => {
+          const width = 40;
+          const lines: string[] = browser.render(width);
+          const background = backgroundAnsi(parseColor('#DC2626'), theme.getColorMode());
+          for (const name of names) expect(lines.join('\n')).toContain(background + name);
+          expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+          browser.handleInput('q');
+        });
+      });
+    });
+
+    test('persisted spawn colors reach the widget and browser without template IO', async () => {
       await withBrowser(async (f) => {
         const directory = path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents');
         const templates = [
@@ -3402,8 +3420,9 @@ describe('extension completion delivery and TUI', () => {
         f.ctx.ui.setWidget = (_key: string, content: any) => {
           if (typeof content === 'function') component = content(f.tui, theme);
         };
+        const badges: string[] = [];
         try {
-          for (const [name, , color] of templates) {
+          for (const [name, , expectedColor] of templates) {
             await manager.spawnAgent({
               task_name: name,
               message: 'hold end-to-end',
@@ -3413,31 +3432,32 @@ describe('extension completion delivery and TUI', () => {
               inheritedProvider: 'test',
               inheritedModelId: 'fake',
             });
-            expect(manager.getAgentInfo(name, f.parentId).color).toBe(color);
+            const { color } = manager.getAgentInfo(name, f.parentId);
+            if (expectedColor) expect(color).toBe(expectedColor);
+            expect(color).toMatch(/^#[0-9A-F]{6}$/);
+            badges.push(backgroundAnsi(parseColor(color!), theme.getColorMode()) + ` ${name} `);
           }
+          const expectBadges = (lines: string[]) => {
+            const output = lines.join('\n');
+            for (const badge of badges) expect(output).toContain(badge);
+          };
           // Rendering must not rediscover types; their definitions can be gone now.
           for (const [name] of templates) fs.rmSync(path.join(directory, name + '.md'));
           widget.attach(f.ctx);
           const reads = spyOn(fs, 'readFileSync'),
             scans = spyOn(fs, 'readdirSync');
           try {
-            const summary = component.render(140);
-            expect(summary[1]).toContain(renderAgentBadge('e2e-colored', theme, 'cyan'));
-            expect(summary[3]).not.toMatch(/\x1b\[48;/);
-            expect(summary[5]).not.toMatch(/\x1b\[48;/);
+            expectBadges(component.render(140));
             widget.refresh();
             component.render(140);
             expect(reads).not.toHaveBeenCalled();
             expect(scans).not.toHaveBeenCalled();
             await f.open((browser: any) => {
-              const lines = browser.render(120);
-              expect(
-                lines.find((line: string) =>
-                  stripVTControlCharacters(line).includes('e2e-colored'),
-                ),
-              ).toContain(renderAgentBadge('e2e-colored', theme, 'cyan'));
-              expect(lines.join('')).toContain('e2e-invalid');
-              expect(lines.join('')).toContain('e2e-plain');
+              expectBadges(browser.render(120));
+              const lists = f.list.mock.calls.length;
+              browser.handleInput('r');
+              expectBadges(browser.render(120));
+              expect(f.list).toHaveBeenCalledTimes(lists + 1);
               browser.handleInput('q');
             });
             expect(

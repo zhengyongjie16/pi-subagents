@@ -12,7 +12,7 @@ import {
   type ContextUsage,
 } from '@earendil-works/pi-coding-agent';
 import { createChildSession, promptChildSession, shutdownChildSession } from './runtime.js';
-import { resolveAgentColor } from './color.js';
+import { pickRandomAgentColor, resolveAgentColor } from './color.js';
 import { parseStreamingJson, type AssistantMessage } from '@earendil-works/pi-ai';
 
 export const PACKAGE_BASENAME = 'pi-subagents';
@@ -101,7 +101,6 @@ export interface AgentDefinition {
 const BUILTIN_AGENT_DEFINITIONS: readonly AgentDefinition[] = [
   {
     name: 'explorer',
-    color: resolveAgentColor('neon-green'),
     description: `Use explorer for specific codebase questions.
 Explorers are fast and authoritative.
 They can be used to ask specific, well-scoped questions on the codebase.
@@ -112,12 +111,10 @@ Rules:
   },
   {
     name: 'general',
-    color: resolveAgentColor('neon-cyan'),
     description: 'General agent',
   },
   {
     name: 'worker',
-    color: resolveAgentColor('rose'),
     description: `Use for execution and production work.
 Typical tasks:
 - Implement part of a feature
@@ -136,7 +133,7 @@ export interface AgentInfo {
   parentSessionId: string;
   parentSessionFile?: string;
   agentType?: string;
-  /** Effective template badge color captured at creation; absent in older records. */
+  /** Effective badge color assigned at creation. */
   color?: string;
   provider: string;
   modelId: string;
@@ -1422,7 +1419,7 @@ export class AgentManager {
         parentSessionId: params.parentSessionId,
         parentSessionFile: params.parentSessionFile,
         agentType: params.agent_type,
-        color: definition?.color,
+        color: definition?.color ?? pickRandomAgentColor(),
         provider,
         modelId,
         model: `${provider}:${modelId}`,

@@ -489,13 +489,11 @@ describe('agent templates', () => {
       expect(definition.thinking).toBeUndefined();
       expect(definition.tools).toBeUndefined();
       expect(definition.extensions).toBeUndefined();
+      expect(definition.color).toBeUndefined();
     }
-    expect(getAgentDefinition('explorer')?.color).toBe('#10B981');
     expect(getAgentDefinition('explorer')?.prompt).toBeUndefined();
-    expect(getAgentDefinition('general')?.color).toBe('#06B6D4');
     expect(getAgentDefinition('general')?.prompt).toBeUndefined();
     const worker = getAgentDefinition('worker')!;
-    expect(worker.color).toBe('#F43F5E');
     expect(worker.description).toContain('Explicitly assign ownership');
     expect(worker.description).not.toContain('You are not alone in the codebase');
     expect(worker.prompt).toContain('You are not alone in the codebase');
@@ -1842,13 +1840,13 @@ describe('strict list path prefixes', () => {
 
 describe('widget snapshots', () => {
   test.each(['warm', 'cold'] as const)(
-    'captures template color for repeated instances, persistence and %s continuation',
+    'captures effective color for repeated instances, persistence and %s continuation',
     async (mode) => {
       const parent = 'configured-color-' + randomUUID();
       const directory = path.join(TEST_AGENT_DIR, 'pi-subagents', 'agents');
       fs.mkdirSync(directory, { recursive: true });
       const templates = [
-        ['badge-valid', 'color: " ReD "', '#DC2626'],
+        ['badge-valid', 'color: "#aAbBcC"', '#AABBCC'],
         ['badge-absent', '', undefined],
         ['badge-invalid', 'color: "not-a-color"', undefined],
       ] as const;
@@ -1859,12 +1857,9 @@ describe('widget snapshots', () => {
         );
       const manager = new AgentManager();
       try {
-        const agents = [...templates, templates[0]].map(([type, , color], index) => ({
-          type,
-          color,
-          name: 'worker-' + index,
-        }));
-        for (const { type, color, name } of agents) {
+        const agents: { name: string; color: AgentInfo['color'] }[] = [];
+        for (const [index, [type, , configuredColor]] of [...templates, templates[0]].entries()) {
+          const name = 'worker-' + index;
           expect(
             await manager.spawnAgent({
               ...spawnParams(parent, name, 'hold first'),
@@ -1872,8 +1867,10 @@ describe('widget snapshots', () => {
             }),
           ).toEqual({ task_name: name, nickname: null });
           const info = manager.getAgentInfo(name, parent);
-          expect(info.color).toBe(color);
-          expect(JSON.parse(fs.readFileSync(info.infoFile, 'utf8')).color).toBe(color);
+          if (configuredColor === undefined) expect(info.color).toMatch(/^#[0-9A-F]{6}$/);
+          else expect(info.color).toBe(configuredColor);
+          expect(JSON.parse(fs.readFileSync(info.infoFile, 'utf8')).color).toBe(info.color);
+          agents.push({ name, color: info.color });
         }
         expect(
           manager
@@ -2468,7 +2465,7 @@ describe('spawn model and thinking resolution', () => {
           lastTaskMessage: 'first task',
         });
         expect(info.agentType).toBe(agentType);
-        expect(info.color).toBe(definition?.color);
+        expect(info.color).toMatch(/^#[0-9A-F]{6}$/);
         expect(info.tools).toBeUndefined();
         const firstInput = definition?.prompt ? definition.prompt + '\n\nfirst task' : 'first task';
         expect(fixture.instances[0].inputs.map(({ text }) => text)).toEqual([firstInput]);
@@ -2502,7 +2499,7 @@ describe('spawn model and thinking resolution', () => {
       await settled(manager, info);
       expect(info).toMatchObject({ provider: 'test', modelId: 'fake', thinking: 'low' });
       expect(info.agentType).toBeUndefined();
-      expect(info.color).toBeUndefined();
+      expect(info.color).toMatch(/^#[0-9A-F]{6}$/);
       expect(fixture.instances[0].inputs[0].text).toBe('first task');
       await expect(
         manager.spawnAgent({

@@ -141,6 +141,8 @@ function agentHeader(
   color: string | undefined,
 ): string {
   const name = sanitize(snapshot.taskName);
+  const nameWidth = visibleWidth(name);
+  const minNameWidth = Math.min(nameWidth, 4);
   const badgePadding = color ? 2 : 0;
   const thinking = sanitize(snapshot.thinking ?? '');
   const elapsed = snapshot.elapsedMs;
@@ -155,7 +157,7 @@ function agentHeader(
   const suffixWidth = thinking ? visibleWidth(`/${thinking}`) : 0;
   const fixedWidth = visibleWidth(prefix) + visibleWidth(tail) + (tail ? 3 : 0) + badgePadding;
   const nameBudget = width - fixedWidth - (hasModel ? 3 + suffixWidth : 0);
-  if (nameBudget >= Math.min(visibleWidth(name), 4)) {
+  if (nameBudget >= minNameWidth) {
     // Keep statistics and /thinking intact; use only the remaining columns for the model.
     const shownName = fitText(
       name,
@@ -171,23 +173,24 @@ function agentHeader(
     );
   }
 
-  // Compact statistics still outrank the model at narrow widths.
+  // Drop badge padding before clipping the name or giving up compact statistics.
   const compactStats = [tokenText(snapshot, theme, true), duration].filter(Boolean).join(' ');
   const compactTail = [thinking ? `/${thinking}` : '', compactStats].filter(Boolean).join(' ');
-  const compactNameBudget =
-    width - visibleWidth(compactTail) - (compactTail ? 1 : 0) - badgePadding;
-  if (compactNameBudget >= Math.min(visibleWidth(name), 4)) {
+  const compactWidth = width - visibleWidth(compactTail) - (compactTail ? 1 : 0);
+  const compactPadding = compactWidth >= nameWidth + badgePadding ? badgePadding : 0;
+  const compactNameBudget = compactWidth - compactPadding;
+  if (compactNameBudget >= minNameWidth) {
     const shownName = fitText(name, compactNameBudget);
     const modelBudget =
       width -
       visibleWidth(shownName) -
-      badgePadding -
+      compactPadding -
       visibleWidth(compactStats) -
       (compactStats ? 1 : 0) -
       1;
     const model = hasModel ? modelText(snapshot, modelBudget) : '';
     return [
-      renderAgentBadge(shownName, theme, color),
+      renderAgentBadge(shownName, theme, color, 'accent', compactPadding > 0),
       model ? paint(theme, 'dim', model) : '',
       compactStats,
     ]
@@ -195,7 +198,7 @@ function agentHeader(
       .join(' ');
   }
   const status = snapshot.status === 'pending_init' ? 'initializing' : 'running';
-  return renderAgentBadge(name, theme, color) + ' ' + paint(theme, 'dim', status);
+  return renderAgentBadge(name, theme, color, 'accent', false) + ' ' + paint(theme, 'dim', status);
 }
 
 function agentsTitle(active: boolean, theme?: Theme): string {

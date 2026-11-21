@@ -35,6 +35,7 @@ const NAMED_AGENT_COLORS: Readonly<Record<string, string>> = {
   slate: '#64748B',
   navy: '#1E3A8A',
 };
+const AGENT_COLOR_POOL = Object.values(NAMED_AGENT_COLORS);
 const BLACK = parseColor('#000000');
 const WHITE = parseColor('#FFFFFF');
 
@@ -43,12 +44,16 @@ export function agentStatusColor(status: string | undefined): 'success' | 'error
   return status === 'completed' ? 'success' : status === 'errored' ? 'error' : 'warning';
 }
 
-/** Invalid configuration (including malformed old metadata) is always plain text. */
+/** Normalize a supported name or six-digit hex value; invalid values are absent. */
 export function resolveAgentColor(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const normalized = value.trim().toLowerCase();
   const resolved = NAMED_AGENT_COLORS[normalized] ?? normalized;
   return /^#[0-9a-f]{6}$/i.test(resolved) ? resolved.toUpperCase() : undefined;
+}
+
+export function pickRandomAgentColor(): string {
+  return AGENT_COLOR_POOL[Math.floor(Math.random() * AGENT_COLOR_POOL.length)];
 }
 
 // Strip terminal escapes before controls: deleting ESC first exposes escape payloads.
@@ -59,12 +64,13 @@ export function sanitizeAgentText(value: string): string {
     .trim();
 }
 
-/** Callers reserve two columns for badge padding before clipping the plain name. */
+/** A colored badge adds a space on each side unless space is tight. */
 export function renderAgentBadge(
   name: string,
   theme: Theme | undefined,
   color: string | undefined,
   fallback: 'accent' | 'text' = 'accent',
+  padded = true,
 ): string {
   // Native truncation can append a full reset; never allow it inside the badge.
   // Preserve caller-supplied column padding, unlike ordinary untrusted text.
@@ -83,7 +89,7 @@ export function renderAgentBadge(
     return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
   });
   const luminance = 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
-  return styleText(` ${text} `, { fg: luminance > 0.179 ? BLACK : WHITE, bg }, mode);
+  return styleText(padded ? ` ${text} ` : text, { fg: luminance > 0.179 ? BLACK : WHITE, bg }, mode);
 }
 
 /** Only UI selection paints a whole row; identity color belongs to the name badge. */

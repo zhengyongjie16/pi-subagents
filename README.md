@@ -64,7 +64,7 @@ Three built-in templates are available without creating any template files:
 | `general` | General-purpose work |
 | `worker` | Implementation, fixes, and refactoring; its task prefix reminds it to preserve others' edits |
 
-Built-ins do not pin a provider, model, thinking level, tools, or extensions; they follow the normal inheritance rules below. Omitting `agent_type` still creates a generic subagent, without applying `general` or another template.
+Built-ins do not pin a provider, model, thinking level, tools, or extensions; they follow the normal inheritance rules below. None sets a fixed `color`. Omitting `agent_type` still creates a generic subagent, without applying `general` or another template.
 
 Optional Markdown templates define additional roles or replace built-ins:
 
@@ -87,7 +87,9 @@ tools: read,grep,find,ls
 Review the assigned files without modifying them. Return concise findings with file paths.
 ```
 
-`model` and `thinking` inherit from the parent unless specified. A template model uses its `provider` when set, otherwise the parent's provider; without a model, both provider and model inherit. `color` accepts supported names such as `blue` or a six-digit hex color.
+`model` and `thinking` inherit from the parent unless specified. A template model uses its `provider` when set, otherwise the parent's provider; without a model, both provider and model inherit.
+
+`color` sets the background of the agent's name badge in the widget and browser. A valid template `color` (a supported name such as `blue` or a six-digit hex color) takes precedence. If it is missing, empty, or invalid, one color is drawn at random from the existing named palette at creation and saved for that agent.
 
 ### Tools and extensions
 

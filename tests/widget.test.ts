@@ -206,6 +206,28 @@ describe('configured summary badges', () => {
     );
   }
 
+  test('keeps compact statistics when badge padding does not fit', () => {
+    const theme = nativeTheme('dark');
+    const f = host({ theme });
+    controller(() => [
+      snapshot({
+        taskName: 'review',
+        color: 'blue',
+        provider: 'test',
+        modelId: 'fake',
+        thinking: 'minimal',
+        tokens: 1_000,
+        contextUsage: usage(62),
+        compactionCount: 1,
+        elapsedMs: 123_000,
+      }),
+    ]).attach(f.ctx);
+    const lines = f.render(32);
+    expectFit(lines, 32);
+    expect(lines[1]).toContain(backgroundAnsi(parseColor('#6A9BCC'), theme.getColorMode()));
+    expect(stripVTControlCharacters(lines[1])).toContain('/minimal 1.0k(62%·↓1) 123s');
+  });
+
   test('shared template colors survive removal and theme invalidation without sampling, IO or remounting', () => {
     const dark = nativeTheme('dark');
     let agents = [

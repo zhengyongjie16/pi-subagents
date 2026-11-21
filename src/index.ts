@@ -1025,11 +1025,14 @@ ${getAgentDefinitionsDescription()}`;
               const isSelected = index === selected;
               const color = resolveAgentColor(info.color);
               const pointer = isSelected ? fg('accent', '› ') : '  ';
+              const shownName = formatColumn(info.taskName, nameWidth).trimEnd();
+              const padded = Boolean(color && visibleWidth(shownName) + 2 <= nameWidth);
               const badge = renderAgentBadge(
-                formatColumn(info.taskName, nameWidth - (color ? 2 : 0)).trimEnd(),
+                shownName,
                 theme,
                 color,
                 isSelected ? 'accent' : 'text',
+                padded,
               );
               const name = badge + ' '.repeat(Math.max(0, nameWidth - visibleWidth(badge)));
               const details = [
