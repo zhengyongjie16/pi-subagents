@@ -432,7 +432,7 @@ export default async function index_(pi: ExtensionAPI) {
     name: 'spawn_agent',
     label: 'Spawn Agent',
     get description() {
-      return `Spawn a subagent for a well-scoped task, sharing the parent's working directory but not its conversation. Returns on task acceptance; results and errors arrive automatically. Continue other assigned work; use wait_agent only when blocked.
+      return `Spawn a subagent for a well-scoped task, sharing your working directory but not your conversation. Returns on task acceptance; results and errors arrive automatically as notifications. Continue other work; use wait_agent only when blocked.
 
 Agent templates:
 ${getAgentDefinitionsDescription()}`;
@@ -441,13 +441,15 @@ ${getAgentDefinitionsDescription()}`;
       return Type.Object({
         task_name: Type.String({
           description:
-            'Unique in this parent session; use ASCII letters, digits, _, -, and internal / separators.',
+            'Task name for the new subagent. Use lowercase letters, digits, and underscores. Unique in the parent session.',
         }),
         message: Type.String({
           description: 'Self-contained task: context, paths, constraints, and expected output.',
         }),
         agent_type: Type.Optional(
-          Type.String({ description: 'Listed template name; omit for a generic subagent.' }),
+          Type.String({
+            description: 'Name of a listed template. Omit to spawn without a template.',
+          }),
         ),
         ...(spawnModels.size
           ? {
@@ -455,7 +457,8 @@ ${getAgentDefinitionsDescription()}`;
               model: Type.Optional(
                 Type.Unsafe<string>(
                   StringEnum([...spawnModels.keys()], {
-                    description: 'Model override; defaults to template, then parent.',
+                    description:
+                      'Model override for the new subagent. Omit unless an explicit override is needed.',
                   }),
                 ),
               ),
@@ -463,7 +466,7 @@ ${getAgentDefinitionsDescription()}`;
                 Type.Unsafe<ThinkingLevel>(
                   StringEnum(THINKING_LEVELS, {
                     description:
-                      'Reasoning effort; defaults to template, then parent, clamped to model support.',
+                      'Reasoning effort override for the new subagent. Omit to inherit the parent effort.',
                   }),
                 ),
               ),
@@ -773,10 +776,12 @@ ${getAgentDefinitionsDescription()}`;
     name: 'send_message',
     label: 'Send Message',
     description:
-      'Steer a running subagent, or start another run with its history once idle. Returns on input acceptance, not completion.',
+      'Send a message to an existing agent. Steer it if running, or start a new turn with its history if idle. Returns on input acceptance, not completion.',
     parameters: Type.Object({
-      target: Type.String({ description: 'Current-session agent name, e.g. review.' }),
-      message: Type.String({ description: 'Message text to send.' }),
+      target: Type.String({
+        description: 'Current-session task name to message (from spawn_agent).',
+      }),
+      message: Type.String({ description: 'Message text to send to the target agent.' }),
     }),
     async execute(
       _id: string,
@@ -824,7 +829,9 @@ ${getAgentDefinitionsDescription()}`;
     description:
       "Interrupt an agent's current run, if any. The agent remains available for messages and follow-up tasks.",
     parameters: Type.Object({
-      target: Type.String({ description: 'Current-session task name to interrupt (from spawn_agent).' }),
+      target: Type.String({
+        description: 'Current-session task name to interrupt (from spawn_agent).',
+      }),
     }),
     async execute(
       _id: string,

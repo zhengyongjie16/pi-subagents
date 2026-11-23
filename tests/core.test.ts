@@ -128,9 +128,19 @@ describe('observer stream reconstruction', () => {
   test('widget shows active nested leaves and cleans up a finished branch', () => {
     const broadcaster = new EventBroadcaster(randomUUID());
     const start = (toolCallId: string, toolName: string, parentToolCallId?: string) =>
-      broadcaster.broadcast({ type: 'tool_execution_start', toolCallId, toolName, parentToolCallId });
+      broadcaster.broadcast({
+        type: 'tool_execution_start',
+        toolCallId,
+        toolName,
+        parentToolCallId,
+      });
     const end = (toolCallId: string, parentToolCallId?: string) =>
-      broadcaster.broadcast({ type: 'tool_execution_end', toolCallId, parentToolCallId, isError: true });
+      broadcaster.broadcast({
+        type: 'tool_execution_end',
+        toolCallId,
+        parentToolCallId,
+        isError: true,
+      });
     const names = () => broadcaster.getWidgetActivity().activeTools;
 
     start('script', 'codemode');

@@ -89,7 +89,11 @@ export function renderAgentBadge(
     return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
   });
   const luminance = 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
-  return styleText(padded ? ` ${text} ` : text, { fg: luminance > 0.179 ? BLACK : WHITE, bg }, mode);
+  return styleText(
+    padded ? ` ${text} ` : text,
+    { fg: luminance > 0.179 ? BLACK : WHITE, bg },
+    mode,
+  );
 }
 
 /** Only UI selection paints a whole row; identity color belongs to the name badge. */

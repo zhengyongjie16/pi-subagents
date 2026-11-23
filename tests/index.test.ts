@@ -290,10 +290,9 @@ test('keeps model-facing guidance compact without losing async contracts', () =>
     assert.match(description, /results.*errors.*arrive automatically/i);
     assert.match(description, /continue other.*work/i);
     assert.ok(description.includes("wait_agent only when blocked"));
-    assert.match(spawn.parameters.properties.task_name.description, /unique.*parent session/i);
-    assert.ok(spawn.parameters.properties.task_name.description.includes("ASCII letters, digits, _, -, and internal /"));
+    assert.equal(spawn.parameters.properties.task_name.description, "Task name for the new subagent. Use lowercase letters, digits, and underscores. Unique in the parent session.");
     assert.ok(spawn.parameters.properties.message.description.includes("Self-contained task: context, paths, constraints, and expected output"));
-    assert.ok(spawn.parameters.properties.agent_type.description.includes("omit for a generic subagent"));
+    assert.equal(spawn.parameters.properties.agent_type.description, "Name of a listed template. Omit to spawn without a template.");
     const wait = f.tools.get("wait_agent");
     assert.deepEqual(Object.keys(wait.parameters.properties), ["timeout_ms"]);
     assert.ok(wait.description.includes("completion or error notification from any subagent"));
