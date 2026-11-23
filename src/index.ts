@@ -643,12 +643,12 @@ ${getAgentDefinitionsDescription()}`;
     name: 'wait_agent',
     label: 'Wait Agent',
     description:
-      'Wait for a subagent notification, input, or timeout. Returns message and timed_out, not content. Use only when blocked; canceling does not stop agents. When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.',
+      'Wait for a completion or error notification from any subagent. The wait also ends early when new input arrives in the parent session. Does not return the content; returns either a notification acknowledgment, an interruption summary for new input, or a timeout summary if no activity arrives before the deadline. When calling wait_agent, prefer longer waits (minutes) to avoid busy polling.',
     parameters: Type.Object(
       {
         timeout_ms: Type.Optional(
           Type.Union([Type.Integer(), Type.Null()], {
-            description: `Timeout in ms. Default ${DEFAULT_WAIT_TIMEOUT_MS} (omitted/null); min ${MIN_WAIT_TIMEOUT_MS} (clamped); max ${MAX_WAIT_TIMEOUT_MS}.`,
+            description: `Timeout in milliseconds. Defaults to ${DEFAULT_WAIT_TIMEOUT_MS}, min ${MIN_WAIT_TIMEOUT_MS}, max ${MAX_WAIT_TIMEOUT_MS}.`,
           }),
         ),
       },
@@ -705,15 +705,14 @@ ${getAgentDefinitionsDescription()}`;
   pi.registerTool({
     name: 'list_agents',
     label: 'List Agents',
-    description:
-      'List resident subagents in this session, including initializing and idle ones, with their latest status and any final text or error.',
+    description: 'List resident subagents in this session. Optionally filter by task-path prefix.',
     parameters: Type.Object(
       {
         path_prefix: Type.Optional(
           Type.String({
             pattern: TASK_PATH_PATTERN,
             description:
-              'Relative task-name prefix (no trailing slash). Matches whole segments; omit for all.',
+              'Task-path prefix filter without a trailing slash. Omit to list all resident agents.',
           }),
         ),
       },
@@ -823,9 +822,9 @@ ${getAgentDefinitionsDescription()}`;
     name: 'interrupt_agent',
     label: 'Interrupt Agent',
     description:
-      'Request cooperative cancellation of the current run (no rollback). History can be resumed with send_message after cleanup.',
+      "Interrupt an agent's current run, if any. The agent remains available for messages and follow-up tasks.",
     parameters: Type.Object({
-      target: Type.String({ description: 'Current-session agent name, e.g. review.' }),
+      target: Type.String({ description: 'Current-session task name to interrupt (from spawn_agent).' }),
     }),
     async execute(
       _id: string,

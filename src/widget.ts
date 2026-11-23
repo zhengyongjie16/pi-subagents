@@ -38,18 +38,6 @@ class AgentSpinner extends Loader {
     return this.getRenderedIndicator();
   }
 }
-// Exact Pi built-in names (including native codemode) get labels; other names stay dynamic.
-const BUILTIN_TOOL_ACTIONS = new Map([
-  ['read', 'reading'],
-  ['write', 'writing'],
-  ['edit', 'editing'],
-  ['bash', 'running command'],
-  ['powershell', 'running command'],
-  ['grep', 'searching'],
-  ['find', 'finding files'],
-  ['ls', 'listing'],
-  ['codemode', 'using codemode'],
-]);
 
 type WidgetComponent = Component & { dispose(): void };
 interface Mount {
@@ -69,16 +57,11 @@ function preview(value: string | undefined): string | undefined {
         .find(Boolean);
 }
 
-function activity(snapshot: AgentWidgetSnapshot): string {
+function activity(snapshot: AgentWidgetSnapshot): string | undefined {
   if (snapshot.status === 'pending_init') return 'initializing…';
-  if (snapshot.activeTools.length) {
-    const actions = snapshot.activeTools.map((name) => {
-      const cleanName = sanitize(name);
-      return BUILTIN_TOOL_ACTIONS.get(cleanName) ?? (cleanName || 'using tool');
-    });
-    return [...new Set(actions)].join(', ') + '…';
-  }
-  return preview(snapshot.responsePreview) ?? 'thinking…';
+  const names = snapshot.activeTools.map(sanitize).filter(Boolean);
+  if (names.length) return [...new Set(names)].join(', ') + '...';
+  return preview(snapshot.responsePreview);
 }
 
 // Native truncation can add reset escapes even to plain text; do not feed those into a theme.
@@ -408,7 +391,14 @@ export class AgentSummaryWidget {
         const snapshot = this.snapshots[index];
         const color = resolveAgentColor(snapshot.color);
         lines.push(agentHeader(snapshot, width, prefix, theme, color));
-        lines.push(paint(theme, 'dim', (last ? '   ' : '│  ') + '  └─ ' + activity(snapshot)));
+        const branch = (last ? '   ' : '│  ') + '  └─ ';
+        const detail = activity(snapshot);
+        const thinkingLabel = 'Thinking...';
+        lines.push(
+          detail === undefined && theme?.italic
+            ? theme.fg('dim', branch) + theme.italic(theme.fg('thinkingText', thinkingLabel))
+            : paint(theme, 'dim', branch + (detail ?? thinkingLabel)),
+        );
       }
       if (hidden) lines.push(paint(theme, 'dim', `└─ +${hidden} more · /subagents`));
       const fitted = lines.map((line) => truncateToWidth(line, width, '…'));

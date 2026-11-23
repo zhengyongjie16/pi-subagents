@@ -21,12 +21,12 @@ A summary above the editor shows agent counts and active work:
 ```text
 ● Agents · 2 running · 3 completed · 1 errored · 1 interrupted · /subagents to view details
 ├─ ⠹ review-auth · openai-codex/gpt-6.1-sol/max · 33.8k token (62% · ↓1) · 12s
-│    └─ reading…
+│    └─ read...
 └─ ⠹ tests · anthropic/claude-sonnet-4-6/high · 8.2k token (12%) · 4s
-     └─ thinking…
+     └─ Thinking...
 ```
 
-Each active row shows the model, thinking level, elapsed time, and current activity. Counts reflect each agent's latest run. Agents in `pending_init` count as `running` and show `initializing…` as their activity. `token` is cumulative assistant usage (`input + output + cacheWrite`), not current context size or a billing total; the percentage shows context occupancy, and `↓1` means one compaction.
+Each active row shows the model, thinking level, elapsed time, and current activity. Tool activity uses the names reported by Pi and shows the innermost active calls on each branch. Counts reflect each agent's latest run. Agents in `pending_init` count as `running` and show `initializing…` as their activity. `token` is cumulative assistant usage (`input + output + cacheWrite`), not current context size or a billing total; the percentage shows context occupancy, and `↓1` means one compaction.
 
 ### Browser and live overlay
 

@@ -125,6 +125,45 @@ describe('observer stream reconstruction', () => {
     expect(active.size).toBe(0);
   });
 
+  test('widget shows active nested leaves and cleans up a finished branch', () => {
+    const broadcaster = new EventBroadcaster(randomUUID());
+    const start = (toolCallId: string, toolName: string, parentToolCallId?: string) =>
+      broadcaster.broadcast({ type: 'tool_execution_start', toolCallId, toolName, parentToolCallId });
+    const end = (toolCallId: string, parentToolCallId?: string) =>
+      broadcaster.broadcast({ type: 'tool_execution_end', toolCallId, parentToolCallId, isError: true });
+    const names = () => broadcaster.getWidgetActivity().activeTools;
+
+    start('script', 'codemode');
+    start('top/read', 'read');
+    start('orphan/1', 'not_visible', 'orphan');
+    expect(names()).toEqual(['codemode', 'read']);
+    start('script/1', 'fffind', 'script');
+    start('script/2', 'fffind', 'script');
+    expect(names()).toEqual(['fffind', 'fffind', 'read']);
+    end('script/2', 'script');
+    expect(names()).toEqual(['fffind', 'read']);
+    start('script/1/1', 'mcp__files__lookup', 'script/1');
+    expect(names()).toEqual(['mcp__files__lookup', 'read']);
+    end('script/1/1', 'script/1');
+    expect(names()).toEqual(['fffind', 'read']);
+    end('script/1', 'script');
+    expect(names()).toEqual(['codemode', 'read']);
+
+    start('script/3', 'wrapper', 'script');
+    start('script/3/1', 'fffind', 'script/3');
+    end('script'); // The wrapper can finish before its nested calls drain.
+    expect(names()).toEqual(['read']);
+    start('script/4', 'detached_tool', 'script');
+    start('script', 'codemode');
+    expect(names()).toEqual(['codemode', 'read']);
+    start('script/3', 'wrapper', 'script');
+    expect(names()).toEqual(['wrapper', 'read']);
+    broadcaster.broadcast({ type: 'agent_settled', aborted: true });
+    expect(names()).toEqual([]);
+    start('script', 'codemode');
+    expect(names()).toEqual(['codemode']);
+  });
+
   test('widget activity retains bounded final text through tool results and clears it on user/settled', () => {
     const broadcaster = new EventBroadcaster(randomUUID());
     const final = assistant([
@@ -5952,7 +5991,7 @@ describe('observer broadcast', () => {
   };
   const nested = (event: any, parentToolCallId: string) => ({ ...event, parentToolCallId });
 
-  test('filters parallel nested notifications before state changes and preserves parent progress/results', async () => {
+  test('filters parallel nested notifications from observer state and preserves parent progress/results', async () => {
     const parent = start('parent');
     const partialResult = {
       ...textResult('script is running'),
@@ -7162,6 +7201,31 @@ describe('SDK acceptance and observer edge cases', () => {
       expect(manager.getAgentInfo('worker', parent).finalResponse).toBeUndefined();
     } finally {
       prompt?.mockRestore();
+      await manager.shutdown();
+    }
+  });
+
+  test('native codemode shows the executing extension tool in the widget but not as an observer row', async () => {
+    writeConfig({ extensions: [CORE_SDK_EXTENSION, '+codemode'] });
+    fixture.toolCall = {
+      name: 'codemode',
+      arguments: { code: 'await tools.fixture_hold({});' },
+    };
+    const parent = 'nested-widget-' + randomUUID();
+    const manager = new AgentManager();
+    try {
+      await manager.spawnAgent(spawnParams(parent, 'worker', 'tool hold in codemode'));
+      const info = manager.getAgentInfo('worker', parent);
+      await waitUntil(() => fixture.instances[0].activeTools === 1, 15000);
+      expect(manager.getWidgetSnapshot(parent)[0].activeTools).toEqual(['fixture_hold']);
+      const [sync] = await readSocketEvents(getSocketPath(info.id), 1);
+      expect(sync.activeTools.map((tool: any) => tool.toolName)).toEqual(['codemode']);
+
+      await manager.interruptAgent(parent, 'worker');
+      await settled(manager, info);
+      expect(manager.getAgentInfo('worker', parent).status).toBe('interrupted');
+      expect(manager.getWidgetSnapshot(parent)).toEqual([]);
+    } finally {
       await manager.shutdown();
     }
   });

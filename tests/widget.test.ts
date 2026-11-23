@@ -350,7 +350,7 @@ describe('summary content', () => {
     expect(lines[0]).toBe('● Agents · 1 running · /subagents to view details');
     expect(lines[1]).toContain('worker · openai-codex/gpt-6.1-sol/max');
     expect(lines[1]).toContain('33.8k token (62% · ↓1) · 12s');
-    expect(lines[2]).toContain('reading, editing…');
+    expect(lines[2]).toContain('read, edit...');
     expect(lines.join('\n')).not.toMatch(/thinking:|hidden while|turns|tool use|cost|\$/);
     expect(errors).not.toHaveBeenCalled();
     expect(f.setWidget.mock.calls[0][0]).toBe('pi-subagents');
@@ -388,7 +388,7 @@ describe('summary content', () => {
     }
   });
 
-  test('activity prefers initializing, then deduplicated tool actions, then the first public line, then thinking', () => {
+  test('activity prefers initializing, then deduplicated tool names, then the first public line, then thinking', () => {
     let agent = snapshot();
     const f = host();
     const widget = controller(() => [agent]);
@@ -398,14 +398,14 @@ describe('summary content', () => {
         { status: 'pending_init', activeTools: ['read'], responsePreview: 'not yet' },
         'initializing…',
       ],
-      [{ activeTools: ['bash', 'powershell', 'read', 'read'] }, 'running command, reading…'],
-      [{ activeTools: ['\x1b[31mmcp__search\x1b[0m\x07\nname'] }, 'mcp__search name…'],
+      [{ activeTools: ['bash', 'powershell', 'read', 'read'] }, 'bash, powershell, read...'],
+      [{ activeTools: ['\x1b[31mmcp__search\x1b[0m\x07\nname'] }, 'mcp__search name...'],
       [
         { responsePreview: '\n\x1b[31m\x1b[0m\n  First public line  \r\nDO NOT SHOW SECOND' },
         'First public line',
       ],
-      [{ responsePreview: '\n  \t\n' }, 'thinking…'],
-      [{}, 'thinking…'],
+      [{ responsePreview: '\n  \t\n' }, 'Thinking...'],
+      [{}, 'Thinking...'],
     ] as const) {
       agent = snapshot(extra as Partial<AgentWidgetSnapshot>);
       widget.refresh();
@@ -415,6 +415,33 @@ describe('summary content', () => {
     expect(f.setWidget).toHaveBeenCalledTimes(1);
     expect(clock!.timers.size).toBe(2);
   });
+
+  test.each(['dark', 'light'] as const)(
+    'only the waiting placeholder uses Pi thinking color and italics in the %s theme',
+    (appearance) => {
+      const theme = nativeTheme(appearance);
+      const branch = '     └─ ';
+      const label = 'Thinking...';
+      const colored = theme.fg('thinkingText', label);
+      const styled = theme.italic(colored);
+      const italic = spyOn(theme, 'italic');
+      try {
+        let agent = snapshot();
+        const f = host({ theme });
+        const widget = controller(() => [agent]);
+        widget.attach(f.ctx);
+        expect(f.render()[2]).toBe(theme.fg('dim', branch) + styled);
+        expect(italic).toHaveBeenCalledWith(colored);
+        expectFit(f.render(15), 15);
+
+        agent = snapshot({ responsePreview: label });
+        widget.refresh();
+        expect(f.render()[2]).toBe(theme.fg('dim', branch + label));
+      } finally {
+        italic.mockRestore();
+      }
+    },
+  );
 
   test.each([
     ['pending_init', 'initializing'],
@@ -435,34 +462,21 @@ describe('summary content', () => {
     expect(f.text(14).split('\n')[1]).toBe('a ' + label);
   });
 
-  test('exact Pi built-in tool names, including native codemode, use short action labels', () => {
-    let agent = snapshot();
-    const f = host();
-    const widget = controller(() => [agent]);
-    widget.attach(f.ctx);
-    for (const [name, label] of [
-      ['read', 'reading'],
-      ['write', 'writing'],
-      ['edit', 'editing'],
-      ['bash', 'running command'],
-      ['powershell', 'running command'],
-      ['grep', 'searching'],
-      ['find', 'finding files'],
-      ['ls', 'listing'],
-      ['codemode', 'using codemode'],
-    ]) {
-      agent = snapshot({ activeTools: [name] });
-      widget.refresh();
-      expect(f.render()[2]).toEndWith(label + '…');
-    }
-  });
-
-  test('extension tools display their dynamic SDK names without aliases, case folding, or namespace parsing', () => {
+  test('built-in and extension tools display their SDK names without aliases, case folding, or namespace parsing', () => {
     let agent = snapshot();
     const f = host();
     const widget = controller(() => [agent]);
     widget.attach(f.ctx);
     for (const name of [
+      'read',
+      'write',
+      'edit',
+      'bash',
+      'powershell',
+      'grep',
+      'find',
+      'ls',
+      'codemode',
       'ffgrep',
       'fffind',
       'spawn_agent',
@@ -484,13 +498,13 @@ describe('summary content', () => {
     ]) {
       agent = snapshot({ activeTools: [name] });
       widget.refresh();
-      expect(f.render()[2]).toEndWith(name + '…');
+      expect(f.render()[2]).toEndWith(name + '...');
     }
     agent = snapshot({
       activeTools: ['grep', 'ffgrep', 'Read', 'Read', 'codemode', 'mcp__files__read'],
     });
     widget.refresh();
-    expect(f.render()[2]).toEndWith('searching, ffgrep, Read, using codemode, mcp__files__read…');
+    expect(f.render()[2]).toEndWith('grep, ffgrep, Read, codemode, mcp__files__read...');
   });
 
   test('missing metadata is omitted and model IDs are never reverse-parsed', () => {
@@ -1022,14 +1036,14 @@ describe('layout budgets', () => {
       expect(lines).toHaveLength(count <= 5 ? 1 + count * 2 : 12);
       expect(lines[0]).toBe(`● Agents · ${count} running · /subagents to view details`);
       expectFit(lines, 120);
-      if (count > 1) expect(lines[2]).toBe('│    └─ thinking…');
+      if (count > 1) expect(lines[2]).toBe('│    └─ Thinking...');
       if (count > 5) {
         expect(lines[11]).toBe(`└─ +${count - 5} more · /subagents`);
         expect(lines[9]).toContain('worker4');
         expect(lines.join('\n')).not.toContain('worker5');
       } else {
         expect(lines.at(-2)!).toStartWith('└─');
-        expect(lines.at(-1)!).toBe('     └─ thinking…');
+        expect(lines.at(-1)!).toBe('     └─ Thinking...');
       }
     }
   });

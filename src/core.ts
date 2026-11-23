@@ -1094,6 +1094,7 @@ export class EventBroadcaster {
   private readonly assistantStream = new RpcAssistantStreamState();
   private userMessage: any = null;
   private responsePreview?: string;
+  private readonly widgetChildTools = new Map<string, Map<string, string>>();
   private readonly activeTools = new Map<
     string,
     {
@@ -1168,14 +1169,31 @@ export class EventBroadcaster {
     }
   }
 
-  /** Reuse observer activity without opening a socket or exposing mutable tool state. */
+  /** Show the active leaves of each top-level call without changing observer rows. */
   getWidgetActivity(): Pick<AgentWidgetSnapshot, 'activeTools' | 'responsePreview'> {
+    const activeTools: string[] = [];
+    const addLeaves = (id: string, name: string) => {
+      const children = this.widgetChildTools.get(id);
+      if (children?.size) {
+        for (const [childId, childName] of children) addLeaves(childId, childName);
+      } else {
+        activeTools.push(name);
+      }
+    };
+    for (const tool of this.activeTools.values()) {
+      if (tool.result === undefined) addLeaves(tool.toolCallId, tool.toolName);
+    }
     return {
-      activeTools: [...this.activeTools.values()]
-        .filter((tool) => tool.result === undefined)
-        .map((tool) => tool.toolName),
+      activeTools,
       responsePreview: this.assistantStream.textPreview ?? this.responsePreview,
     };
+  }
+
+  private clearWidgetChildren(parentId: string): void {
+    const children = this.widgetChildTools.get(parentId);
+    if (!children) return;
+    this.widgetChildTools.delete(parentId);
+    for (const id of children.keys()) this.clearWidgetChildren(id);
   }
 
   broadcast(event: any): void {
@@ -1184,8 +1202,26 @@ export class EventBroadcaster {
       event.type === 'tool_execution_update' ||
       event.type === 'tool_execution_end';
 
-    // Only top-level calls get observer rows; parents carry nested progress in their own results.
-    if (isToolExecution && event.parentToolCallId) return;
+    // Only the widget tracks nested calls; observer rows carry progress in the parent's results.
+    if (isToolExecution && event.parentToolCallId) {
+      const { parentToolCallId, toolCallId } = event;
+      if (event.type === 'tool_execution_start') {
+        let children = this.widgetChildTools.get(parentToolCallId);
+        if (!children) {
+          const parent = this.activeTools.get(parentToolCallId);
+          if (!parent || parent.result !== undefined) return;
+          this.widgetChildTools.set(parentToolCallId, (children = new Map()));
+        }
+        children.set(toolCallId, event.toolName);
+        this.widgetChildTools.set(toolCallId, new Map());
+      } else if (
+        event.type === 'tool_execution_end' &&
+        this.widgetChildTools.get(parentToolCallId)?.delete(toolCallId)
+      ) {
+        this.clearWidgetChildren(toolCallId);
+      }
+      return;
+    }
 
     if (event.type === 'message_start' && event.message?.role === 'user') {
       this.userMessage = event.message;
@@ -1212,6 +1248,8 @@ export class EventBroadcaster {
     } else if (event.type === 'tool_execution_end' && event.toolCallId) {
       const active = this.activeTools.get(event.toolCallId);
       if (active) {
+        // A tool can return before its nested calls have drained.
+        this.clearWidgetChildren(event.toolCallId);
         active.result = {
           ...event.result,
           durationMs: event.durationMs ?? event.result?.durationMs,
@@ -1235,6 +1273,7 @@ export class EventBroadcaster {
       this.responsePreview = undefined;
       this.userMessage = null;
       this.activeTools.clear();
+      this.widgetChildTools.clear();
       this.status = 'done';
       this.toolName = undefined;
     }

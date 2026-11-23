@@ -94,6 +94,7 @@ interface CoreFixtureOptions {
   startupGate?: Promise<void>;
   shutdownGate?: Promise<void>;
   responseGate?: Promise<void>;
+  toolCall?: { name: string; arguments: Record<string, unknown> };
   ignoreAbort?: boolean;
   shutdownAtStart?: boolean;
   onLoad?: (pi: ExtensionAPI) => void;
@@ -243,8 +244,7 @@ export default function coreSdkFixture(pi: ExtensionAPI) {
               const toolCall = {
                 type: 'toolCall' as const,
                 id: 'fixture-call',
-                name: 'fixture_hold',
-                arguments: {},
+                ...(state.toolCall ?? { name: 'fixture_hold', arguments: {} }),
               };
               message.content.push(toolCall);
               message.stopReason = 'toolUse';

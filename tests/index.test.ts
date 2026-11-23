@@ -296,19 +296,18 @@ test('keeps model-facing guidance compact without losing async contracts', () =>
     assert.ok(spawn.parameters.properties.agent_type.description.includes("omit for a generic subagent"));
     const wait = f.tools.get("wait_agent");
     assert.deepEqual(Object.keys(wait.parameters.properties), ["timeout_ms"]);
-    assert.ok(wait.description.includes("input"));
-    assert.ok(wait.description.includes("notification"));
-    assert.ok(wait.description.includes("message and timed_out, not content"));
-    assert.ok(wait.description.includes("Use only when blocked"));
-    assert.ok(wait.description.includes("does not stop agents"));
-    assert.match(wait.description, /prefer.*waits.*minutes.*avoid.*polling/i);
+    assert.ok(wait.description.includes("completion or error notification from any subagent"));
+    assert.ok(wait.description.includes("new input arrives in the parent session"));
+    assert.ok(wait.description.includes("Does not return the content; returns either a notification acknowledgment"));
+    assert.ok(wait.description.includes("When calling wait_agent, prefer longer waits (minutes) to avoid busy polling."));
     assert.ok(f.tools.get("send_message").description.includes("input acceptance, not completion"));
-    assert.ok(f.tools.get("interrupt_agent").description.includes("cooperative cancellation"));
+    const interrupt = f.tools.get("interrupt_agent");
+    assert.equal(interrupt.description, "Interrupt an agent's current run, if any. The agent remains available for messages and follow-up tasks.");
+    assert.equal(interrupt.parameters.properties.target.description, "Current-session task name to interrupt (from spawn_agent).");
     const list = f.tools.get("list_agents");
-    for (const term of ["resident", "session", "initializing", "idle"]) assert.ok(list.description.includes(term), term);
-    assert.match(list.description, /final text.*error/i);
+    assert.equal(list.description, "List resident subagents in this session. Optionally filter by task-path prefix.");
     assert.deepEqual(Object.keys(list.parameters.properties), ["path_prefix"]);
-    assert.match(list.parameters.properties.path_prefix.description, /relative task-name prefix.*omit/i);
+    assert.equal(list.parameters.properties.path_prefix.description, "Task-path prefix filter without a trailing slash. Omit to list all resident agents.");
     const checkBudget = () => {
       let chars = 0;
       for (const tool of f.tools.values()) {
@@ -943,9 +942,7 @@ test('validates timeout-only arguments and clamps the minimum with a test-local 
     await extension(f.pi);
     await f.emit("session_start");
     const tool = f.tools.get("wait_agent");
-    const guidance = tool.description + " " + JSON.stringify(tool.parameters);
-    for (const value of ["30000", "10000", "3600000"]) assert.ok(guidance.replaceAll(",", "").includes(value), "document timeout boundary " + value);
-    assert.match(guidance, /rais|clamp|minimum/i, "explain that low, zero and negative timeouts are raised");
+    assert.equal(tool.parameters.properties.timeout_ms.description, "Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000.");
     assert.equal(Value.Check(tool.parameters, {}), true);
     assert.equal(Value.Check(tool.parameters, { timeout_ms: null }), true);
     for (const timeout_ms of [-100, 0, 1, 9999, 10000])
@@ -1362,7 +1359,7 @@ test('updates live model summaries without messages, focus changes, or repeated 
     assert.ok(text.includes("openai-codex/gpt-6.1-sol/max"));
     assert.ok(text.includes("33.8k token (62% · ↓1)"));
     assert.ok(text.includes("12s"));
-    assert.ok(text.includes("reading"));
+    assert.match(text, /└─ read\.\.\.$/m);
     assert.ok(!text.includes("PRIVATE TASK") && !text.includes("tool use") && !text.includes("↻"));
     const mounted = factories().length;
     assert.equal(mounted, 1);
