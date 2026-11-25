@@ -4,9 +4,17 @@ Session-scoped subagents for [Pi](https://github.com/earendil-works/pi), with ba
 
 This extension originated as a fork of [pi-codex-subagents](https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-codex-subagents). Following extensive refactoring, it is now maintained in a standalone repository, as there is no longer a need to track upstream updates. The original project is an excellent project.
 
-Requires **Pi 1.1.0 or newer** and **Node.js 22.19 or newer**. Pi supplies the SDK and UI packages. For development, use the latest Pi release.
+Requires **Pi 1.5.1 or newer** and **Node.js 22.19 or newer**. Pi supplies the SDK and UI packages. For development, use the latest Pi release.
 
 ## Install
+
+Install from npm (recommended):
+
+```bash
+pi install npm:@zhengyongjie16/pi-subagents
+```
+
+Alternatively, install from GitHub:
 
 ```bash
 pi install git:github.com/zhengyongjie16/pi-subagents@main
@@ -34,35 +42,35 @@ Each active row shows the model, thinking level, elapsed time, and current activ
 
 Enter opens details over the existing browser without closing it. Esc or q in details closes only the overlay and returns focus to the same list and selected agent; Esc or q in the browser exits it. The live overlay shows conversation and tool activity, including output already streaming when opened. Tool results use Pi's native collapsed previews and the child's working directory. These views are available in interactive TUI mode.
 
-| View | Keys | Action |
-| --- | --- | --- |
-| Browser | Enter / r | Open an agent / refresh the list |
-| Overlay | Left / Right | Cycle through current-session agents in browser order (Active, then Done) |
-| Overlay | g / G | Jump to the top / follow the latest output |
-| Both | Up / Down or j / k | Move selection or scroll output |
-| Both | q / Esc | Close the view |
+| View    | Keys               | Action                                                                    |
+| ------- | ------------------ | ------------------------------------------------------------------------- |
+| Browser | Enter / r          | Open an agent / refresh the list                                          |
+| Overlay | Left / Right       | Cycle through current-session agents in browser order (Active, then Done) |
+| Overlay | g / G              | Jump to the top / follow the latest output                                |
+| Both    | Up / Down or j / k | Move selection or scroll output                                           |
+| Both    | q / Esc            | Close the view                                                            |
 
 An optional `shortcut` setting opens the browser directly; no shortcut is assigned by default.
 
 ## Tools
 
-| Tool | Purpose |
-| --- | --- |
-| `spawn_agent` | Start fresh-context background work |
-| `wait_agent` | Wait for new input, an agent notification, or a timeout; return a message and `timed_out` |
-| `list_agents` | List current-session resident subagents and their latest run results without waiting |
-| `send_message` | Steer active work or continue a saved session |
-| `interrupt_agent` | Request cooperative cancellation while preserving history |
+| Tool              | Purpose                                                                                   |
+| ----------------- | ----------------------------------------------------------------------------------------- |
+| `spawn_agent`     | Start fresh-context background work                                                       |
+| `wait_agent`      | Wait for new input, an agent notification, or a timeout; return a message and `timed_out` |
+| `list_agents`     | List current-session resident subagents and their latest run results without waiting      |
+| `send_message`    | Steer active work or continue a saved session                                             |
+| `interrupt_agent` | Request cooperative cancellation while preserving history                                 |
 
 ## Agent templates
 
 Three built-in templates are available without creating any template files:
 
-| Template | Purpose |
-| --- | --- |
-| `explorer` | Focused codebase questions and independent exploration |
-| `general` | General-purpose work |
-| `worker` | Implementation, fixes, and refactoring; its task prefix reminds it to preserve others' edits |
+| Template   | Purpose                                                                                      |
+| ---------- | -------------------------------------------------------------------------------------------- |
+| `explorer` | Focused codebase questions and independent exploration                                       |
+| `general`  | General-purpose work                                                                         |
+| `worker`   | Implementation, fixes, and refactoring; its task prefix reminds it to preserve others' edits |
 
 Built-ins do not pin a provider, model, thinking level, tools, or extensions; they follow the normal inheritance rules below. None sets a fixed `color`. Omitting `agent_type` still creates a generic subagent, without applying `general` or another template.
 
@@ -123,16 +131,16 @@ Optional settings live in `~/.pi/agent/pi-subagents/config.json`:
 }
 ```
 
-| Setting | Default | Purpose |
-| --- | --- | --- |
-| `storageDir` | `~/.pi/agent/pi-subagents/runs` | Run history; accepts absolute, home-relative, or config-directory-relative paths |
-| `retentionDays` | `14` | Remove expired inactive runs and saved outputs at manager startup; `0` disables cleanup |
-| `maxAgents` | `5` | Shared resident-session cap per `AgentManager`, excluding the main agent |
-| `modelResponseTimeoutMs` | `600000` | Per-assistant-response timeout, excluding tools and total task runtime; `0` disables it |
-| `shortcut` | Unbound | Browser shortcut, for example `ctrl+shift+a` |
-| `models` | None | Exact `provider/model-id` pairs allowed for per-task model overrides |
-| `modelsFromEnabledModels` | `false` | Add Pi's scoped models from `enabledModels` and `--models` |
-| `extensions` | None | Extensions used unless a template supplies a non-empty replacement list |
+| Setting                   | Default                         | Purpose                                                                                 |
+| ------------------------- | ------------------------------- | --------------------------------------------------------------------------------------- |
+| `storageDir`              | `~/.pi/agent/pi-subagents/runs` | Run history; accepts absolute, home-relative, or config-directory-relative paths        |
+| `retentionDays`           | `14`                            | Remove expired inactive runs and saved outputs at manager startup; `0` disables cleanup |
+| `maxAgents`               | `5`                             | Shared resident-session cap per `AgentManager`, excluding the main agent                |
+| `modelResponseTimeoutMs`  | `600000`                        | Per-assistant-response timeout, excluding tools and total task runtime; `0` disables it |
+| `shortcut`                | Unbound                         | Browser shortcut, for example `ctrl+shift+a`                                            |
+| `models`                  | None                            | Exact `provider/model-id` pairs allowed for per-task model overrides                    |
+| `modelsFromEnabledModels` | `false`                         | Add Pi's scoped models from `enabledModels` and `--models`                              |
+| `extensions`              | None                            | Extensions used unless a template supplies a non-empty replacement list                 |
 
 `maxAgents` must be a positive safe integer; invalid values, including `0`, cause a configuration error. Legacy `maxIdleSessions` is ignored with a migration warning; replace it with `maxAgents`. The old `maxIdleSessions: 0` close-after-each-run mode is no longer supported.
 

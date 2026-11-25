@@ -3,6 +3,11 @@
   "version": "0.5.0",
   "description": "Session-scoped subagents for Pi with templates, waits, steering, and a live overlay.",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhengyongjie16/pi-subagents.git"
+  },
   "keywords": [
     "pi-package",
     "pi-extension",
