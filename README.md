@@ -11,7 +11,7 @@ Requires **Pi 1.5.1 or newer** and **Node.js 22.19 or newer**. Pi supplies the S
 Install from npm (recommended):
 
 ```bash
-pi install npm:@zhengyongjie16/pi-subagents
+pi install npm:@ulysseszh/pi-subagents
 ```
 
 Alternatively, install from GitHub:
